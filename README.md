@@ -1,31 +1,35 @@
 # Xenon
 
-A fast, minimal database client. Rust + GPUI. By Carbon Software.
+A fast, minimal database client for Postgres and SQLite. Native, written in Rust with
+[GPUI](https://gpui.rs). By Carbon Software.
 
-Early prototype. See [PLAN.md](PLAN.md).
+![Browsing a table in Xenon](docs/screenshots/browse.png)
 
-## Run
+- **Native and quick.** First frame in about 0.2 s; 100,000-row results scroll smoothly.
+- **Keyboard first, never keyboard only.** `⌘K` jumps to any table or command; every action
+  also has a button or menu item.
+- **Safe by default.** Saved connections carry a development / production label and an optional
+  read-only mode the database enforces. Risky statements ask first; on production you type the
+  connection's name to go ahead. Passwords live in the macOS Keychain.
+- **Postgres and SQLite**, with TLS (every libpq `sslmode`), cancel, exact numbers, query plans.
 
-```sh
-cargo run -p xenon                     # empty window
-cargo run -p xenon -- path/to/file.db  # open a SQLite database
-cargo run -p xenon -- "postgres://user:pass@localhost/db?sslmode=require"
-```
+Version 0.1, early. See [PLAN.md](PLAN.md) for what's next.
 
-In the app: `⌘O` opens a SQLite file (or drop one on the window), `⌘N` connects to Postgres.
+## Install
 
-Connections can be saved with a name, an environment (development / production) and read-only
-access. Passwords go in the macOS Keychain, never on disk. Saved connections and recent SQLite
-files are listed under **Saved** in the explorer (✎ to edit, ✕ to remove).
+Download `Xenon-0.1.0.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
+drag Xenon to Applications. This build isn't notarized yet, so the first time, right-click the
+app and choose **Open**.
 
-Safety: read-only connections are enforced by the database itself. A statement that drops,
-truncates or alters, or updates/deletes with no `WHERE`, asks before running; on a production
-connection every write asks, and you type the connection's name to go ahead.
+Requires macOS 12 or later.
 
-Requires macOS with Xcode (for Metal) and Rust 1.85+ (edition 2024).
+## Use
 
-To build a proper app with its icon, `./scripts/bundle-macos.sh` creates `target/release/Xenon.app`
-(drag it to /Applications). The icon is drawn by `assets/icon/make-icon.swift`.
+Open a SQLite file with `⌘O` (or drop it on the window), or connect to Postgres with `⌘N`:
+paste a `postgres://` URL or fill in the fields, then **Test** and **Connect**. Saved connections
+and recent files are listed under **Saved** in the explorer (✎ to edit, ✕ to remove).
+
+![The command palette](docs/screenshots/palette.png)
 
 | Shortcut | Action |
 |---|---|
@@ -42,17 +46,34 @@ To build a proper app with its icon, `./scripts/bundle-macos.sh` creates `target
 | `⇧⌘E` | Explorer |
 | `⌘B` | Toggle side panel |
 | `⌘I` | Toggle inspector |
-| `⌘Q` | Quit |
 
-In the results grid: click a cell, shift-click or `⇧`+arrows to select a block, arrows to move,
-`⌘A` all, `⌘C` copy (TSV, pastes into spreadsheets), `⇧⌘C` CSV, `⌥⌘C` JSON, `Esc` back to the
-editor. Click a header to sort (browse tabs sort on the server), drag a header edge to resize,
-double-click it to fit. Browse tabs have a `WHERE` filter.
+**Results grid:** click a cell, shift-click or `⇧`+arrows to select a block, arrows to move, `⌘A`
+for everything. `⌘C` copies as TSV (pastes into spreadsheets), `⇧⌘C` as CSV, `⌥⌘C` as JSON. Click
+a header to sort; drag a header's edge to resize, double-click it to fit. `Esc` returns to the
+editor.
 
-Drag the line under the editor to resize it (double-click to reset). When Postgres reports where a
-query failed, the cursor jumps there. View → Theme switches between System, Light and Dark.
+**Browsing a table** (click it in the explorer) opens it in its own tab with a `WHERE` filter;
+sorting there runs on the server, so you see the true top rows.
 
-Double-click the title bar to zoom the window.
+**Also:** drag the line under the editor to resize it (double-click to reset); when Postgres says
+where a query failed, the cursor jumps there; View → Theme picks System, Light or Dark; double-click
+the title bar to zoom.
+
+## Build from source
+
+Needs macOS with Xcode (for Metal) and Rust 1.85+.
+
+```sh
+cargo run -p xenon                     # empty window
+cargo run -p xenon -- path/to/file.db  # open a SQLite database
+cargo run -p xenon -- "postgres://user:pass@localhost/db?sslmode=require"
+
+./scripts/bundle-macos.sh              # target/release/Xenon.app and Xenon-<version>.dmg
+```
+
+The bundle script signs with your "Developer ID Application" certificate when one is in the
+keychain, and notarizes when `XENON_NOTARY_PROFILE` names a `notarytool` profile.
+`XENON_TRACE=1` prints startup and query timings.
 
 ## Tests
 
@@ -62,4 +83,7 @@ cargo test --workspace
 XENON_TEST_PG_URL="postgres://postgres:secret@localhost:5432/postgres" cargo test -p xenon_postgres
 ```
 
-Fonts: Archivo and IBM Plex Mono, bundled under the SIL Open Font License (`assets/fonts`).
+## Credits
+
+Fonts: Archivo and IBM Plex Mono, under the SIL Open Font License (`assets/fonts`). UI built on
+[GPUI](https://gpui.rs) and [gpui-component](https://github.com/longbridge/gpui-kit).

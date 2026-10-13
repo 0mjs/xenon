@@ -104,7 +104,7 @@ render immediately is still to do.
 | M3 ✅ | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
 | M4 ✅ | **Grid polish** | Content-sized columns (stripes run to the edge), drag to resize, double-click to fit, copy as TSV/CSV/JSON, table browser with sort/filter, Run/Explain toolbar. Richer per-type rendering (JSON, timestamps) moves to M5 |
 | M5 ✅ | **Feel** | Command palette, keybindings, light/dark, empty states, error UX, perf pass |
-| M6 | **Ship v0.1** | Signed macOS build, README, screenshots, GitHub release |
+| M6 ✅ | **Ship v0.1** | `Xenon-0.1.0.dmg`, README with screenshots, GitHub release. Signed ad hoc until a Developer ID Application certificate exists; notarization is wired into `scripts/bundle-macos.sh` |
 
 Start with SQLite (M1) — no server needed, fastest path to a working loop.
 
@@ -169,12 +169,14 @@ outlined. Env tags are 1 px outlined mono caps. Errors: left danger border, erro
 
 ## Performance budgets
 
-| Metric | Target |
-|---|---|
-| Cold start to interactive | < 300 ms |
-| First rows visible after query returns | < 50 ms |
-| Grid scroll, 1M rows | 120 fps, no dropped frames |
-| Idle memory | < 100 MB |
+| Metric | Target | v0.1 (M-series Mac, release build) |
+|---|---|---|
+| Cold start to interactive | < 300 ms | ~215 ms to first frame (Dock icon decoded after it) |
+| First rows visible after query returns | < 50 ms | grid built in 0.2 ms for 100,000 rows; 100k-row Postgres join fetched in 158 ms |
+| Grid scroll, 1M rows | 120 fps, no dropped frames | results capped at 100k rows; virtualized list, not yet measured with a frame counter |
+| Idle memory | < 100 MB | 115 MB (mostly GPUI); 227 MB holding 100k rows |
+
+Measure with `XENON_TRACE=1`.
 
 ## Key risks
 
@@ -188,8 +190,15 @@ outlined. Env tags are 1 px outlined mono caps. Errors: left danger border, erro
 5. **Connectivity** — SSH tunnels/jump hosts, TLS variants, cloud IAM auth, reconnect after sleep.
 6. **GPUI maturity** — pre-1.0, API churn, thin docs, accessibility/IME gaps. Pin versions.
 
+## After v0.1
+
+Roughly in order: streaming result batches (and lifting the 100k cap), autocomplete from the
+schema, inline cell editing with generated `UPDATE`s, SSH tunnels, import/export, MySQL, then the
+long tail toward Beekeeper parity (SQL Server, DuckDB, ClickHouse, Redis, MongoDB…).
+
 ## Open questions
 
-- License: GPLv3 (+ CLA for dual licensing) vs MIT/Apache-2.0
+- License: leaning GPLv3; to sell commercial licenses later, contributions need a CLA so Carbon
+  Software keeps the right to relicense
 - Platform order: macOS first, then Linux and Windows (GPUI supports all three)
 - Name availability: GitHub org/repo, crates.io `xenon`, domain
