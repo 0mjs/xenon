@@ -12,6 +12,7 @@ use xenon_ui::{
 };
 
 fn main() {
+    xenon_ui::LAUNCHED.get_or_init(std::time::Instant::now);
     // `xenon path/to/file.db` or `xenon postgres://…` opens that database on launch.
     let launch = std::env::args().nth(1).map(Launch::from_arg);
 
@@ -21,8 +22,6 @@ fn main() {
         }
         xenon_ui::init(cx);
         set_menus(cx);
-        #[cfg(target_os = "macos")]
-        set_dock_icon();
 
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -45,6 +44,9 @@ fn main() {
             },
             |window, cx| {
                 window.set_rem_size(px(16.));
+                // Decoding the icon takes tens of milliseconds; do it after the first frame.
+                #[cfg(target_os = "macos")]
+                window.on_next_frame(|_, _| set_dock_icon());
                 let workspace = cx.new(|cx| Workspace::new(launch, window, cx));
                 cx.new(|cx| Root::new(workspace, window, cx))
             },
@@ -108,7 +110,8 @@ fn set_dock_icon() {
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
 
-    const ICON: &[u8] = include_bytes!("../../../assets/icon/xenon.png");
+    // 512px is plenty for the Dock (and decodes ~4x faster than the 1024px master).
+    const ICON: &[u8] = include_bytes!("../../../assets/icon/xenon-512.png");
 
     let bundled = std::env::current_exe()
         .is_ok_and(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"));

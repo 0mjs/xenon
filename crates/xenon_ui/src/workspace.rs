@@ -340,6 +340,7 @@ pub struct Workspace {
     drag: Option<Drag>,
     /// A failed query's error position, applied to the editor on the next frame.
     pending_error_jump: Option<(usize, usize, usize)>,
+    first_frame_traced: bool,
     editor_height: f32,
     theme_choice: ThemeChoice,
     palette: Option<(Entity<Palette>, Subscription)>,
@@ -403,6 +404,7 @@ impl Workspace {
             grid_focus: cx.focus_handle(),
             drag: None,
             pending_error_jump: None,
+            first_frame_traced: false,
             editor_height: EDITOR_HEIGHT,
             theme_choice,
             palette: None,
@@ -935,6 +937,7 @@ impl Workspace {
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
             let result = conn.execute(&sql, ROW_LIMIT);
+            crate::trace("execute query", started);
             if let Some(store) = store {
                 let (rows, error) = match &result {
                     Ok(result) => (
@@ -1003,7 +1006,9 @@ impl Workspace {
         match result {
             Ok(mut result) => {
                 if let QueryOutcome::Rows(rows) = &mut result.outcome {
+                    let started = std::time::Instant::now();
                     tab.grid = Some(Grid::new(std::mem::take(rows)));
+                    crate::trace("build results grid", started);
                     result.outcome = QueryOutcome::Rows(Default::default());
                 } else {
                     tab.grid = None;
@@ -1378,6 +1383,12 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.first_frame_traced {
+            self.first_frame_traced = true;
+            if let Some(launched) = crate::LAUNCHED.get() {
+                crate::trace("first frame", *launched);
+            }
+        }
         if self.pending_error_jump.is_some() {
             self.jump_to_error(window, cx);
         }

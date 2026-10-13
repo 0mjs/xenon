@@ -61,6 +61,20 @@ const GRID_CONTEXT: &str = "ResultsGrid";
 /// would otherwise insert a newline).
 const EDITOR_CONTEXT: &str = "Input";
 
+/// Opt-in timing log for performance work: `XENON_TRACE=1 xenon`.
+pub fn trace(label: &str, since: std::time::Instant) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("XENON_TRACE").is_some()) {
+        eprintln!(
+            "xenon: {label}: {:.1} ms",
+            since.elapsed().as_secs_f64() * 1000.
+        );
+    }
+}
+
+/// When the process started, for startup timing.
+pub static LAUNCHED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 pub fn init(cx: &mut App) {
     gpui_component::init(cx);
     theme::install(cx);
