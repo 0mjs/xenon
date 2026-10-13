@@ -7970,6 +7970,7 @@ dependencies = [
  "anyhow",
  "dirs 7.0.0",
  "rusqlite",
+ "security-framework",
 ]
 
 [[package]]

@@ -30,17 +30,20 @@ impl CancelHandle for Interrupt {
 
 impl SqliteConnection {
     /// Open an existing database file. Never creates one: a typo in a path
-    /// should be an error, not a new empty database.
-    pub fn open(path: &Path) -> Result<Self> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = rusqlite::Connection::open_with_flags(path, flags)
-            .or_else(|_| {
-                rusqlite::Connection::open_with_flags(
-                    path,
-                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-            })
-            .with_context(|| format!("could not open {}", path.display()))?;
+    /// should be an error, not a new empty database. `read_only` opens it so
+    /// SQLite itself refuses every write.
+    pub fn open(path: &Path, read_only: bool) -> Result<Self> {
+        let read_only_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = if read_only {
+            rusqlite::Connection::open_with_flags(path, read_only_flags)
+        } else {
+            rusqlite::Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .or_else(|_| rusqlite::Connection::open_with_flags(path, read_only_flags))
+        }
+        .with_context(|| format!("could not open {}", path.display()))?;
         // SQLite opens lazily; touch the schema so a non-database file fails here.
         conn.query_row("select count(*) from sqlite_schema", [], |_| Ok(()))
             .with_context(|| format!("{} is not a SQLite database", path.display()))?;
@@ -302,10 +305,22 @@ mod tests {
     fn open_rejects_missing_and_non_database_files() {
         let dir = std::env::temp_dir().join(format!("xenon-sqlite-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(SqliteConnection::open(&dir.join("missing.db")).is_err());
+        assert!(SqliteConnection::open(&dir.join("missing.db"), false).is_err());
         let junk = dir.join("junk.db");
         std::fs::write(&junk, b"this is not a database at all, just some text").unwrap();
-        assert!(SqliteConnection::open(&junk).is_err());
+        assert!(SqliteConnection::open(&junk, false).is_err());
+
+        let real = dir.join("real.db");
+        rusqlite::Connection::open(&real)
+            .unwrap()
+            .execute_batch("create table t (x int)")
+            .unwrap();
+        let read_only = SqliteConnection::open(&real, true).unwrap();
+        assert!(read_only.execute("select * from t", 10).is_ok());
+        let err = read_only
+            .execute("insert into t values (1)", 10)
+            .unwrap_err();
+        assert!(err.to_string().contains("readonly"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

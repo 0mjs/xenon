@@ -66,7 +66,7 @@ impl SslMode {
 }
 
 /// Connection settings entered in a form.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConnectOptions {
     pub host: String,
     pub port: Option<u16>,
@@ -74,6 +74,41 @@ pub struct ConnectOptions {
     pub user: String,
     pub password: String,
     pub ssl: SslMode,
+    /// Start every transaction read-only, so the server refuses writes.
+    pub read_only: bool,
+}
+
+impl ConnectOptions {
+    /// Split a `postgres://` URL or libpq `key=value` string into fields, so it
+    /// can be saved (with the password kept apart, in the Keychain).
+    pub fn from_url(url: &str) -> Result<Self> {
+        let (url, ssl) = extract_sslmode(url);
+        let config: Config = url.parse().context("invalid connection string")?;
+        let host = match config.get_hosts().first() {
+            Some(tokio_postgres::config::Host::Tcp(host)) => host.clone(),
+            #[cfg(unix)]
+            Some(tokio_postgres::config::Host::Unix(path)) => path.display().to_string(),
+            None => String::new(),
+        };
+        Ok(Self {
+            host,
+            port: config.get_ports().first().copied(),
+            database: config.get_dbname().unwrap_or_default().to_string(),
+            user: config.get_user().unwrap_or_default().to_string(),
+            password: config
+                .get_password()
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .unwrap_or_default(),
+            ssl: ssl.unwrap_or_default(),
+            read_only: false,
+        })
+    }
+}
+
+impl SslMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        SslMode::ALL.into_iter().find(|mode| mode.as_str() == value)
+    }
 }
 
 pub struct PostgresConnection {
@@ -147,6 +182,9 @@ impl PostgresConnection {
         }
         if !options.password.is_empty() {
             config.password(&options.password);
+        }
+        if options.read_only {
+            config.options("-c default_transaction_read_only=on");
         }
         Self::connect(config, options.ssl)
     }
@@ -525,6 +563,50 @@ mod tests {
         assert_eq!(mode, Some(SslMode::Require));
 
         assert_eq!(extract_sslmode("postgres://h/db").1, None);
+    }
+
+    #[test]
+    fn options_from_url() {
+        let options = ConnectOptions::from_url(
+            "postgres://me:p%40ss@db.example.com:6543/shop?sslmode=verify-full",
+        )
+        .unwrap();
+        assert_eq!(
+            options,
+            ConnectOptions {
+                host: "db.example.com".into(),
+                port: Some(6543),
+                database: "shop".into(),
+                user: "me".into(),
+                password: "p@ss".into(),
+                ssl: SslMode::VerifyFull,
+                read_only: false,
+            }
+        );
+        let minimal = ConnectOptions::from_url("postgres://localhost").unwrap();
+        assert_eq!(
+            (minimal.host.as_str(), minimal.port, minimal.ssl),
+            ("localhost", Some(5432), SslMode::Prefer)
+        );
+        assert!(ConnectOptions::from_url("not a url ::").is_err());
+    }
+
+    #[test]
+    fn live_read_only_refuses_writes() {
+        let Ok(url) = std::env::var("XENON_TEST_PG_URL") else {
+            return;
+        };
+        let options = ConnectOptions {
+            read_only: true,
+            ..ConnectOptions::from_url(&url).unwrap()
+        };
+        let db = PostgresConnection::connect_options(&options).unwrap();
+        assert!(db.execute("select 1", 10).is_ok());
+        let err = db
+            .execute("create table xenon_ro_probe (x int)", 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("25006"), "{err}");
     }
 
     #[test]

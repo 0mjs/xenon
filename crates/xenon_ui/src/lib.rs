@@ -1,3 +1,4 @@
+mod confirm;
 mod connect;
 mod explorer;
 pub mod fonts;

@@ -176,6 +176,114 @@ fn has_code(text: &str) -> bool {
     false
 }
 
+/// How much a script could change, worst statement first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Risk {
+    /// Inserts, updates and deletes with a `where`, `create`, grants…
+    Write,
+    /// `update` or `delete` with no `where`: every row.
+    EveryRow,
+    /// `drop`, `truncate`, `alter`: removes or reshapes data.
+    Destructive,
+}
+
+/// The riskiest statement in `sql`, with a short description such as
+/// `"delete from orders without where"`. `None` for read-only scripts.
+pub fn assess(sql: &str) -> Option<(Risk, String)> {
+    split_statements(sql)
+        .into_iter()
+        .filter_map(|range| assess_statement(&sql[range]))
+        .max_by_key(|(risk, _)| *risk)
+}
+
+fn assess_statement(statement: &str) -> Option<(Risk, String)> {
+    let words = words_outside_literals(statement);
+    let first = words.first()?.as_str();
+    let has = |word: &str| words.iter().any(|w| w == word);
+    // `explain analyze` really runs the statement it explains.
+    let analyzed = first == "explain" && (has("analyze") || has("analyse"));
+    // `with … delete/update/insert` writes too.
+    let verb = if first == "with" || analyzed {
+        ["delete", "update", "insert", "merge"]
+            .into_iter()
+            .find(|verb| has(verb))
+            .unwrap_or("with")
+    } else {
+        first
+    };
+    let target = |after: &str| {
+        let ix = words.iter().position(|w| w == after)?;
+        words.get(ix + 1).cloned()
+    };
+    let summary = match (verb, words.get(1)) {
+        ("drop" | "truncate" | "alter" | "create", Some(object)) => {
+            format!("{} {}", verb.to_uppercase(), object.to_uppercase())
+        }
+        _ => verb.to_uppercase(),
+    };
+    match verb {
+        "drop" | "truncate" | "alter" => Some((Risk::Destructive, summary)),
+        "delete" | "update" if !has("where") => {
+            let table = if verb == "delete" {
+                target("from")
+            } else {
+                words.get(1).cloned()
+            };
+            let on = table.map(|t| format!(" on {t}")).unwrap_or_default();
+            Some((
+                Risk::EveryRow,
+                format!("{}{on} with no WHERE", verb.to_uppercase()),
+            ))
+        }
+        "delete" | "update" | "insert" | "merge" | "create" | "grant" | "revoke" | "copy"
+        | "comment" | "reindex" | "vacuum" | "cluster" | "refresh" | "replace" | "upsert" => {
+            Some((Risk::Write, summary))
+        }
+        _ => None,
+    }
+}
+
+/// Lowercased words of a statement, skipping comments, string literals and
+/// quoted identifiers (so `where` inside a string doesn't count).
+fn words_outside_literals(statement: &str) -> Vec<String> {
+    let bytes = statement.as_bytes();
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = skip_quoted(bytes, i, is_escape_string(statement, i)),
+            b'"' | b'`' => {
+                // Keep a quoted identifier as one word, without quotes.
+                let end = skip_quoted(bytes, i, false);
+                words.push(statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase());
+                i = end;
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i = bytes[i..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(bytes.len(), |p| i + p + 1);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
+            b'$' => i = skip_dollar_quoted(statement, i),
+            b if b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80 => {
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric()
+                        || bytes[i] == b'_'
+                        || bytes[i] == b'.'
+                        || bytes[i] >= 0x80)
+                {
+                    i += 1;
+                }
+                words.push(statement[start..i].to_lowercase());
+            }
+            _ => i += 1,
+        }
+    }
+    words
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortDirection {
     Ascending,
@@ -338,6 +446,63 @@ mod tests {
                 50
             ),
             "select * from \"public\".\"orders\"\nwhere status = 'paid'\norder by \"total\" desc\nlimit 50;"
+        );
+    }
+
+    #[test]
+    fn assess_reads_as_safe() {
+        for sql in [
+            "select * from orders where note = 'drop table x; delete from y'",
+            "with t as (select 1) select * from t",
+            "explain analyze select 1",
+            "-- delete from orders\nselect 1",
+            "show server_version; pragma table_info(t)",
+            "",
+        ] {
+            assert_eq!(assess(sql), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn assess_flags_writes_and_destruction() {
+        assert_eq!(
+            assess("delete from orders"),
+            Some((Risk::EveryRow, "DELETE on orders with no WHERE".into()))
+        );
+        assert_eq!(
+            assess("UPDATE \"Orders\" SET status = 'x'"),
+            Some((Risk::EveryRow, "UPDATE on orders with no WHERE".into()))
+        );
+        assert_eq!(
+            assess("update orders set a = 1 where id = 3").map(|r| r.0),
+            Some(Risk::Write)
+        );
+        assert_eq!(
+            assess("insert into t values (1)").map(|r| r.0),
+            Some(Risk::Write)
+        );
+        assert_eq!(
+            assess("select 1; drop table public.orders; insert into t values (1)"),
+            Some((Risk::Destructive, "DROP TABLE".into()))
+        );
+        assert_eq!(
+            assess("truncate orders").map(|r| r.0),
+            Some(Risk::Destructive)
+        );
+        assert_eq!(
+            assess("with gone as (delete from t where x) select * from gone").map(|r| r.0),
+            Some(Risk::Write)
+        );
+        // `where` inside a string doesn't make a delete safe.
+        assert_eq!(
+            assess("delete from t -- where id = 1").map(|r| r.0),
+            Some(Risk::EveryRow)
+        );
+        assert_eq!(assess("explain select 1"), None);
+        assert_eq!(assess("explain delete from t where id = 1"), None);
+        assert_eq!(
+            assess("explain analyze delete from t").map(|r| r.0),
+            Some(Risk::EveryRow)
         );
     }
 

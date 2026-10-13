@@ -73,6 +73,27 @@ pub fn env_tag(label: &'static str, color: Rgba) -> impl IntoElement {
         .child(label)
 }
 
+/// The tags shown for a connection: PROD, DEV, READ, LOCAL.
+pub fn connection_tags(
+    theme: &Theme,
+    environment: xenon_store::Environment,
+    read_only: bool,
+    local: bool,
+) -> Vec<(&'static str, Rgba)> {
+    use xenon_store::Environment;
+    let mut tags = Vec::new();
+    match environment {
+        Environment::Production => tags.push(("PROD", theme.err)),
+        Environment::Development => tags.push(("DEV", theme.t2)),
+        Environment::None if local => tags.push(("LOCAL", theme.t3)),
+        Environment::None => {}
+    }
+    if read_only {
+        tags.push(("READ", theme.warn));
+    }
+    tags
+}
+
 pub fn panel_button(
     theme: &Theme,
     id: &'static str,

@@ -207,7 +207,8 @@ impl Render for Palette {
             .bg(theme.s1)
             .border_1()
             .border_color(theme.line)
-            .on_click(|_, _, cx| cx.stop_propagation())
+            // Clicking anywhere outside the panel closes the dialog.
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)))
             .child(
                 div()
                     .p(px(10.))
@@ -246,7 +247,6 @@ impl Render for Palette {
                 Mode::Dark => rgba(0x00000080),
                 Mode::Light => rgba(0x17181b30),
             })
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)))
             .child(panel)
     }
 }

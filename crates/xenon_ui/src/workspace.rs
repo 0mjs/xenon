@@ -3,7 +3,7 @@
 //! Layout follows PLAN.md, "Design direction".
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,20 +14,24 @@ use gpui::{
 };
 use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use xenon_driver::export::{self, Format};
-use xenon_driver::sql::{SortDirection, browse_table, statement_at};
+use xenon_driver::sql::{Risk, SortDirection, assess, browse_table, statement_at};
 use xenon_driver::{
     CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema,
 };
-use xenon_postgres::PostgresConnection;
+use xenon_postgres::{ConnectOptions, PostgresConnection, SslMode};
 use xenon_sqlite::SqliteConnection;
-use xenon_store::{HistoryEntry, NewHistoryEntry, Store};
+use xenon_store::{
+    Environment, HistoryEntry, NewHistoryEntry, SavedConnection, Store, Target, secrets,
+};
 
-use crate::connect::{ConnectDialog, ConnectEvent, PgTarget};
+use crate::confirm::{ConfirmDialog, ConfirmEvent};
+use crate::connect::{ConnectDialog, ConnectEvent, Request, RequestTarget, Subject};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
-    centered_hint, empty_hint, format_duration, group_digits, kbd, panel_label, pretty_json,
+    centered_hint, connection_tags, empty_hint, env_tag, format_duration, group_digits, kbd,
+    panel_label, pretty_json,
 };
 use crate::{
     CancelQuery, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown, ExtendLeft,
@@ -74,6 +78,125 @@ pub(crate) struct Session {
     pub conn: Arc<dyn Connection>,
     pub version: String,
     pub schemas: Vec<Schema>,
+    /// The saved name, or a generated one like `acme@localhost`.
+    pub name: String,
+    pub environment: Environment,
+    pub read_only: bool,
+    pub saved_id: Option<i64>,
+}
+
+/// Everything needed to open (and maybe remember) a connection.
+struct Profile {
+    saved_id: Option<i64>,
+    /// Remember this connection after it opens.
+    save: bool,
+    name: String,
+    environment: Environment,
+    read_only: bool,
+    target: RequestTarget,
+}
+
+impl Profile {
+    fn from_saved(saved: &SavedConnection) -> Self {
+        let target = match &saved.target {
+            Target::Sqlite { path } => RequestTarget::Sqlite(path.clone()),
+            Target::Postgres {
+                host,
+                port,
+                database,
+                user,
+                ssl,
+            } => RequestTarget::Postgres(ConnectOptions {
+                host: host.clone(),
+                port: *port,
+                database: database.clone(),
+                user: user.clone(),
+                // Filled from the Keychain when connecting.
+                password: String::new(),
+                ssl: SslMode::parse(ssl).unwrap_or_default(),
+                read_only: saved.read_only,
+            }),
+        };
+        Self {
+            saved_id: Some(saved.id),
+            save: true,
+            name: saved.name.clone(),
+            environment: saved.environment,
+            read_only: saved.read_only,
+            target,
+        }
+    }
+
+    fn from_request(request: Request) -> Self {
+        Self {
+            saved_id: (request.id != 0).then_some(request.id),
+            save: request.save,
+            name: request.name,
+            environment: request.environment,
+            read_only: request.read_only,
+            target: request.target,
+        }
+    }
+
+    /// Runs on a background thread.
+    fn connect(&self) -> anyhow::Result<Arc<dyn Connection>> {
+        Ok(match &self.target {
+            RequestTarget::Sqlite(path) => {
+                Arc::new(SqliteConnection::open(Path::new(path), self.read_only)?)
+            }
+            RequestTarget::Postgres(options) => {
+                let mut options = options.clone();
+                options.read_only = self.read_only;
+                if options.password.is_empty()
+                    && let Some(id) = self.saved_id
+                {
+                    options.password =
+                        secrets::get(&SavedConnection::secret_key(id))?.unwrap_or_default();
+                }
+                Arc::new(PostgresConnection::connect_options(&options)?)
+            }
+        })
+    }
+
+    /// Save (or update) this connection and its password. Runs on a background thread.
+    fn remember(&self, store: Option<&Store>) -> anyhow::Result<Option<i64>> {
+        let (Some(store), true) = (store, self.save) else {
+            return Ok(self.saved_id);
+        };
+        let target = match &self.target {
+            RequestTarget::Sqlite(path) => Target::Sqlite { path: path.clone() },
+            RequestTarget::Postgres(options) => Target::Postgres {
+                host: options.host.clone(),
+                port: options.port,
+                database: options.database.clone(),
+                user: options.user.clone(),
+                ssl: options.ssl.as_str().to_string(),
+            },
+        };
+        let id = store.save_connection(&SavedConnection {
+            id: self.saved_id.unwrap_or(0),
+            name: self.name.clone(),
+            target,
+            environment: self.environment,
+            read_only: self.read_only,
+        })?;
+        if let RequestTarget::Postgres(options) = &self.target
+            && !options.password.is_empty()
+        {
+            secrets::set(&SavedConnection::secret_key(id), &options.password)?;
+        }
+        Ok(Some(id))
+    }
+}
+
+/// An action waiting on the confirmation dialog.
+enum Pending {
+    Run {
+        tab_id: usize,
+        sql: String,
+        origin: Option<usize>,
+    },
+    Forget(i64),
 }
 
 impl Session {
@@ -221,6 +344,9 @@ pub struct Workspace {
     theme_choice: ThemeChoice,
     palette: Option<(Entity<Palette>, Subscription)>,
     connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
+    confirm: Option<(Entity<ConfirmDialog>, Subscription, Pending)>,
+    pub(crate) saved: Vec<SavedConnection>,
+    pub(crate) explorer_filter: Entity<InputState>,
     show_side_panel: bool,
     show_inspector: bool,
     _subscriptions: Vec<Subscription>,
@@ -236,6 +362,12 @@ impl Workspace {
         });
 
         let history_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter history"));
+        let explorer_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter tables"));
+        let explorer_changes = cx.subscribe(&explorer_filter, |_, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+        });
         let filter_changes = cx.subscribe(&history_filter, |this, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 this.reload_history(cx);
@@ -275,10 +407,14 @@ impl Workspace {
             theme_choice,
             palette: None,
             connect_dialog: None,
+            confirm: None,
+            saved: Vec::new(),
+            explorer_filter,
             show_side_panel: true,
             show_inspector: true,
-            _subscriptions: vec![appearance, filter_changes],
+            _subscriptions: vec![appearance, filter_changes, explorer_changes],
         };
+        this.reload_saved();
         this.add_tab(None, window, cx);
         // Deferred so it runs after gpui-component's Root has been built around us.
         cx.defer_in(window, |this: &mut Self, window, cx| {
@@ -287,17 +423,13 @@ impl Workspace {
 
         match launch {
             Some(Launch::Sqlite(path)) => this.open_path(path, cx),
-            Some(Launch::Postgres(url)) => this.connect_postgres(PgTarget::Url(url), cx),
+            Some(Launch::Postgres(url)) => this.connect_url(url, cx),
             None => {}
         }
         this
     }
 
     // ---------------------------------------------------------------- tabs
-
-    fn active_tab_mut(&mut self) -> &mut Tab {
-        &mut self.tabs[self.active]
-    }
 
     pub(crate) fn active_tab(&self) -> &Tab {
         &self.tabs[self.active]
@@ -410,44 +542,93 @@ impl Workspace {
 
     // ---------------------------------------------------------- connecting
 
+    /// Open a SQLite file. Files are remembered with the saved connections.
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.connect(cx, move || {
-            Ok(Arc::new(SqliteConnection::open(&path)?) as Arc<dyn Connection>)
-        });
+        let path_text = path.display().to_string();
+        let known = self
+            .saved
+            .iter()
+            .find(|saved| matches!(&saved.target, Target::Sqlite { path } if *path == path_text))
+            .cloned();
+        let profile = match known {
+            Some(saved) => Profile::from_saved(&saved),
+            None => Profile {
+                saved_id: None,
+                save: true,
+                name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_text.clone()),
+                environment: Environment::None,
+                read_only: false,
+                target: RequestTarget::Sqlite(path_text),
+            },
+        };
+        self.open_profile(profile, cx);
     }
 
-    fn connect_postgres(&mut self, target: PgTarget, cx: &mut Context<Self>) {
-        self.connect(cx, move || {
-            let conn = match target {
-                PgTarget::Url(url) => PostgresConnection::connect_url(&url)?,
-                PgTarget::Options(options) => PostgresConnection::connect_options(&options)?,
-            };
-            Ok(Arc::new(conn) as Arc<dyn Connection>)
-        });
+    fn connect_url(&mut self, url: String, cx: &mut Context<Self>) {
+        match ConnectOptions::from_url(&url) {
+            Ok(options) => {
+                let host = if options.host.is_empty() {
+                    "localhost"
+                } else {
+                    &options.host
+                };
+                let database = if options.database.is_empty() {
+                    "postgres"
+                } else {
+                    &options.database
+                };
+                let name = format!("{database}@{host}");
+                self.open_profile(
+                    Profile {
+                        saved_id: None,
+                        save: false,
+                        name,
+                        environment: Environment::None,
+                        read_only: false,
+                        target: RequestTarget::Postgres(options),
+                    },
+                    cx,
+                )
+            }
+            Err(err) => {
+                self.notice = Some(format!("{err:#}").into());
+                cx.notify();
+            }
+        }
     }
 
-    /// Open a connection and read its schema off the main thread, then make it
-    /// the active session. Errors go to the connect dialog when it's open.
-    fn connect(
-        &mut self,
-        cx: &mut Context<Self>,
-        open: impl FnOnce() -> anyhow::Result<Arc<dyn Connection>> + Send + 'static,
-    ) {
+    pub(crate) fn connect_to_saved(&mut self, saved: &SavedConnection, cx: &mut Context<Self>) {
+        self.open_profile(Profile::from_saved(saved), cx);
+    }
+
+    /// Connect off the main thread (reading a saved password from the Keychain
+    /// first), then make it the active session and remember it if asked.
+    /// Errors go to the connection dialog when it's open.
+    fn open_profile(&mut self, profile: Profile, cx: &mut Context<Self>) {
         self.notice = None;
+        let store = self.store.clone();
         let task = cx.background_spawn(async move {
-            let conn = open()?;
+            let conn = profile.connect()?;
             let schemas = conn.introspect()?;
-            anyhow::Ok((conn, schemas))
+            let saved_id = profile.remember(store.as_deref())?;
+            anyhow::Ok((conn, schemas, profile, saved_id))
         });
         cx.spawn(async move |this, cx| {
             let opened = task.await;
             this.update(cx, |this, cx| {
                 match opened {
-                    Ok((conn, schemas)) => {
+                    Ok((conn, schemas, profile, saved_id)) => {
                         this.session = Some(Session {
                             version: conn.server_version(),
                             conn,
                             schemas,
+                            name: profile.name,
+                            environment: profile.environment,
+                            read_only: profile.read_only,
+                            saved_id,
                         });
                         // Keep everyone's SQL; results belong to the old connection.
                         for tab in &mut this.tabs {
@@ -462,6 +643,7 @@ impl Workspace {
                         this.expanded.clear();
                         this.collapsed_schemas.clear();
                         this.connect_dialog = None;
+                        this.reload_saved();
                         this.reload_history(cx);
                     }
                     Err(err) => {
@@ -481,25 +663,106 @@ impl Workspace {
         .detach();
     }
 
+    /// Try a connection from the dialog without switching to it.
+    fn test_connection(&mut self, request: Request, cx: &mut Context<Self>) {
+        let profile = Profile::from_request(request);
+        let task = cx.background_spawn(async move {
+            let conn = profile.connect()?;
+            anyhow::Ok(conn.server_version())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Some((dialog, _)) = &this.connect_dialog {
+                    dialog.update(cx, |dialog, cx| match result {
+                        Ok(version) => {
+                            dialog.set_test_passed(format!("Connected · {version}").into(), cx)
+                        }
+                        Err(err) => dialog.set_error(format!("{err:#}").into(), cx),
+                    });
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn reload_saved(&mut self) {
+        self.saved = self
+            .store
+            .as_ref()
+            .and_then(|store| store.connections().ok())
+            .unwrap_or_default();
+    }
+
     pub(crate) fn new_connection(
         &mut self,
         _: &NewConnection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_connection_dialog(Subject::New, window, cx);
+    }
+
+    pub(crate) fn edit_saved(
+        &mut self,
+        saved: &SavedConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let password = match &saved.target {
+            Target::Postgres { .. } => secrets::get(&SavedConnection::secret_key(saved.id))
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+            Target::Sqlite { .. } => String::new(),
+        };
+        self.open_connection_dialog(Subject::Saved(saved.clone(), password), window, cx);
+    }
+
+    pub(crate) fn forget_saved(
+        &mut self,
+        saved: &SavedConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = saved.id;
+        let detail = match &saved.target {
+            Target::Sqlite { path } => path.clone(),
+            Target::Postgres {
+                host,
+                port,
+                database,
+                user,
+                ..
+            } => format!("{user}@{host}:{}/{database}", port.unwrap_or(5432)),
+        };
+        let body = format!(
+            "\"{}\" and its saved password will be removed from Xenon.",
+            saved.name
+        );
+        let dialog = cx.new(|cx| {
+            ConfirmDialog::new("Remove saved connection?", body, &detail, None, window, cx)
+        });
+        self.show_confirm(dialog, Pending::Forget(id), window, cx);
+    }
+
+    fn open_connection_dialog(
+        &mut self,
+        subject: Subject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.connect_dialog.is_some() {
             return;
         }
-        let dialog = cx.new(|cx| ConnectDialog::new(window, cx));
+        let dialog = cx.new(|cx| ConnectDialog::new(subject, window, cx));
         let subscription =
             cx.subscribe_in(&dialog, window, |this, _, event, window, cx| match event {
-                ConnectEvent::Submit(target) => {
-                    let target = match target {
-                        PgTarget::Url(url) => PgTarget::Url(url.clone()),
-                        PgTarget::Options(options) => PgTarget::Options(options.clone()),
-                    };
-                    this.connect_postgres(target, cx);
+                ConnectEvent::Submit(request) => {
+                    this.open_profile(Profile::from_request(request.clone()), cx)
                 }
+                ConnectEvent::Test(request) => this.test_connection(request.clone(), cx),
                 ConnectEvent::Dismiss => {
                     this.connect_dialog = None;
                     this.focus_editor(window, cx);
@@ -507,6 +770,44 @@ impl Workspace {
                 }
             });
         self.connect_dialog = Some((dialog, subscription));
+        cx.notify();
+    }
+
+    fn show_confirm(
+        &mut self,
+        dialog: Entity<ConfirmDialog>,
+        pending: Pending,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let subscription = cx.subscribe_in(&dialog, window, |this, _, event, window, cx| {
+            let Some((_, _, pending)) = this.confirm.take() else {
+                return;
+            };
+            if let ConfirmEvent::Confirm = event {
+                match pending {
+                    Pending::Run {
+                        tab_id,
+                        sql,
+                        origin,
+                    } => this.execute(tab_id, sql, origin, cx),
+                    Pending::Forget(id) => {
+                        if let Some(store) = &this.store
+                            && let Err(err) = store.delete_connection(id)
+                        {
+                            this.notice = Some(format!("{err:#}").into());
+                        }
+                        if let Err(err) = secrets::delete(&SavedConnection::secret_key(id)) {
+                            eprintln!("xenon: {err:#}");
+                        }
+                        this.reload_saved();
+                    }
+                }
+            }
+            this.focus_editor(window, cx);
+            cx.notify();
+        });
+        self.confirm = Some((dialog, subscription, pending));
         cx.notify();
     }
 
@@ -541,7 +842,7 @@ impl Workspace {
         self.run(RunScope::Explain, window, cx);
     }
 
-    pub(crate) fn run(&mut self, scope: RunScope, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run(&mut self, scope: RunScope, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             self.notice = Some("Open a database first (⌘O or ⌘N).".into());
             cx.notify();
@@ -577,8 +878,57 @@ impl Workspace {
             RunScope::Explain => session.conn.explain(sql.trim().trim_end_matches(';')),
             _ => sql,
         };
-
         let tab_id = tab.id;
+
+        // Guard rails: risky statements need a confirmation, and on production
+        // every write needs the connection's name typed. Read-only connections
+        // are already protected by the server.
+        if !session.read_only
+            && let Some((risk, what)) = assess(&sql)
+            && (session.environment == Environment::Production || risk >= Risk::EveryRow)
+        {
+            let production = session.environment == Environment::Production;
+            let body = match risk {
+                Risk::Destructive => format!("This runs {what}, which can't be undone."),
+                Risk::EveryRow => format!("This runs {what}, so it changes every row."),
+                Risk::Write => format!("This {what} statement writes to the database."),
+            };
+            let body = if production {
+                format!("{body} {} is a production connection.", session.name)
+            } else {
+                body
+            };
+            let title = if production {
+                "Run on production?"
+            } else {
+                "Run this statement?"
+            };
+            let require = production.then(|| session.name.clone());
+            let dialog = cx.new(|cx| ConfirmDialog::new(title, body, &sql, require, window, cx));
+            self.show_confirm(
+                dialog,
+                Pending::Run {
+                    tab_id,
+                    sql,
+                    origin,
+                },
+                window,
+                cx,
+            );
+            return;
+        }
+        self.execute(tab_id, sql, origin, cx);
+    }
+
+    /// Run `sql` for a tab in the background, recording it in the history.
+    fn execute(
+        &mut self,
+        tab_id: usize,
+        sql: String,
+        origin: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = &self.session else { return };
         let conn = session.conn.clone();
         let store = self.store.clone();
         let cancel = conn.cancel_handle();
@@ -624,7 +974,9 @@ impl Workspace {
             })
             .ok();
         });
-        let tab = self.active_tab_mut();
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
         tab.run_origin = origin;
         tab.query = Query::Running {
             cancel,
@@ -1131,11 +1483,19 @@ impl Render for Workspace {
             .when_some(self.palette.as_ref(), |el, (palette, _)| {
                 el.child(palette.clone())
             })
+            .when_some(self.confirm.as_ref(), |el, (dialog, _, _)| {
+                el.child(dialog.clone())
+            })
     }
 }
 
 impl Workspace {
     fn render_titlebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // Production tabs are underlined in red instead of the accent.
+        let underline = match &self.session {
+            Some(session) if session.environment == Environment::Production => theme.err,
+            _ => theme.acc,
+        };
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
             let active = index == self.active;
             let running = matches!(tab.query, Query::Running { .. });
@@ -1185,7 +1545,7 @@ impl Workspace {
                             .right_0()
                             .bottom_0()
                             .h(px(1.))
-                            .bg(theme.acc),
+                            .bg(underline),
                     )
                 })
         });
@@ -1768,10 +2128,28 @@ impl Workspace {
                     cell("".into(), theme.t2)
                         .gap(px(6.))
                         .child(div().text_color(theme.ok).child("●"))
-                        .child(session.conn.name().to_string()),
+                        .child(session.name.clone())
+                        .children(
+                            connection_tags(
+                                theme,
+                                session.environment,
+                                session.read_only,
+                                session.conn.is_local(),
+                            )
+                            .into_iter()
+                            .map(|(label, color)| env_tag(label, color)),
+                        ),
                 )
                 .child(cell(session.version.clone().into(), theme.t3))
-                .child(cell("auto-commit".into(), theme.t3)),
+                .child(cell(
+                    if session.read_only {
+                        "read-only"
+                    } else {
+                        "auto-commit"
+                    }
+                    .into(),
+                    theme.t3,
+                )),
             None => bar.child(cell("no connection".into(), theme.t3)),
         };
 

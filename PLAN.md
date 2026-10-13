@@ -103,7 +103,7 @@ render immediately is still to do.
 | M2 ✅ | **Postgres** | Connect via form or URL, introspect schema, run + cancel queries, SSL |
 | M3 ✅ | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
 | M4 ✅ | **Grid polish** | Content-sized columns (stripes run to the edge), drag to resize, double-click to fit, copy as TSV/CSV/JSON, table browser with sort/filter, Run/Explain toolbar. Richer per-type rendering (JSON, timestamps) moves to M5 |
-| M5 | **Feel** | Command palette, keybindings, light/dark, empty states, error UX, perf pass |
+| M5 ✅ | **Feel** | Command palette, keybindings, light/dark, empty states, error UX, perf pass |
 | M6 | **Ship v0.1** | Signed macOS build, README, screenshots, GitHub release |
 
 Start with SQLite (M1) — no server needed, fastest path to a working loop.

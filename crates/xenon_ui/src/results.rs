@@ -439,13 +439,20 @@ fn cell(value: &Value, theme: &Theme) -> impl IntoElement {
             .italic()
             .child(SharedString::new_static("NULL"));
     }
-    let text: String = value
-        .display()
+    let display = value.display();
+    // JSON objects and Postgres arrays read as structure, so they're dimmed.
+    let structured = matches!(value, Value::Text(_))
+        && matches!(
+            (display.chars().next(), display.chars().last()),
+            (Some('{'), Some('}')) | (Some('['), Some(']'))
+        );
+    let text: String = display
         .chars()
         .take(CELL_CHARS)
         .map(|c| if c == '\n' { '⏎' } else { c })
         .collect();
-    el.child(SharedString::from(text))
+    el.when(structured, |el| el.text_color(theme.t2))
+        .child(SharedString::from(text))
 }
 
 #[cfg(test)]

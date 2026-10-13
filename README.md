@@ -14,6 +14,14 @@ cargo run -p xenon -- "postgres://user:pass@localhost/db?sslmode=require"
 
 In the app: `⌘O` opens a SQLite file (or drop one on the window), `⌘N` connects to Postgres.
 
+Connections can be saved with a name, an environment (development / production) and read-only
+access. Passwords go in the macOS Keychain, never on disk. Saved connections and recent SQLite
+files are listed under **Saved** in the explorer (✎ to edit, ✕ to remove).
+
+Safety: read-only connections are enforced by the database itself. A statement that drops,
+truncates or alters, or updates/deletes with no `WHERE`, asks before running; on a production
+connection every write asks, and you type the connection's name to go ahead.
+
 Requires macOS with Xcode (for Metal) and Rust 1.85+ (edition 2024).
 
 To build a proper app with its icon, `./scripts/bundle-macos.sh` creates `target/release/Xenon.app`
