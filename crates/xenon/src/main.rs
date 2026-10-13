@@ -19,6 +19,8 @@ fn main() {
         }
         xenon_ui::init(cx);
         set_menus(cx);
+        #[cfg(target_os = "macos")]
+        set_dock_icon();
 
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -81,4 +83,28 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Previous Tab", PrevTab),
         ]),
     ]);
+}
+
+/// Inside `Xenon.app` macOS takes the icon from the bundle; a bare binary
+/// (`cargo run`) would otherwise show the generic "exec" icon in the Dock.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::{AllocAnyThread as _, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    const ICON: &[u8] = include_bytes!("../../../assets/icon/xenon.png");
+
+    let bundled = std::env::current_exe()
+        .is_ok_and(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"));
+    let Some(main_thread) = MainThreadMarker::new() else { return };
+    if bundled {
+        return;
+    }
+    let data = NSData::with_bytes(ICON);
+    if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+        let app = NSApplication::sharedApplication(main_thread);
+        // SAFETY: called on the main thread (checked above) with a valid NSImage.
+        unsafe { app.setApplicationIconImage(Some(&image)) };
+    }
 }

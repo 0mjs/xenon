@@ -9,3 +9,8 @@ gpui.workspace = true
 gpui_platform.workspace = true
 xenon_ui.workspace = true
 gpui-component.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", features = ["NSData"] }

@@ -16,6 +16,9 @@ In the app: `⌘O` opens a SQLite file (or drop one on the window), `⌘N` conne
 
 Requires macOS with Xcode (for Metal) and Rust 1.85+ (edition 2024).
 
+To build a proper app with its icon, `./scripts/bundle-macos.sh` creates `target/release/Xenon.app`
+(drag it to /Applications). The icon is drawn by `assets/icon/make-icon.swift`.
+
 | Shortcut | Action |
 |---|---|
 | `⌘O` | Open SQLite file |
