@@ -1,16 +1,14 @@
-use std::path::PathBuf;
-
 use gpui::{
     App, Bounds, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds, WindowOptions,
     point, prelude::*, px, size,
 };
 use gpui_component::Root;
 use gpui_platform::application;
-use xenon_ui::{OpenFile, Quit, ToggleExplorer, ToggleInspector, Workspace};
+use xenon_ui::{Launch, NewConnection, OpenFile, Quit, ToggleExplorer, ToggleInspector, Workspace};
 
 fn main() {
-    // `xenon path/to/file.db` opens that database on launch.
-    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    // `xenon path/to/file.db` or `xenon postgres://…` opens that database on launch.
+    let launch = std::env::args().nth(1).map(Launch::from_arg);
 
     application().run(|cx: &mut App| {
         if let Err(err) = xenon_ui::fonts::load(cx) {
@@ -40,7 +38,7 @@ fn main() {
             },
             |window, cx| {
                 window.set_rem_size(px(16.));
-                let workspace = cx.new(|cx| Workspace::new(path, window, cx));
+                let workspace = cx.new(|cx| Workspace::new(launch, window, cx));
                 cx.new(|cx| Root::new(workspace, window, cx))
             },
         )
@@ -57,7 +55,10 @@ fn set_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Quit Xenon", Quit),
         ]),
-        Menu::new("File").items([MenuItem::action("Open…", OpenFile)]),
+        Menu::new("File").items([
+            MenuItem::action("Open SQLite File…", OpenFile),
+            MenuItem::action("Connect to Postgres…", NewConnection),
+        ]),
         Menu::new("View").items([
             MenuItem::action("Toggle Explorer", ToggleExplorer),
             MenuItem::action("Toggle Inspector", ToggleInspector),

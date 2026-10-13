@@ -178,6 +178,10 @@ impl Connection for SqliteConnection {
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.interrupt.clone()
     }
+
+    fn is_local(&self) -> bool {
+        true
+    }
 }
 
 fn to_value(value: ValueRef<'_>) -> Value {

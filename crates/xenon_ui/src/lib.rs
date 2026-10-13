@@ -1,3 +1,4 @@
+mod connect;
 pub mod fonts;
 mod results;
 pub mod theme;
@@ -5,13 +6,14 @@ pub mod workspace;
 
 use gpui::{App, KeyBinding, actions};
 
-pub use workspace::Workspace;
+pub use workspace::{Launch, Workspace};
 
 actions!(
     xenon,
     [
         Quit,
         OpenFile,
+        NewConnection,
         RunQuery,
         CancelQuery,
         ToggleExplorer,
@@ -31,6 +33,7 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-o", OpenFile, None),
+        KeyBinding::new("cmd-n", NewConnection, None),
         KeyBinding::new("cmd-enter", RunQuery, Some("Workspace")),
         KeyBinding::new("cmd-enter", RunQuery, Some(EDITOR_CONTEXT)),
         KeyBinding::new("cmd-.", CancelQuery, Some("Workspace")),

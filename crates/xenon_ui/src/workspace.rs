@@ -13,11 +13,13 @@ use gpui::{
 };
 use gpui_component::input::{Editor, EditorState};
 use xenon_driver::{CancelHandle, Connection, ObjectKind, QueryOutcome, QueryResult, Schema};
+use xenon_postgres::PostgresConnection;
 use xenon_sqlite::SqliteConnection;
 
+use crate::connect::{ConnectDialog, ConnectEvent, PgTarget};
 use crate::results::{self, Grid};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
-use crate::{CancelQuery, OpenFile, RunQuery, ToggleExplorer, ToggleInspector};
+use crate::{CancelQuery, NewConnection, OpenFile, RunQuery, ToggleExplorer, ToggleInspector};
 
 const TITLEBAR_HEIGHT: f32 = 34.;
 const STATUSBAR_HEIGHT: f32 = 24.;
@@ -32,10 +34,33 @@ const ROW_LIMIT: usize = 100_000;
 /// Rows fetched when a table is opened from the explorer.
 const BROWSE_LIMIT: usize = 1_000;
 
+/// What to open on launch, from the command line.
+pub enum Launch {
+    Sqlite(PathBuf),
+    Postgres(String),
+}
+
+impl Launch {
+    pub fn from_arg(arg: String) -> Self {
+        if arg.starts_with("postgres://") || arg.starts_with("postgresql://") {
+            Launch::Postgres(arg)
+        } else {
+            Launch::Sqlite(arg.into())
+        }
+    }
+}
+
 struct Session {
     conn: Arc<dyn Connection>,
     version: String,
     schemas: Vec<Schema>,
+}
+
+impl Session {
+    /// SQLite has a single implicit schema; don't show a level for it.
+    fn shows_schemas(&self) -> bool {
+        self.schemas.len() > 1 || self.schemas.iter().any(|s| s.name != "main")
+    }
 }
 
 enum Query {
@@ -57,14 +82,17 @@ pub struct Workspace {
     query: Query,
     grid: Option<Grid>,
     selected_row: Option<usize>,
+    /// Explorer keys (`schema.table`) whose columns are shown.
     expanded: HashSet<String>,
+    collapsed_schemas: HashSet<String>,
+    connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
     show_explorer: bool,
     show_inspector: bool,
     _appearance: Subscription,
 }
 
 impl Workspace {
-    pub fn new(path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -91,20 +119,46 @@ impl Workspace {
             grid: None,
             selected_row: None,
             expanded: HashSet::new(),
+            collapsed_schemas: HashSet::new(),
+            connect_dialog: None,
             show_explorer: true,
             show_inspector: true,
             _appearance: appearance,
         };
-        if let Some(path) = path {
-            this.open_path(path, cx);
+        match launch {
+            Some(Launch::Sqlite(path)) => this.open_path(path, cx),
+            Some(Launch::Postgres(url)) => this.connect_postgres(PgTarget::Url(url), cx),
+            None => {}
         }
         this
     }
 
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.connect(cx, move || {
+            Ok(Arc::new(SqliteConnection::open(&path)?) as Arc<dyn Connection>)
+        });
+    }
+
+    fn connect_postgres(&mut self, target: PgTarget, cx: &mut Context<Self>) {
+        self.connect(cx, move || {
+            let conn = match target {
+                PgTarget::Url(url) => PostgresConnection::connect_url(&url)?,
+                PgTarget::Options(options) => PostgresConnection::connect_options(&options)?,
+            };
+            Ok(Arc::new(conn) as Arc<dyn Connection>)
+        });
+    }
+
+    /// Open a connection and read its schema off the main thread, then make it
+    /// the active session. Errors go to the connect dialog when it's open.
+    fn connect(
+        &mut self,
+        cx: &mut Context<Self>,
+        open: impl FnOnce() -> anyhow::Result<Arc<dyn Connection>> + Send + 'static,
+    ) {
         self.notice = None;
         let task = cx.background_spawn(async move {
-            let conn = SqliteConnection::open(&path)?;
+            let conn = open()?;
             let schemas = conn.introspect()?;
             anyhow::Ok((conn, schemas))
         });
@@ -115,21 +169,56 @@ impl Workspace {
                     Ok((conn, schemas)) => {
                         this.session = Some(Session {
                             version: conn.server_version(),
-                            conn: Arc::new(conn),
+                            conn,
                             schemas,
                         });
                         this.query = Query::Idle;
                         this.grid = None;
                         this.selected_row = None;
                         this.expanded.clear();
+                        this.collapsed_schemas.clear();
+                        this.connect_dialog = None;
                     }
-                    Err(err) => this.notice = Some(format!("{err:#}").into()),
+                    Err(err) => {
+                        let message: SharedString = format!("{err:#}").into();
+                        match &this.connect_dialog {
+                            Some((dialog, _)) => {
+                                dialog.update(cx, |dialog, cx| dialog.set_error(message, cx))
+                            }
+                            None => this.notice = Some(message),
+                        }
+                    }
                 }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    fn new_connection(&mut self, _: &NewConnection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connect_dialog.is_some() {
+            return;
+        }
+        let dialog = cx.new(|cx| ConnectDialog::new(window, cx));
+        let subscription = cx.subscribe_in(&dialog, window, |this, _, event, window, cx| {
+            match event {
+                ConnectEvent::Submit(target) => {
+                    let target = match target {
+                        PgTarget::Url(url) => PgTarget::Url(url.clone()),
+                        PgTarget::Options(options) => PgTarget::Options(options.clone()),
+                    };
+                    this.connect_postgres(target, cx);
+                }
+                ConnectEvent::Dismiss => {
+                    this.connect_dialog = None;
+                    this.editor.update(cx, |editor, cx| editor.focus(window, cx));
+                    cx.notify();
+                }
+            }
+        });
+        self.connect_dialog = Some((dialog, subscription));
+        cx.notify();
     }
 
     fn open_file(&mut self, _: &OpenFile, _: &mut Window, cx: &mut Context<Self>) {
@@ -230,10 +319,11 @@ impl Workspace {
         }
     }
 
-    fn browse(&mut self, table: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn browse(&mut self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else { return };
         let sql = format!(
-            "select * from {} limit {BROWSE_LIMIT};",
+            "select * from {}.{} limit {BROWSE_LIMIT};",
+            session.conn.quote_ident(schema),
             session.conn.quote_ident(table)
         );
         self.editor
@@ -241,9 +331,16 @@ impl Workspace {
         self.run_query(&RunQuery, window, cx);
     }
 
-    fn toggle_expanded(&mut self, name: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(name) {
-            self.expanded.insert(name.to_string());
+    fn toggle_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.expanded.remove(key) {
+            self.expanded.insert(key.to_string());
+        }
+        cx.notify();
+    }
+
+    fn toggle_schema(&mut self, schema: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_schemas.remove(schema) {
+            self.collapsed_schemas.insert(schema.to_string());
         }
         cx.notify();
     }
@@ -282,6 +379,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_file))
+            .on_action(cx.listener(Self::new_connection))
             .on_action(cx.listener(Self::run_query))
             .on_action(cx.listener(Self::cancel_query))
             .on_action(cx.listener(Self::toggle_explorer))
@@ -298,9 +396,13 @@ impl Render for Workspace {
             .font_family(UI_FONT)
             .text_color(theme.text)
             .text_size(px(12.))
+            .relative()
             .child(self.render_titlebar(&theme))
             .child(body)
             .child(self.render_statusbar(&theme))
+            .when_some(self.connect_dialog.as_ref(), |el, (dialog, _)| {
+                el.child(dialog.clone())
+            })
     }
 }
 
@@ -378,27 +480,18 @@ impl Workspace {
         match &self.session {
             None => {
                 list = list.child(empty_hint(theme, "No connection")).child(
-                    div()
-                        .id("open-file")
-                        .mx(px(12.))
-                        .mt(px(4.))
-                        .px(px(10.))
-                        .py(px(6.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .border_1()
-                        .border_color(theme.line)
-                        .text_color(theme.t2)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_file(&OpenFile, window, cx)
-                        }))
-                        .child("Open SQLite file")
-                        .child(kbd(theme, "⌘O")),
+                    explorer_button(theme, "open-file", "Open SQLite file", "⌘O").on_click(
+                        cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx)),
+                    ),
                 );
-                list = list.child(empty_hint(theme, "or drop a database file here"));
+                list = list.child(
+                    explorer_button(theme, "connect-pg", "Connect to Postgres", "⌘N").on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.new_connection(&NewConnection, window, cx)
+                        }),
+                    ),
+                );
+                list = list.child(empty_hint(theme, "or drop a SQLite file here"));
             }
             Some(session) => {
                 list = list.child(
@@ -406,11 +499,46 @@ impl Workspace {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(div().w(px(12.)).child("▾"))
                         .child(div().flex_1().truncate().child(session.conn.name().to_string()))
-                        .child(env_tag("LOCAL", theme.t3)),
+                        .when(session.conn.is_local(), |el| {
+                            el.child(env_tag("LOCAL", theme.t3))
+                        }),
                 );
+                let nested = session.shows_schemas();
                 for schema in &session.schemas {
+                    let collapsed = nested && self.collapsed_schemas.contains(&schema.name);
+                    if nested {
+                        let name = schema.name.clone();
+                        list = list.child(
+                            tree_row(1)
+                                .id(SharedString::from(format!("schema-{}", schema.name)))
+                                .cursor_pointer()
+                                .text_color(theme.t2)
+                                .hover(|s| s.bg(theme.s3))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_schema(&name, cx)
+                                }))
+                                .child(
+                                    div()
+                                        .w(px(12.))
+                                        .text_color(theme.t3)
+                                        .child(if collapsed { "▸" } else { "▾" }),
+                                )
+                                .child(div().flex_1().truncate().child(schema.name.clone()))
+                                .child(
+                                    div()
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(10.5))
+                                        .text_color(theme.t3)
+                                        .child(schema.objects.len().to_string()),
+                                ),
+                        );
+                    }
+                    if collapsed {
+                        continue;
+                    }
+                    let depth = if nested { 2 } else { 1 };
                     for object in &schema.objects {
-                        list = list.children(self.render_object(object, theme, cx));
+                        list = list.children(self.render_object(&schema.name, object, depth, theme, cx));
                     }
                     if schema.objects.is_empty() {
                         list = list.child(empty_hint(theme, "No tables"));
@@ -446,12 +574,16 @@ impl Workspace {
 
     fn render_object(
         &self,
+        schema: &str,
         object: &xenon_driver::SchemaObject,
+        depth: usize,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let expanded = self.expanded.contains(&object.name);
-        let toggle_name = object.name.clone();
+        let key = format!("{schema}.{}", object.name);
+        let expanded = self.expanded.contains(&key);
+        let toggle_key = key.clone();
+        let browse_schema = schema.to_string();
         let browse_name = object.name.clone();
         let icon = match object.kind {
             ObjectKind::Table => "▦",
@@ -459,23 +591,23 @@ impl Workspace {
         };
 
         let mut rows = vec![
-            tree_row(1)
-                .id(SharedString::from(format!("obj-{}", object.name)))
+            tree_row(depth)
+                .id(SharedString::from(format!("obj-{key}")))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.s3).text_color(theme.text))
                 .text_color(theme.t2)
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.browse(&browse_name, window, cx)
+                    this.browse(&browse_schema, &browse_name, window, cx)
                 }))
                 .child(
                     div()
-                        .id(SharedString::from(format!("chev-{}", object.name)))
+                        .id(SharedString::from(format!("chev-{key}")))
                         .w(px(12.))
                         .text_color(theme.t3)
                         .hover(|s| s.text_color(theme.text))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
-                            this.toggle_expanded(&toggle_name, cx)
+                            this.toggle_expanded(&toggle_key, cx)
                         }))
                         .child(if expanded { "▾" } else { "▸" }),
                 )
@@ -493,7 +625,7 @@ impl Workspace {
 
         if expanded {
             rows.extend(object.columns.iter().map(|column| {
-                tree_row(2)
+                tree_row(depth + 1)
                     .text_color(theme.t2)
                     .child(div().flex_1().truncate().child(column.name.clone()))
                     .when(column.primary_key, |el| {
@@ -640,7 +772,7 @@ impl Workspace {
                 .child(
                     div()
                         .text_color(theme.t3)
-                        .child("Open a SQLite file with ⌘O, or drop one on the window."),
+                        .child("Open a SQLite file (⌘O) or connect to Postgres (⌘N)."),
                 )
                 .into_any_element(),
         }
@@ -768,6 +900,30 @@ fn rail(theme: &Theme) -> impl IntoElement {
         .child(icon("◷", false))
         .child(icon("★", false))
         .child(icon("⚙", false))
+}
+
+fn explorer_button(
+    theme: &Theme,
+    id: &'static str,
+    label: &'static str,
+    keys: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .mx(px(12.))
+        .mt(px(4.))
+        .px(px(10.))
+        .py(px(6.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_1()
+        .border_color(theme.line)
+        .text_color(theme.t2)
+        .cursor_pointer()
+        .hover(|s| s.text_color(theme.text).border_color(theme.t3))
+        .child(label)
+        .child(kbd(theme, keys))
 }
 
 fn tree_row(depth: usize) -> gpui::Div {

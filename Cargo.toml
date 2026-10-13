@@ -9,10 +9,16 @@ publish = false
 
 [workspace.dependencies]
 xenon_driver = { path = "crates/xenon_driver" }
+xenon_postgres = { path = "crates/xenon_postgres" }
 xenon_sqlite = { path = "crates/xenon_sqlite" }
 xenon_ui = { path = "crates/xenon_ui" }
 
 anyhow = "1"
+futures-util = "0.3"
+native-tls = "0.2"
+postgres-native-tls = "0.5"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tokio-postgres = "0.7"
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 
 # The GPUI snapshot that gpui-component 0.7.3 pins; the two must move together.

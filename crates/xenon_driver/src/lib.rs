@@ -16,6 +16,8 @@ pub enum Value {
     Null,
     Integer(i64),
     Real(f64),
+    /// An exact number kept as text so no precision is lost (Postgres `numeric`, `money`).
+    Decimal(String),
     Text(String),
     Blob(Vec<u8>),
 }
@@ -27,7 +29,7 @@ impl Value {
             Value::Null => Cow::Borrowed("NULL"),
             Value::Integer(v) => Cow::Owned(v.to_string()),
             Value::Real(v) => Cow::Owned(v.to_string()),
-            Value::Text(v) => Cow::Borrowed(v.as_str()),
+            Value::Decimal(v) | Value::Text(v) => Cow::Borrowed(v.as_str()),
             Value::Blob(v) => Cow::Owned(format!("<blob {} bytes>", v.len())),
         }
     }
@@ -37,7 +39,7 @@ impl Value {
     }
 
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Value::Integer(_) | Value::Real(_))
+        matches!(self, Value::Integer(_) | Value::Real(_) | Value::Decimal(_))
     }
 }
 
@@ -118,6 +120,11 @@ pub trait Connection: Send + Sync {
     fn introspect(&self) -> Result<Vec<Schema>>;
 
     fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
+
+    /// True for a file on this machine or a server on localhost.
+    fn is_local(&self) -> bool {
+        false
+    }
 
     /// Quote an identifier for this engine's SQL dialect.
     fn quote_ident(&self, ident: &str) -> String {

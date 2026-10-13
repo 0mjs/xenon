@@ -66,7 +66,7 @@ xenon/
 |---|---|---|
 | UI | `gpui` (Zed), via the `gpui-pre =0.3.9` snapshot | GPU-rendered, native-feeling; same snapshot `gpui-component` 0.7 pins. Needs the `font-kit` feature on `gpui-pre-platform` or no text renders |
 | Components | `gpui-component` (Longbridge) for the SQL editor only | Its code editor gives tree-sitter SQL highlighting, undo, search and completion hooks. Styled by `assets/themes/steel.json`. The results grid is our own (`uniform_list`) |
-| Postgres | `tokio-postgres` | Low-level control: cancel tokens, streaming rows, raw type OIDs |
+| Postgres | `tokio-postgres` + `postgres-native-tls` | Simple-query protocol for exact text values and multi-statement scripts; single statements are also prepared to get column types. One shared Tokio runtime. All libpq `sslmode`s incl. `verify-ca`/`verify-full` |
 | SQLite | `rusqlite` (bundled) | Mature, synchronous, run on a background thread |
 | Async | Tokio runtime on a background thread, bridged to GPUI's executor | Drivers need Tokio; GPUI owns the main thread |
 | SQL parsing | `sqlparser` | Split statements, detect destructive queries |
@@ -90,8 +90,9 @@ pub trait Connection: Send + Sync {
 }
 ```
 
-Today results are collected in full (capped at 100,000 rows, flagged when truncated). Streaming
-in **batches** so the first rows render immediately is planned for the Postgres milestone.
+Results are collected in full, capped at 100,000 rows; past the cap Postgres queries are cancelled
+server-side and the result is flagged as truncated. Streaming in **batches** so the first rows
+render immediately is still to do.
 
 ## Milestones
 
@@ -99,7 +100,7 @@ in **batches** so the first rows render immediately is planned for the Postgres 
 |---|---|---|
 | M0 ✅ | **Skeleton** | Workspace builds; GPUI window opens with sidebar + empty pane; theme tokens in place |
 | M1 ✅ | **SQLite end-to-end** | Open a `.db`, see tables, run a query, see results in a virtual grid |
-| M2 | **Postgres** | Connect via form or URL, introspect schema, run + cancel queries, SSL |
+| M2 ✅ | **Postgres** | Connect via form or URL, introspect schema, run + cancel queries, SSL |
 | M3 | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
 | M4 | **Grid polish** | Column resize, copy formats, type rendering, table browser with sort/filter |
 | M5 | **Feel** | Command palette, keybindings, light/dark, empty states, error UX, perf pass |
