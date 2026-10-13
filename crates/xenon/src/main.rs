@@ -4,7 +4,10 @@ use gpui::{
 };
 use gpui_component::Root;
 use gpui_platform::application;
-use xenon_ui::{Launch, NewConnection, OpenFile, Quit, ToggleExplorer, ToggleInspector, Workspace};
+use xenon_ui::{
+    CancelQuery, CloseTab, Launch, NewConnection, NewTab, NextTab, OpenFile, PrevTab, Quit, RunAll,
+    RunQuery, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, Workspace,
+};
 
 fn main() {
     // `xenon path/to/file.db` or `xenon postgres://…` opens that database on launch.
@@ -56,12 +59,26 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Quit Xenon", Quit),
         ]),
         Menu::new("File").items([
+            MenuItem::action("New Query Tab", NewTab),
+            MenuItem::action("Close Tab", CloseTab),
+            MenuItem::separator(),
             MenuItem::action("Open SQLite File…", OpenFile),
             MenuItem::action("Connect to Postgres…", NewConnection),
         ]),
+        Menu::new("Query").items([
+            MenuItem::action("Run Statement", RunQuery),
+            MenuItem::action("Run All", RunAll),
+            MenuItem::action("Cancel", CancelQuery),
+        ]),
         Menu::new("View").items([
-            MenuItem::action("Toggle Explorer", ToggleExplorer),
+            MenuItem::action("Explorer", ShowExplorer),
+            MenuItem::action("History", ShowHistory),
+            MenuItem::separator(),
+            MenuItem::action("Toggle Side Panel", ToggleExplorer),
             MenuItem::action("Toggle Inspector", ToggleInspector),
+            MenuItem::separator(),
+            MenuItem::action("Next Tab", NextTab),
+            MenuItem::action("Previous Tab", PrevTab),
         ]),
     ]);
 }

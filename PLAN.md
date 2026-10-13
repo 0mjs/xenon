@@ -71,7 +71,7 @@ xenon/
 | Async | Tokio runtime on a background thread, bridged to GPUI's executor | Drivers need Tokio; GPUI owns the main thread |
 | SQL parsing | `sqlparser` | Split statements, detect destructive queries |
 | Secrets | `keyring` | macOS Keychain / Windows Credential Manager / Secret Service |
-| Local store | SQLite file in the app data dir | Dogfoods the SQLite driver path |
+| Local store | `crates/xenon_store`: SQLite at `~/Library/Application Support/Xenon/xenon.db` | Query history today (5,000 entries per connection); saved connections next |
 
 **Driver abstraction** (`crates/xenon_driver`)
 
@@ -101,7 +101,7 @@ render immediately is still to do.
 | M0 ✅ | **Skeleton** | Workspace builds; GPUI window opens with sidebar + empty pane; theme tokens in place |
 | M1 ✅ | **SQLite end-to-end** | Open a `.db`, see tables, run a query, see results in a virtual grid |
 | M2 ✅ | **Postgres** | Connect via form or URL, introspect schema, run + cancel queries, SSL |
-| M3 | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
+| M3 ✅ | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
 | M4 | **Grid polish** | Column resize, copy formats, type rendering, table browser with sort/filter |
 | M5 | **Feel** | Command palette, keybindings, light/dark, empty states, error UX, perf pass |
 | M6 | **Ship v0.1** | Signed macOS build, README, screenshots, GitHub release |

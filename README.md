@@ -20,11 +20,18 @@ Requires macOS with Xcode (for Metal) and Rust 1.85+ (edition 2024).
 |---|---|
 | `⌘O` | Open SQLite file |
 | `⌘N` | Connect to Postgres |
-| `⌘↵` | Run the selection, or the whole editor |
+| `⌘↵` | Run the statement under the cursor (or the selection) |
+| `⇧⌘↵` | Run everything in the editor (or the selection) |
 | `⌘.` | Cancel the running query |
-| `⌘B` | Toggle explorer |
+| `⌘T` / `⌘W` | New / close query tab |
+| `⌃Tab` / `⌃⇧Tab` | Next / previous tab (also `⇧⌘]` / `⇧⌘[`) |
+| `⌘Y` | Query history (click loads a query, double-click runs it) |
+| `⇧⌘E` | Explorer |
+| `⌘B` | Toggle side panel |
 | `⌘I` | Toggle inspector |
 | `⌘Q` | Quit |
+
+Double-click the title bar to zoom the window.
 
 ## Tests
 

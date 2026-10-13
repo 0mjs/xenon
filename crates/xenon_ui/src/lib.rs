@@ -1,7 +1,10 @@
 mod connect;
+mod explorer;
 pub mod fonts;
+mod history;
 mod results;
 pub mod theme;
+mod widgets;
 pub mod workspace;
 
 use gpui::{App, KeyBinding, actions};
@@ -15,7 +18,14 @@ actions!(
         OpenFile,
         NewConnection,
         RunQuery,
+        RunAll,
         CancelQuery,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        ShowExplorer,
+        ShowHistory,
         ToggleExplorer,
         ToggleInspector
     ]
@@ -34,8 +44,18 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-o", OpenFile, None),
         KeyBinding::new("cmd-n", NewConnection, None),
+        KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("cmd-w", CloseTab, None),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+        KeyBinding::new("cmd-shift-]", NextTab, None),
+        KeyBinding::new("cmd-shift-[", PrevTab, None),
+        KeyBinding::new("cmd-shift-e", ShowExplorer, None),
+        KeyBinding::new("cmd-y", ShowHistory, None),
         KeyBinding::new("cmd-enter", RunQuery, Some("Workspace")),
         KeyBinding::new("cmd-enter", RunQuery, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("cmd-shift-enter", RunAll, Some("Workspace")),
+        KeyBinding::new("cmd-shift-enter", RunAll, Some(EDITOR_CONTEXT)),
         KeyBinding::new("cmd-.", CancelQuery, Some("Workspace")),
         KeyBinding::new("cmd-.", CancelQuery, Some(EDITOR_CONTEXT)),
         KeyBinding::new("cmd-b", ToggleExplorer, Some("Workspace")),

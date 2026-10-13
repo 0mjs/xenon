@@ -15,6 +15,7 @@ use xenon_driver::{
 
 pub struct SqliteConnection {
     name: String,
+    id: String,
     conn: Mutex<rusqlite::Connection>,
     interrupt: Arc<Interrupt>,
 }
@@ -48,20 +49,26 @@ impl SqliteConnection {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        Ok(Self::new(name, conn))
+        let id = std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .display()
+            .to_string();
+        Ok(Self::new(name, id, conn))
     }
 
     pub fn open_in_memory() -> Result<Self> {
         Ok(Self::new(
             ":memory:".into(),
+            ":memory:".into(),
             rusqlite::Connection::open_in_memory()?,
         ))
     }
 
-    fn new(name: String, conn: rusqlite::Connection) -> Self {
+    fn new(name: String, id: String, conn: rusqlite::Connection) -> Self {
         let interrupt = Arc::new(Interrupt(conn.get_interrupt_handle()));
         Self {
             name,
+            id,
             conn: Mutex::new(conn),
             interrupt,
         }
@@ -77,6 +84,10 @@ impl SqliteConnection {
 impl Connection for SqliteConnection {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn id(&self) -> String {
+        format!("sqlite:{}", self.id)
     }
 
     fn server_version(&self) -> String {

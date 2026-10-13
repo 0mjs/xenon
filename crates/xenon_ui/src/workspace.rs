@@ -1,32 +1,42 @@
-//! The main window: title bar, icon rail, explorer, workspace, inspector, status bar.
+//! The main window: title bar with query tabs, icon rail, side panel (explorer
+//! or history), editor and results, inspector, status bar.
 //! Layout follows PLAN.md, "Design direction".
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{
-    AnyElement, Context, Entity, ExternalPaths, FocusHandle, FontWeight, IntoElement,
+    AnyElement, ClickEvent, Context, Entity, ExternalPaths, FocusHandle, FontWeight, IntoElement,
     PathPromptOptions, Render, Rgba, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
-use gpui_component::input::{Editor, EditorState};
-use xenon_driver::{CancelHandle, Connection, ObjectKind, QueryOutcome, QueryResult, Schema};
+use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
+use xenon_driver::{
+    CancelHandle, Connection, QueryOutcome, QueryResult, Schema, sql::statement_at,
+};
 use xenon_postgres::PostgresConnection;
 use xenon_sqlite::SqliteConnection;
+use xenon_store::{HistoryEntry, NewHistoryEntry, Store};
 
 use crate::connect::{ConnectDialog, ConnectEvent, PgTarget};
 use crate::results::{self, Grid};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
-use crate::{CancelQuery, NewConnection, OpenFile, RunQuery, ToggleExplorer, ToggleInspector};
+use crate::widgets::{
+    centered_hint, empty_hint, format_duration, group_digits, kbd, panel_label,
+};
+use crate::{
+    CancelQuery, CloseTab, NewConnection, NewTab, NextTab, OpenFile, PrevTab, RunAll, RunQuery,
+    ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector,
+};
 
 const TITLEBAR_HEIGHT: f32 = 34.;
 const STATUSBAR_HEIGHT: f32 = 24.;
 const RAIL_WIDTH: f32 = 44.;
-const EXPLORER_WIDTH: f32 = 230.;
+const SIDE_PANEL_WIDTH: f32 = 240.;
 const INSPECTOR_WIDTH: f32 = 260.;
 const EDITOR_HEIGHT: f32 = 220.;
+const TAB_MAX_WIDTH: f32 = 180.;
 /// Room for the macOS traffic lights in the transparent title bar.
 const TRAFFIC_LIGHT_INSET: f32 = 78.;
 /// Rows kept from a single result set; the rest are dropped and flagged.
@@ -50,17 +60,31 @@ impl Launch {
     }
 }
 
-struct Session {
-    conn: Arc<dyn Connection>,
-    version: String,
-    schemas: Vec<Schema>,
+pub(crate) struct Session {
+    pub conn: Arc<dyn Connection>,
+    pub version: String,
+    pub schemas: Vec<Schema>,
 }
 
 impl Session {
     /// SQLite has a single implicit schema; don't show a level for it.
-    fn shows_schemas(&self) -> bool {
+    pub fn shows_schemas(&self) -> bool {
         self.schemas.len() > 1 || self.schemas.iter().any(|s| s.name != "main")
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunScope {
+    /// The selection, or else the statement under the cursor.
+    Statement,
+    /// The selection, or else the whole editor.
+    All,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidePanel {
+    Explorer,
+    History,
 }
 
 enum Query {
@@ -73,58 +97,85 @@ enum Query {
     Done(Arc<QueryResult>),
 }
 
-pub struct Workspace {
-    focus_handle: FocusHandle,
-    editor: Entity<EditorState>,
-    session: Option<Session>,
-    /// A problem opening a database, shown in the explorer.
-    notice: Option<SharedString>,
+/// One query tab: its own editor and its own results.
+pub(crate) struct Tab {
+    id: usize,
+    title: SharedString,
+    /// `schema.table` when the tab was opened by browsing a table, so browsing
+    /// the same table again returns to it.
+    browsing: Option<String>,
+    pub(crate) editor: Entity<EditorState>,
     query: Query,
     grid: Option<Grid>,
     selected_row: Option<usize>,
+}
+
+pub struct Workspace {
+    focus_handle: FocusHandle,
+    tabs: Vec<Tab>,
+    active: usize,
+    next_tab_id: usize,
+    pub(crate) session: Option<Session>,
+    /// A problem opening a database, shown in the explorer.
+    pub(crate) notice: Option<SharedString>,
     /// Explorer keys (`schema.table`) whose columns are shown.
-    expanded: HashSet<String>,
-    collapsed_schemas: HashSet<String>,
+    pub(crate) expanded: HashSet<String>,
+    pub(crate) collapsed_schemas: HashSet<String>,
+    pub(crate) store: Option<Arc<Store>>,
+    pub(crate) history: Vec<HistoryEntry>,
+    pub(crate) history_filter: Entity<InputState>,
+    side_panel: SidePanel,
     connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
-    show_explorer: bool,
+    show_side_panel: bool,
     show_inspector: bool,
-    _appearance: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
     pub fn new(launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus_handle = cx.focus_handle();
-        let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("sql")
-                .line_number(true)
-                .placeholder("-- write SQL here, ⌘↵ to run")
-        });
-        // Deferred so it runs after gpui-component's Root has been built around us.
-        cx.defer_in(window, |this: &mut Self, window, cx| {
-            this.editor.update(cx, |editor, cx| editor.focus(window, cx));
-        });
-
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             theme::apply(Mode::from_appearance(window.appearance()), cx);
             cx.notify();
         });
 
+        let history_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter history"));
+        let filter_changes = cx.subscribe(&history_filter, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.reload_history(cx);
+            }
+        });
+
+        let store = match Store::default_path().and_then(|path| Store::open(&path)) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(err) => {
+                eprintln!("xenon: query history is unavailable: {err:#}");
+                None
+            }
+        };
+
         let mut this = Self {
-            focus_handle,
-            editor,
+            focus_handle: cx.focus_handle(),
+            tabs: Vec::new(),
+            active: 0,
+            next_tab_id: 0,
             session: None,
             notice: None,
-            query: Query::Idle,
-            grid: None,
-            selected_row: None,
             expanded: HashSet::new(),
             collapsed_schemas: HashSet::new(),
+            store,
+            history: Vec::new(),
+            history_filter,
+            side_panel: SidePanel::Explorer,
             connect_dialog: None,
-            show_explorer: true,
+            show_side_panel: true,
             show_inspector: true,
-            _appearance: appearance,
+            _subscriptions: vec![appearance, filter_changes],
         };
+        this.add_tab(None, window, cx);
+        // Deferred so it runs after gpui-component's Root has been built around us.
+        cx.defer_in(window, |this: &mut Self, window, cx| this.focus_editor(window, cx));
+
         match launch {
             Some(Launch::Sqlite(path)) => this.open_path(path, cx),
             Some(Launch::Postgres(url)) => this.connect_postgres(PgTarget::Url(url), cx),
@@ -132,6 +183,89 @@ impl Workspace {
         }
         this
     }
+
+    // ---------------------------------------------------------------- tabs
+
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
+    }
+
+    pub(crate) fn active_tab(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    fn add_tab(&mut self, browsing: Option<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.next_tab_id += 1;
+        let id = self.next_tab_id;
+        let editor = cx.new(|cx| {
+            EditorState::new(window, cx)
+                .language("sql")
+                .line_number(true)
+                .placeholder("-- write SQL here: ⌘↵ runs the statement, ⇧⌘↵ runs all")
+        });
+        let (title, browsing) = match browsing {
+            Some((key, table)) => (SharedString::from(table), Some(key)),
+            None => (SharedString::from(format!("Query {id}")), None),
+        };
+        self.tabs.push(Tab {
+            id,
+            title,
+            browsing,
+            editor,
+            query: Query::Idle,
+            grid: None,
+            selected_row: None,
+        });
+        self.active = self.tabs.len() - 1;
+        cx.notify();
+    }
+
+    fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index < self.tabs.len() {
+            self.active = index;
+            self.focus_editor(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Query::Running { cancel, .. } = &self.tabs[index].query {
+            cancel.cancel();
+        }
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.add_tab(None, window, cx);
+        } else if self.active >= self.tabs.len() || index < self.active {
+            self.active = self.active.saturating_sub(1).min(self.tabs.len() - 1);
+        }
+        self.focus_editor(window, cx);
+        cx.notify();
+    }
+
+    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_tab(None, window, cx);
+        self.focus_editor(window, cx);
+    }
+
+    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab_at(self.active, window, cx);
+    }
+
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_tab((self.active + 1) % self.tabs.len(), window, cx);
+    }
+
+    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        let len = self.tabs.len();
+        self.activate_tab((self.active + len - 1) % len, window, cx);
+    }
+
+    fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let editor = self.active_tab().editor.clone();
+        editor.update(cx, |editor, cx| editor.focus(window, cx));
+    }
+
+    // ---------------------------------------------------------- connecting
 
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.connect(cx, move || {
@@ -172,12 +306,20 @@ impl Workspace {
                             conn,
                             schemas,
                         });
-                        this.query = Query::Idle;
-                        this.grid = None;
-                        this.selected_row = None;
+                        // Keep everyone's SQL; results belong to the old connection.
+                        for tab in &mut this.tabs {
+                            if let Query::Running { cancel, .. } = &tab.query {
+                                cancel.cancel();
+                            }
+                            tab.query = Query::Idle;
+                            tab.grid = None;
+                            tab.selected_row = None;
+                            tab.browsing = None;
+                        }
                         this.expanded.clear();
                         this.collapsed_schemas.clear();
                         this.connect_dialog = None;
+                        this.reload_history(cx);
                     }
                     Err(err) => {
                         let message: SharedString = format!("{err:#}").into();
@@ -196,7 +338,7 @@ impl Workspace {
         .detach();
     }
 
-    fn new_connection(&mut self, _: &NewConnection, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_connection(&mut self, _: &NewConnection, window: &mut Window, cx: &mut Context<Self>) {
         if self.connect_dialog.is_some() {
             return;
         }
@@ -212,7 +354,7 @@ impl Workspace {
                 }
                 ConnectEvent::Dismiss => {
                     this.connect_dialog = None;
-                    this.editor.update(cx, |editor, cx| editor.focus(window, cx));
+                    this.focus_editor(window, cx);
                     cx.notify();
                 }
             }
@@ -221,7 +363,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_file(&mut self, _: &OpenFile, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file(&mut self, _: &OpenFile, _: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -238,31 +380,74 @@ impl Workspace {
         .detach();
     }
 
-    fn run_query(&mut self, _: &RunQuery, _: &mut Window, cx: &mut Context<Self>) {
+    // ------------------------------------------------------------- running
+
+    fn run_statement(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
+        self.run(RunScope::Statement, window, cx);
+    }
+
+    fn run_all(&mut self, _: &RunAll, window: &mut Window, cx: &mut Context<Self>) {
+        self.run(RunScope::All, window, cx);
+    }
+
+    pub(crate) fn run(&mut self, scope: RunScope, _: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
-            self.notice = Some("Open a database first (⌘O).".into());
+            self.notice = Some("Open a database first (⌘O or ⌘N).".into());
             cx.notify();
             return;
         };
-        if matches!(self.query, Query::Running { .. }) {
+        let tab = &self.tabs[self.active];
+        if matches!(tab.query, Query::Running { .. }) {
             return;
         }
 
-        let editor = self.editor.read(cx);
-        let selection = editor.selected_value();
-        let sql = if selection.trim().is_empty() {
-            editor.value().to_string()
+        let editor = tab.editor.read(cx);
+        let text = editor.value().to_string();
+        let selection = editor.selected_range();
+        let sql = if !selection.is_empty() {
+            text.get(selection).unwrap_or_default().to_string()
         } else {
-            selection.to_string()
+            match scope {
+                RunScope::All => text,
+                RunScope::Statement => match statement_at(&text, editor.cursor()) {
+                    Some(range) => text[range].to_string(),
+                    None => return,
+                },
+            }
         };
         if sql.trim().is_empty() {
             return;
         }
 
+        let tab_id = tab.id;
         let conn = session.conn.clone();
+        let store = self.store.clone();
         let cancel = conn.cancel_handle();
         let work = cx.background_spawn(async move {
+            let started = std::time::Instant::now();
             let result = conn.execute(&sql, ROW_LIMIT);
+            if let Some(store) = store {
+                let (rows, error) = match &result {
+                    Ok(result) => (
+                        Some(match &result.outcome {
+                            QueryOutcome::Rows(rows) => rows.rows.len() as u64,
+                            QueryOutcome::Affected(n) => *n,
+                        }),
+                        None,
+                    ),
+                    Err(err) => (None, Some(format!("{err:#}"))),
+                };
+                let recorded = store.record(NewHistoryEntry {
+                    connection: &conn.id(),
+                    sql: &sql,
+                    duration: started.elapsed(),
+                    rows,
+                    error: error.as_deref(),
+                });
+                if let Err(err) = recorded {
+                    eprintln!("xenon: could not save query history: {err:#}");
+                }
+            }
             // Statements without rows may have changed the schema.
             let schemas = match &result {
                 Ok(QueryResult {
@@ -275,10 +460,10 @@ impl Workspace {
         });
         let task = cx.spawn(async move |this, cx| {
             let (result, schemas) = work.await;
-            this.update(cx, |this, cx| this.finish_query(result, schemas, cx))
+            this.update(cx, |this, cx| this.finish_query(tab_id, result, schemas, cx))
                 .ok();
         });
-        self.query = Query::Running {
+        self.active_tab_mut().query = Query::Running {
             cancel,
             _task: task,
         };
@@ -287,6 +472,7 @@ impl Workspace {
 
     fn finish_query(
         &mut self,
+        tab_id: usize,
         result: anyhow::Result<QueryResult>,
         schemas: Option<Vec<Schema>>,
         cx: &mut Context<Self>,
@@ -294,59 +480,95 @@ impl Workspace {
         if let (Some(session), Some(schemas)) = (&mut self.session, schemas) {
             session.schemas = schemas;
         }
-        self.selected_row = None;
+        self.reload_history(cx);
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        tab.selected_row = None;
         match result {
             Ok(mut result) => {
                 if let QueryOutcome::Rows(rows) = &mut result.outcome {
-                    self.grid = Some(Grid::new(std::mem::take(rows)));
+                    tab.grid = Some(Grid::new(std::mem::take(rows)));
                     result.outcome = QueryOutcome::Rows(Default::default());
                 } else {
-                    self.grid = None;
+                    tab.grid = None;
                 }
-                self.query = Query::Done(Arc::new(result));
+                tab.query = Query::Done(Arc::new(result));
             }
             Err(err) => {
-                self.grid = None;
-                self.query = Query::Failed(format!("{err:#}").into());
+                tab.grid = None;
+                tab.query = Query::Failed(format!("{err:#}").into());
             }
         }
         cx.notify();
     }
 
     fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, _: &mut Context<Self>) {
-        if let Query::Running { cancel, .. } = &self.query {
+        if let Query::Running { cancel, .. } = &self.active_tab().query {
             cancel.cancel();
         }
     }
 
-    fn browse(&mut self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Show a table's rows, in the tab already browsing it or in a new one.
+    pub(crate) fn browse(&mut self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = &self.session else { return };
         let sql = format!(
             "select * from {}.{} limit {BROWSE_LIMIT};",
             session.conn.quote_ident(schema),
             session.conn.quote_ident(table)
         );
-        self.editor
-            .update(cx, |editor, cx| editor.set_value(sql, window, cx));
-        self.run_query(&RunQuery, window, cx);
+        let key = format!("{schema}.{table}");
+        match self.tabs.iter().position(|tab| tab.browsing.as_deref() == Some(&key)) {
+            Some(index) => self.active = index,
+            None => self.add_tab(Some((key, table.to_string())), window, cx),
+        }
+        let editor = self.active_tab().editor.clone();
+        editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));
+        self.focus_editor(window, cx);
+        self.run(RunScope::All, window, cx);
     }
 
-    fn toggle_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
+    // -------------------------------------------------------------- panels
+
+    pub(crate) fn toggle_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(key) {
             self.expanded.insert(key.to_string());
         }
         cx.notify();
     }
 
-    fn toggle_schema(&mut self, schema: &str, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_schema(&mut self, schema: &str, cx: &mut Context<Self>) {
         if !self.collapsed_schemas.remove(schema) {
             self.collapsed_schemas.insert(schema.to_string());
         }
         cx.notify();
     }
 
+    fn show_panel(&mut self, panel: SidePanel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_side_panel && self.side_panel == panel {
+            self.show_side_panel = false;
+        } else {
+            self.show_side_panel = true;
+            self.side_panel = panel;
+            if panel == SidePanel::History {
+                self.reload_history(cx);
+                self.history_filter
+                    .update(cx, |input, cx| input.focus(window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    fn show_explorer(&mut self, _: &ShowExplorer, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_panel(SidePanel::Explorer, window, cx);
+    }
+
+    fn show_history(&mut self, _: &ShowHistory, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_panel(SidePanel::History, window, cx);
+    }
+
     fn toggle_explorer(&mut self, _: &ToggleExplorer, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_explorer = !self.show_explorer;
+        self.show_side_panel = !self.show_side_panel;
         cx.notify();
     }
 
@@ -365,14 +587,10 @@ impl Render for Workspace {
             .flex_row()
             .flex_1()
             .min_h(px(0.))
-            .child(rail(&theme))
-            .when(self.show_explorer, |el| {
-                el.child(self.render_explorer(&theme, cx))
-            })
+            .child(self.render_rail(&theme, cx))
+            .when(self.show_side_panel, |el| el.child(self.render_side_panel(&theme, cx)))
             .child(self.render_center(&theme, cx))
-            .when(self.show_inspector, |el| {
-                el.child(self.render_inspector(&theme))
-            });
+            .when(self.show_inspector, |el| el.child(self.render_inspector(&theme)));
 
         div()
             .id("workspace")
@@ -380,8 +598,15 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::open_file))
             .on_action(cx.listener(Self::new_connection))
-            .on_action(cx.listener(Self::run_query))
+            .on_action(cx.listener(Self::run_statement))
+            .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::cancel_query))
+            .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::close_tab))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::show_explorer))
+            .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(Self::toggle_explorer))
             .on_action(cx.listener(Self::toggle_inspector))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -397,7 +622,7 @@ impl Render for Workspace {
             .text_color(theme.text)
             .text_size(px(12.))
             .relative()
-            .child(self.render_titlebar(&theme))
+            .child(self.render_titlebar(&theme, cx))
             .child(body)
             .child(self.render_statusbar(&theme))
             .when_some(self.connect_dialog.as_ref(), |el, (dialog, _)| {
@@ -407,13 +632,61 @@ impl Render for Workspace {
 }
 
 impl Workspace {
-    fn render_titlebar(&self, theme: &Theme) -> impl IntoElement {
-        let tab = match &self.session {
-            Some(session) => SharedString::from(session.conn.name().to_string()),
-            None => "Welcome".into(),
-        };
+    fn render_titlebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
+            let active = index == self.active;
+            let running = matches!(tab.query, Query::Running { .. });
+            div()
+                .id(("tab", tab.id))
+                .h_full()
+                .max_w(px(TAB_MAX_WIDTH))
+                .pl(px(14.))
+                .pr(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .relative()
+                .border_r_1()
+                .border_color(theme.line)
+                .cursor_pointer()
+                .when(active, |el| el.bg(theme.s1).text_color(theme.text))
+                .when(!active, |el| el.text_color(theme.t3).hover(|s| s.text_color(theme.t2)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.activate_tab(index, window, cx);
+                }))
+                .when(running, |el| {
+                    el.child(div().size(px(6.)).rounded_full().bg(theme.acc))
+                })
+                .child(div().truncate().child(tab.title.clone()))
+                .child(
+                    div()
+                        .id(("close-tab", tab.id))
+                        .px(px(3.))
+                        .text_size(px(10.))
+                        .text_color(if active { theme.t3 } else { theme.bg })
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab_at(index, window, cx);
+                        }))
+                        .child("✕"),
+                )
+                .when(active, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(1.))
+                            .bg(theme.acc),
+                    )
+                })
+        });
 
         div()
+            .id("titlebar")
             .h(px(TITLEBAR_HEIGHT))
             .flex_none()
             .flex()
@@ -422,39 +695,52 @@ impl Workspace {
             .bg(theme.bg)
             .border_b_1()
             .border_color(theme.line)
+            // Double-clicking empty title bar space zooms the window, like any Mac app.
+            .on_click(|event: &ClickEvent, window, _| {
+                if event.click_count() == 2 {
+                    window.titlebar_double_click();
+                }
+            })
             .child(
                 div()
                     .w(px(TRAFFIC_LIGHT_INSET))
+                    .flex_none()
                     .h_full()
                     .border_r_1()
                     .border_color(theme.line),
             )
             .child(
                 div()
+                    .id("tab-strip")
                     .h_full()
-                    .px(px(14.))
+                    .flex()
+                    .flex_row()
+                    .min_w(px(0.))
+                    .overflow_x_scroll()
+                    .children(tabs),
+            )
+            .child(
+                div()
+                    .id("new-tab")
+                    .h_full()
+                    .px(px(10.))
                     .flex()
                     .items_center()
-                    .bg(theme.s1)
-                    .relative()
-                    .border_r_1()
-                    .border_color(theme.line)
-                    .child(tab)
-                    .child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(1.))
-                            .bg(theme.acc),
-                    ),
+                    .text_color(theme.t3)
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(theme.text))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.new_tab(&NewTab, window, cx);
+                    }))
+                    .child("+"),
             )
-            .child(div().flex_1())
+            .child(div().flex_1().h_full())
             .child(
                 div()
                     .mr(px(8.))
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(10.))
                     .pl(px(10.))
@@ -470,178 +756,53 @@ impl Workspace {
             )
     }
 
-    fn render_explorer(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div()
-            .id("explorer-list")
-            .flex_1()
-            .overflow_y_scroll()
-            .pb(px(8.));
-
-        match &self.session {
-            None => {
-                list = list.child(empty_hint(theme, "No connection")).child(
-                    explorer_button(theme, "open-file", "Open SQLite file", "⌘O").on_click(
-                        cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx)),
-                    ),
-                );
-                list = list.child(
-                    explorer_button(theme, "connect-pg", "Connect to Postgres", "⌘N").on_click(
-                        cx.listener(|this, _, window, cx| {
-                            this.new_connection(&NewConnection, window, cx)
-                        }),
-                    ),
-                );
-                list = list.child(empty_hint(theme, "or drop a SQLite file here"));
-            }
-            Some(session) => {
-                list = list.child(
-                    tree_row(0)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(div().w(px(12.)).child("▾"))
-                        .child(div().flex_1().truncate().child(session.conn.name().to_string()))
-                        .when(session.conn.is_local(), |el| {
-                            el.child(env_tag("LOCAL", theme.t3))
-                        }),
-                );
-                let nested = session.shows_schemas();
-                for schema in &session.schemas {
-                    let collapsed = nested && self.collapsed_schemas.contains(&schema.name);
-                    if nested {
-                        let name = schema.name.clone();
-                        list = list.child(
-                            tree_row(1)
-                                .id(SharedString::from(format!("schema-{}", schema.name)))
-                                .cursor_pointer()
-                                .text_color(theme.t2)
-                                .hover(|s| s.bg(theme.s3))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_schema(&name, cx)
-                                }))
-                                .child(
-                                    div()
-                                        .w(px(12.))
-                                        .text_color(theme.t3)
-                                        .child(if collapsed { "▸" } else { "▾" }),
-                                )
-                                .child(div().flex_1().truncate().child(schema.name.clone()))
-                                .child(
-                                    div()
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(10.5))
-                                        .text_color(theme.t3)
-                                        .child(schema.objects.len().to_string()),
-                                ),
-                        );
-                    }
-                    if collapsed {
-                        continue;
-                    }
-                    let depth = if nested { 2 } else { 1 };
-                    for object in &schema.objects {
-                        list = list.children(self.render_object(&schema.name, object, depth, theme, cx));
-                    }
-                    if schema.objects.is_empty() {
-                        list = list.child(empty_hint(theme, "No tables"));
-                    }
-                }
-            }
-        }
-
-        if let Some(notice) = &self.notice {
-            list = list.child(
-                div()
-                    .mx(px(12.))
-                    .mt(px(10.))
-                    .p(px(8.))
-                    .border_l_2()
-                    .border_color(theme.err)
-                    .bg(theme.s2)
-                    .text_color(theme.t2)
-                    .child(notice.clone()),
-            );
-        }
+    fn render_rail(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let item = |id: &'static str, glyph: &'static str, panel: SidePanel| {
+            let active = self.show_side_panel && self.side_panel == panel;
+            div()
+                .id(id)
+                .size(px(30.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .cursor_pointer()
+                .text_color(if active { theme.text } else { theme.t3 })
+                .when(active, |el| el.border_l_2().border_color(theme.acc))
+                .when(!active, |el| el.hover(|s| s.text_color(theme.t2)))
+                .on_click(cx.listener(move |this, _, window, cx| this.show_panel(panel, window, cx)))
+                .child(glyph)
+        };
 
         div()
-            .w(px(EXPLORER_WIDTH))
+            .w(px(RAIL_WIDTH))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(8.))
+            .gap(px(2.))
+            .bg(theme.bg)
+            .border_r_1()
+            .border_color(theme.line)
+            .child(item("rail-explorer", "▤", SidePanel::Explorer))
+            .child(item("rail-history", "◷", SidePanel::History))
+    }
+
+    fn render_side_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let (label, content) = match self.side_panel {
+            SidePanel::Explorer => ("Explorer", self.render_explorer(theme, cx)),
+            SidePanel::History => ("History", self.render_history(theme, cx)),
+        };
+        div()
+            .w(px(SIDE_PANEL_WIDTH))
             .flex_none()
             .flex()
             .flex_col()
             .border_r_1()
             .border_color(theme.line)
-            .child(panel_label(theme, "Explorer"))
-            .child(list)
-    }
-
-    fn render_object(
-        &self,
-        schema: &str,
-        object: &xenon_driver::SchemaObject,
-        depth: usize,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let key = format!("{schema}.{}", object.name);
-        let expanded = self.expanded.contains(&key);
-        let toggle_key = key.clone();
-        let browse_schema = schema.to_string();
-        let browse_name = object.name.clone();
-        let icon = match object.kind {
-            ObjectKind::Table => "▦",
-            ObjectKind::View => "◇",
-        };
-
-        let mut rows = vec![
-            tree_row(depth)
-                .id(SharedString::from(format!("obj-{key}")))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.s3).text_color(theme.text))
-                .text_color(theme.t2)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.browse(&browse_schema, &browse_name, window, cx)
-                }))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("chev-{key}")))
-                        .w(px(12.))
-                        .text_color(theme.t3)
-                        .hover(|s| s.text_color(theme.text))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_expanded(&toggle_key, cx)
-                        }))
-                        .child(if expanded { "▾" } else { "▸" }),
-                )
-                .child(div().text_color(theme.t3).child(icon))
-                .child(div().flex_1().truncate().child(object.name.clone()))
-                .child(
-                    div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
-                        .text_color(theme.t3)
-                        .child(object.columns.len().to_string()),
-                )
-                .into_any_element(),
-        ];
-
-        if expanded {
-            rows.extend(object.columns.iter().map(|column| {
-                tree_row(depth + 1)
-                    .text_color(theme.t2)
-                    .child(div().flex_1().truncate().child(column.name.clone()))
-                    .when(column.primary_key, |el| {
-                        el.child(env_tag("PK", theme.acc))
-                    })
-                    .child(
-                        div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.))
-                            .text_color(theme.t3)
-                            .child(column.type_name.to_lowercase()),
-                    )
-                    .into_any_element()
-            }));
-        }
-        rows
+            .child(panel_label(theme, label))
+            .child(content)
     }
 
     fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -654,7 +815,7 @@ impl Workspace {
             .font_family(MONO_FONT)
             .text_size(px(12.5))
             .py(px(6.))
-            .child(Editor::new(&self.editor).h_full().appearance(false));
+            .child(Editor::new(&self.active_tab().editor).h_full().appearance(false));
 
         div()
             .flex_1()
@@ -663,35 +824,32 @@ impl Workspace {
             .flex_col()
             .child(editor)
             .child(self.render_results_bar(theme))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(self.render_results(theme, cx)),
-            )
+            .child(div().flex_1().min_h(px(0.)).child(self.render_results(theme, cx)))
     }
 
     fn render_results_bar(&self, theme: &Theme) -> impl IntoElement {
+        let tab = self.active_tab();
         let mut cells: Vec<(SharedString, Rgba)> = Vec::new();
-        match &self.query {
+        match &tab.query {
             Query::Idle => cells.push(("No results".into(), theme.t3)),
             Query::Running { .. } => cells.push(("Running… ⌘. to cancel".into(), theme.t2)),
             Query::Failed(_) => cells.push(("ERROR".into(), theme.err)),
             Query::Done(result) => {
                 cells.push(("OK".into(), theme.ok));
-                match (&result.outcome, &self.grid) {
+                match (&result.outcome, &tab.grid) {
                     (QueryOutcome::Rows(_), Some(grid)) => {
-                        let count = grid.data.rows.len();
+                        let count = group_digits(grid.data.rows.len());
                         let label = if grid.data.truncated {
-                            format!("first {} rows", group_digits(count))
+                            format!("first {count} rows")
                         } else {
-                            format!("{} rows", group_digits(count))
+                            format!("{count} rows")
                         };
                         cells.push((label.into(), theme.t2));
                     }
-                    (QueryOutcome::Affected(n), _) => {
-                        cells.push((format!("{} rows affected", group_digits(*n as usize)).into(), theme.t2))
-                    }
+                    (QueryOutcome::Affected(n), _) => cells.push((
+                        format!("{} rows affected", group_digits(*n as usize)).into(),
+                        theme.t2,
+                    )),
                     _ => {}
                 }
                 cells.push((format_duration(result.elapsed).into(), theme.t3));
@@ -724,22 +882,26 @@ impl Workspace {
     }
 
     fn render_results(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(grid) = &self.grid {
+        let tab = self.active_tab();
+        if let Some(grid) = &tab.grid {
             if grid.data.rows.is_empty() && grid.data.columns.is_empty() {
                 return centered_hint(theme, "The query returned no columns.");
             }
             let this = cx.entity().downgrade();
+            let tab_id = tab.id;
             let on_select: results::OnSelect = Rc::new(move |ix, _, cx| {
                 this.update(cx, |this, cx| {
-                    this.selected_row = Some(ix);
-                    cx.notify();
+                    if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.selected_row = Some(ix);
+                        cx.notify();
+                    }
                 })
                 .ok();
             });
-            return results::render(grid, self.selected_row, theme, on_select).into_any_element();
+            return results::render(grid, tab.selected_row, theme, on_select).into_any_element();
         }
 
-        match &self.query {
+        match &tab.query {
             Query::Failed(message) => div()
                 .m(px(12.))
                 .p(px(12.))
@@ -753,9 +915,10 @@ impl Workspace {
                 .into_any_element(),
             Query::Running { .. } => centered_hint(theme, "Running…"),
             Query::Done(_) => centered_hint(theme, "Done."),
-            Query::Idle if self.session.is_some() => {
-                centered_hint(theme, "Run a query with ⌘↵, or click a table to browse it.")
-            }
+            Query::Idle if self.session.is_some() => centered_hint(
+                theme,
+                "⌘↵ runs the statement under the cursor, ⇧⌘↵ runs everything.",
+            ),
             Query::Idle => div()
                 .size_full()
                 .flex()
@@ -763,12 +926,7 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap(px(6.))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Xenon"),
-                )
+                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Xenon"))
                 .child(
                     div()
                         .text_color(theme.t3)
@@ -779,6 +937,7 @@ impl Workspace {
     }
 
     fn render_inspector(&self, theme: &Theme) -> impl IntoElement {
+        let tab = self.active_tab();
         let mut panel = div()
             .w(px(INSPECTOR_WIDTH))
             .flex_none()
@@ -787,11 +946,9 @@ impl Workspace {
             .border_l_1()
             .border_color(theme.line);
 
-        let selected = self
-            .selected_row
-            .zip(self.grid.as_ref())
-            .and_then(|(ix, grid)| grid.data.rows.get(ix).map(|row| (ix, row, &grid.data.columns)));
-
+        let selected = tab.selected_row.zip(tab.grid.as_ref()).and_then(|(ix, grid)| {
+            grid.data.rows.get(ix).map(|row| (ix, row, &grid.data.columns))
+        });
         let Some((ix, row, columns)) = selected else {
             return panel
                 .child(panel_label(theme, "Inspector"))
@@ -814,11 +971,7 @@ impl Workspace {
                     .border_color(theme.line_2)
                     .font_family(MONO_FONT)
                     .text_size(px(11.))
-                    .child(
-                        div()
-                            .text_color(theme.t3)
-                            .child(SharedString::from(column.name.clone())),
-                    )
+                    .child(div().text_color(theme.t3).child(SharedString::from(column.name.clone())))
                     .child(if value.is_null() {
                         div().italic().text_color(theme.t3).child("NULL")
                     } else {
@@ -868,170 +1021,5 @@ impl Workspace {
         bar.child(div().flex_1()).child(
             cell(concat!("xenon ", env!("CARGO_PKG_VERSION")).into(), theme.t3).border_l_1(),
         )
-    }
-}
-
-fn rail(theme: &Theme) -> impl IntoElement {
-    let icon = |glyph: &'static str, active: bool| {
-        div()
-            .size(px(30.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(13.))
-            .text_color(if active { theme.text } else { theme.t3 })
-            .when(active, |el| el.border_l_2().border_color(theme.acc))
-            .child(glyph)
-    };
-
-    div()
-        .w(px(RAIL_WIDTH))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .items_center()
-        .pt(px(8.))
-        .gap(px(2.))
-        .bg(theme.bg)
-        .border_r_1()
-        .border_color(theme.line)
-        .child(icon("▤", true))
-        .child(icon("⌕", false))
-        .child(icon("◷", false))
-        .child(icon("★", false))
-        .child(icon("⚙", false))
-}
-
-fn explorer_button(
-    theme: &Theme,
-    id: &'static str,
-    label: &'static str,
-    keys: &'static str,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .mx(px(12.))
-        .mt(px(4.))
-        .px(px(10.))
-        .py(px(6.))
-        .flex()
-        .items_center()
-        .justify_between()
-        .border_1()
-        .border_color(theme.line)
-        .text_color(theme.t2)
-        .cursor_pointer()
-        .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-        .child(label)
-        .child(kbd(theme, keys))
-}
-
-fn tree_row(depth: usize) -> gpui::Div {
-    div()
-        .h(px(24.))
-        .pl(px(12. + depth as f32 * 12.))
-        .pr(px(12.))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
-}
-
-fn env_tag(label: &'static str, color: Rgba) -> impl IntoElement {
-    div()
-        .px(px(4.))
-        .border_1()
-        .border_color(color)
-        .text_color(color)
-        .font_family(MONO_FONT)
-        .text_size(px(9.))
-        .font_weight(FontWeight::NORMAL)
-        .child(label)
-}
-
-fn panel_label(theme: &Theme, text: &str) -> AnyElement {
-    div()
-        .px(px(12.))
-        .pt(px(10.))
-        .pb(px(6.))
-        .font_family(MONO_FONT)
-        .text_size(px(10.))
-        .text_color(theme.t3)
-        .child(text.to_uppercase())
-        .into_any_element()
-}
-
-fn empty_hint(theme: &Theme, text: &'static str) -> AnyElement {
-    div()
-        .px(px(12.))
-        .py(px(6.))
-        .text_color(theme.t3)
-        .child(text)
-        .into_any_element()
-}
-
-fn centered_hint(theme: &Theme, text: &'static str) -> AnyElement {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(theme.t3)
-        .child(text)
-        .into_any_element()
-}
-
-fn kbd(theme: &Theme, keys: &'static str) -> impl IntoElement {
-    div()
-        .px(px(5.))
-        .bg(theme.s2)
-        .border_1()
-        .border_color(theme.line)
-        .font_family(MONO_FONT)
-        .text_size(px(10.))
-        .text_color(theme.t2)
-        .child(keys)
-}
-
-fn format_duration(elapsed: Duration) -> String {
-    let ms = elapsed.as_secs_f64() * 1000.;
-    if ms < 1. {
-        format!("{:.2} ms", ms)
-    } else if ms < 1000. {
-        format!("{:.1} ms", ms)
-    } else {
-        format!("{:.2} s", ms / 1000.)
-    }
-}
-
-fn group_digits(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn groups_thousands() {
-        assert_eq!(group_digits(0), "0");
-        assert_eq!(group_digits(999), "999");
-        assert_eq!(group_digits(1000), "1,000");
-        assert_eq!(group_digits(1234567), "1,234,567");
-    }
-
-    #[test]
-    fn formats_durations() {
-        assert_eq!(format_duration(Duration::from_micros(250)), "0.25 ms");
-        assert_eq!(format_duration(Duration::from_micros(38_200)), "38.2 ms");
-        assert_eq!(format_duration(Duration::from_millis(2500)), "2.50 s");
     }
 }

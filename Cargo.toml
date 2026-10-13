@@ -11,9 +11,11 @@ publish = false
 xenon_driver = { path = "crates/xenon_driver" }
 xenon_postgres = { path = "crates/xenon_postgres" }
 xenon_sqlite = { path = "crates/xenon_sqlite" }
+xenon_store = { path = "crates/xenon_store" }
 xenon_ui = { path = "crates/xenon_ui" }
 
 anyhow = "1"
+dirs = "7"
 futures-util = "0.3"
 native-tls = "0.2"
 postgres-native-tls = "0.5"

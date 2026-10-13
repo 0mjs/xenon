@@ -5,6 +5,8 @@
 //! a separate [`CancelHandle`] so it can be triggered while a query holds the
 //! connection.
 
+pub mod sql;
+
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
@@ -109,6 +111,12 @@ pub trait CancelHandle: Send + Sync {
 pub trait Connection: Send + Sync {
     /// Short label for the connection, e.g. a file name or database name.
     fn name(&self) -> &str;
+
+    /// Stable identity for local state such as query history, e.g. a file path
+    /// or `user@host:port/database`. Never contains a password.
+    fn id(&self) -> String {
+        self.name().to_string()
+    }
 
     /// Engine and version, e.g. `sqlite 3.50.4`.
     fn server_version(&self) -> String;

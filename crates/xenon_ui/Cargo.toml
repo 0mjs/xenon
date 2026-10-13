@@ -11,3 +11,4 @@ xenon_driver.workspace = true
 xenon_sqlite.workspace = true
 anyhow.workspace = true
 xenon_postgres.workspace = true
+xenon_store.workspace = true

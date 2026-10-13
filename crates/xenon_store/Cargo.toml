@@ -1,0 +1,10 @@
+[package]
+name = "xenon_store"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true

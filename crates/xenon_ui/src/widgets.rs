@@ -1,0 +1,141 @@
+//! Small Steel-styled building blocks shared by the panels.
+
+use std::time::Duration;
+
+use gpui::{AnyElement, FontWeight, IntoElement, Rgba, div, prelude::*, px};
+
+use crate::theme::{MONO_FONT, Theme};
+
+pub fn panel_label(theme: &Theme, text: &str) -> AnyElement {
+    div()
+        .px(px(12.))
+        .pt(px(10.))
+        .pb(px(6.))
+        .font_family(MONO_FONT)
+        .text_size(px(10.))
+        .text_color(theme.t3)
+        .child(text.to_uppercase())
+        .into_any_element()
+}
+
+pub fn empty_hint(theme: &Theme, text: &'static str) -> AnyElement {
+    div()
+        .px(px(12.))
+        .py(px(6.))
+        .text_color(theme.t3)
+        .child(text)
+        .into_any_element()
+}
+
+pub fn centered_hint(theme: &Theme, text: &'static str) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.t3)
+        .child(text)
+        .into_any_element()
+}
+
+pub fn kbd(theme: &Theme, keys: &'static str) -> impl IntoElement {
+    div()
+        .px(px(5.))
+        .bg(theme.s2)
+        .border_1()
+        .border_color(theme.line)
+        .font_family(MONO_FONT)
+        .text_size(px(10.))
+        .text_color(theme.t2)
+        .child(keys)
+}
+
+pub fn tree_row(depth: usize) -> gpui::Div {
+    div()
+        .h(px(24.))
+        .pl(px(12. + depth as f32 * 12.))
+        .pr(px(12.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+}
+
+pub fn env_tag(label: &'static str, color: Rgba) -> impl IntoElement {
+    div()
+        .px(px(4.))
+        .border_1()
+        .border_color(color)
+        .text_color(color)
+        .font_family(MONO_FONT)
+        .text_size(px(9.))
+        .font_weight(FontWeight::NORMAL)
+        .child(label)
+}
+
+pub fn panel_button(
+    theme: &Theme,
+    id: &'static str,
+    label: &'static str,
+    keys: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .mx(px(12.))
+        .mt(px(4.))
+        .px(px(10.))
+        .py(px(6.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .border_1()
+        .border_color(theme.line)
+        .text_color(theme.t2)
+        .cursor_pointer()
+        .hover(|s| s.text_color(theme.text).border_color(theme.t3))
+        .child(label)
+        .child(kbd(theme, keys))
+}
+
+pub fn format_duration(elapsed: Duration) -> String {
+    let ms = elapsed.as_secs_f64() * 1000.;
+    if ms < 1. {
+        format!("{:.2} ms", ms)
+    } else if ms < 1000. {
+        format!("{:.1} ms", ms)
+    } else {
+        format!("{:.2} s", ms / 1000.)
+    }
+}
+
+pub fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_thousands() {
+        assert_eq!(group_digits(0), "0");
+        assert_eq!(group_digits(999), "999");
+        assert_eq!(group_digits(1000), "1,000");
+        assert_eq!(group_digits(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn formats_durations() {
+        assert_eq!(format_duration(Duration::from_micros(250)), "0.25 ms");
+        assert_eq!(format_duration(Duration::from_micros(38_200)), "38.2 ms");
+        assert_eq!(format_duration(Duration::from_millis(2500)), "2.50 s");
+    }
+}

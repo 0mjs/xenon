@@ -78,6 +78,7 @@ pub struct ConnectOptions {
 
 pub struct PostgresConnection {
     name: String,
+    id: String,
     local: bool,
     version: String,
     client: Client,
@@ -156,6 +157,13 @@ impl PostgresConnection {
         }
         let tls = tls_connector(ssl)?;
         let name = connection_name(&config);
+        let id = format!(
+            "postgres:{}@{}:{}/{}",
+            config.get_user().unwrap_or("postgres"),
+            name.rsplit('@').next().unwrap_or("localhost"),
+            config.get_ports().first().copied().unwrap_or(5432),
+            config.get_dbname().or(config.get_user()).unwrap_or("postgres"),
+        );
         let local = config.get_hosts().iter().all(|host| match host {
             tokio_postgres::config::Host::Tcp(name) => {
                 matches!(name.as_str(), "localhost" | "127.0.0.1" | "::1")
@@ -187,6 +195,7 @@ impl PostgresConnection {
 
             Ok(Self {
                 name,
+                id,
                 local,
                 version: format!("postgres {}", version.split_whitespace().next().unwrap_or("")),
                 cancel: Arc::new(PgCancel {
@@ -294,6 +303,10 @@ impl PostgresConnection {
 impl Connection for PostgresConnection {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn id(&self) -> String {
+        self.id.clone()
     }
 
     fn server_version(&self) -> String {
