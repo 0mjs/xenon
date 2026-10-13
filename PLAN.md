@@ -65,7 +65,7 @@ xenon/
 | Area | Choice | Why |
 |---|---|---|
 | UI | `gpui` (Zed), via the `gpui-pre =0.3.9` snapshot | GPU-rendered, native-feeling; same snapshot `gpui-component` 0.7 pins. Needs the `font-kit` feature on `gpui-pre-platform` or no text renders |
-| Components | evaluate `gpui-component` (Longbridge) | Ready-made inputs, virtual tables, docks, themes — saves months |
+| Components | `gpui-component` (Longbridge) for the SQL editor only | Its code editor gives tree-sitter SQL highlighting, undo, search and completion hooks. Styled by `assets/themes/steel.json`. The results grid is our own (`uniform_list`) |
 | Postgres | `tokio-postgres` | Low-level control: cancel tokens, streaming rows, raw type OIDs |
 | SQLite | `rusqlite` (bundled) | Mature, synchronous, run on a background thread |
 | Async | Tokio runtime on a background thread, bridged to GPUI's executor | Drivers need Tokio; GPUI owns the main thread |
@@ -73,31 +73,32 @@ xenon/
 | Secrets | `keyring` | macOS Keychain / Windows Credential Manager / Secret Service |
 | Local store | SQLite file in the app data dir | Dogfoods the SQLite driver path |
 
-**Driver abstraction** (sketch)
+**Driver abstraction** (`crates/xenon_driver`)
+
+Drivers are **blocking** and are called from GPUI's background executor; each driver owns any
+runtime it needs (Postgres will run Tokio internally). Cancellation is a separate handle so it
+can fire while a query holds the connection.
 
 ```rust
-#[async_trait]
-pub trait Driver: Send + Sync {
-    async fn connect(cfg: &ConnectionConfig) -> Result<Box<dyn Connection>>;
-}
-
-#[async_trait]
 pub trait Connection: Send + Sync {
-    async fn execute(&self, sql: &str) -> Result<QueryStream>;   // streams row batches
-    fn cancel_handle(&self) -> CancelHandle;
-    async fn introspect(&self) -> Result<SchemaTree>;
+    fn name(&self) -> &str;
+    fn server_version(&self) -> String;
+    fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult>; // last statement's outcome
+    fn introspect(&self) -> Result<Vec<Schema>>;
+    fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
+    fn quote_ident(&self, ident: &str) -> String;
 }
 ```
 
-Results stream in **batches** (e.g. 1,000 rows) so the grid renders the first page immediately
-while the rest loads; large results are capped with a "load more" affordance.
+Today results are collected in full (capped at 100,000 rows, flagged when truncated). Streaming
+in **batches** so the first rows render immediately is planned for the Postgres milestone.
 
 ## Milestones
 
 | # | Milestone | Done when |
 |---|---|---|
 | M0 ✅ | **Skeleton** | Workspace builds; GPUI window opens with sidebar + empty pane; theme tokens in place |
-| M1 | **SQLite end-to-end** | Open a `.db`, see tables, run a query, see results in a virtual grid |
+| M1 ✅ | **SQLite end-to-end** | Open a `.db`, see tables, run a query, see results in a virtual grid |
 | M2 | **Postgres** | Connect via form or URL, introspect schema, run + cancel queries, SSL |
 | M3 | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
 | M4 | **Grid polish** | Column resize, copy formats, type rendering, table browser with sort/filter |
@@ -189,6 +190,5 @@ outlined. Env tags are 1 px outlined mono caps. Errors: left danger border, erro
 ## Open questions
 
 - License: GPLv3 (+ CLA for dual licensing) vs MIT/Apache-2.0
-- `gpui-component` vs building our own grid/editor (decide during M0 spike)
 - Platform order: macOS first, then Linux and Windows (GPUI supports all three)
 - Name availability: GitHub org/repo, crates.io `xenon`, domain

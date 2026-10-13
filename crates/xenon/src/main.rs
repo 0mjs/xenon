@@ -1,19 +1,23 @@
+use std::path::PathBuf;
+
 use gpui::{
     App, Bounds, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds, WindowOptions,
     point, prelude::*, px, size,
 };
+use gpui_component::Root;
 use gpui_platform::application;
-use xenon_ui::theme::{Mode, Theme};
-use xenon_ui::{Quit, ToggleExplorer, ToggleInspector, Workspace};
+use xenon_ui::{OpenFile, Quit, ToggleExplorer, ToggleInspector, Workspace};
 
 fn main() {
+    // `xenon path/to/file.db` opens that database on launch.
+    let path = std::env::args_os().nth(1).map(PathBuf::from);
+
     application().run(|cx: &mut App| {
         if let Err(err) = xenon_ui::fonts::load(cx) {
             eprintln!("xenon: failed to load bundled fonts: {err:#}");
         }
         xenon_ui::init(cx);
         set_menus(cx);
-        cx.set_global(Theme::for_mode(Mode::from_appearance(cx.window_appearance())));
 
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -36,7 +40,8 @@ fn main() {
             },
             |window, cx| {
                 window.set_rem_size(px(16.));
-                cx.new(|cx| Workspace::new(window, cx))
+                let workspace = cx.new(|cx| Workspace::new(path, window, cx));
+                cx.new(|cx| Root::new(workspace, window, cx))
             },
         )
         .expect("failed to open the main window");
@@ -52,6 +57,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Quit Xenon", Quit),
         ]),
+        Menu::new("File").items([MenuItem::action("Open…", OpenFile)]),
         Menu::new("View").items([
             MenuItem::action("Toggle Explorer", ToggleExplorer),
             MenuItem::action("Toggle Inspector", ToggleInspector),

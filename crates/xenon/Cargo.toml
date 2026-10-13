@@ -8,3 +8,4 @@ publish.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 xenon_ui.workspace = true
+gpui-component.workspace = true

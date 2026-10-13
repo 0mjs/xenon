@@ -8,12 +8,19 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+xenon_driver = { path = "crates/xenon_driver" }
+xenon_sqlite = { path = "crates/xenon_sqlite" }
 xenon_ui = { path = "crates/xenon_ui" }
 
-# Same GPUI snapshot that gpui-component 0.7 pins, so it can be adopted later without a fork.
+anyhow = "1"
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+
+# The GPUI snapshot that gpui-component 0.7.3 pins; the two must move together.
 gpui = { package = "gpui-pre", version = "=0.3.9" }
 # `font-kit` is required on macOS; without it GPUI silently renders no text.
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }
+
+gpui-component = { version = "=0.7.3", features = ["tree-sitter-sql"] }
 
 [profile.dev.package."*"]
 opt-level = 2

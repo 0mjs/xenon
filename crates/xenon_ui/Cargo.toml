@@ -6,3 +6,7 @@ publish.workspace = true
 
 [dependencies]
 gpui.workspace = true
+gpui-component.workspace = true
+xenon_driver.workspace = true
+xenon_sqlite.workspace = true
+anyhow.workspace = true

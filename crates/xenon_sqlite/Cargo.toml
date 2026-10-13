@@ -1,0 +1,10 @@
+[package]
+name = "xenon_sqlite"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+xenon_driver.workspace = true

@@ -98,6 +98,33 @@ impl Theme {
     }
 }
 
+/// Register the Steel themes with gpui-component (which styles the SQL editor)
+/// and apply the one matching the system appearance.
+pub fn install(cx: &mut App) {
+    let registry = gpui_component::ThemeRegistry::global_mut(cx);
+    registry
+        .load_themes_from_str(include_str!("../../../assets/themes/steel.json"))
+        .expect("bundled steel.json is valid");
+    let dark = registry.themes()["Steel Dark"].clone();
+    let light = registry.themes()["Steel Light"].clone();
+
+    let component_theme = gpui_component::Theme::global_mut(cx);
+    component_theme.dark_theme = dark;
+    component_theme.light_theme = light;
+
+    apply(Mode::from_appearance(cx.window_appearance()), cx);
+}
+
+/// Switch both Xenon's tokens and gpui-component's theme to `mode`.
+pub fn apply(mode: Mode, cx: &mut App) {
+    cx.set_global(Theme::for_mode(mode));
+    let component_mode = match mode {
+        Mode::Dark => gpui_component::ThemeMode::Dark,
+        Mode::Light => gpui_component::ThemeMode::Light,
+    };
+    gpui_component::Theme::change(component_mode, None, cx);
+}
+
 pub trait ActiveTheme {
     fn theme(&self) -> &Theme;
 }
