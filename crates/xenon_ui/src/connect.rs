@@ -1,8 +1,8 @@
 //! "Connect to Postgres" dialog: paste a URL, or fill in the fields.
 
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement, Render,
-    SharedString, Subscription, Window, div, prelude::*, px, rgba,
+    App, Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement, Render, SharedString,
+    Subscription, Window, div, prelude::*, px, rgba,
 };
 use gpui_component::input::{Escape, Input, InputEvent, InputState};
 use xenon_postgres::{ConnectOptions, SslMode};
@@ -85,7 +85,8 @@ impl ConnectDialog {
         if self.connecting {
             return;
         }
-        let value = |input: &Entity<InputState>, cx: &App| input.read(cx).value().trim().to_string();
+        let value =
+            |input: &Entity<InputState>, cx: &App| input.read(cx).value().trim().to_string();
 
         let url = value(&self.url, cx);
         let target = if !url.is_empty() {
@@ -139,8 +140,12 @@ impl Render for ConnectDialog {
                 .child(Input::new(input))
         };
 
-        let ssl_options = div().flex().flex_row().border_1().border_color(theme.line).children(
-            SslMode::ALL.into_iter().map(|mode| {
+        let ssl_options = div()
+            .flex()
+            .flex_row()
+            .border_1()
+            .border_color(theme.line)
+            .children(SslMode::ALL.into_iter().map(|mode| {
                 let active = mode == self.ssl;
                 div()
                     .id(mode.as_str())
@@ -160,8 +165,7 @@ impl Render for ConnectDialog {
                         cx.notify();
                     }))
                     .child(mode.as_str())
-            }),
-        );
+            }));
 
         let panel = div()
             .id("connect-panel")
@@ -242,7 +246,11 @@ impl Render for ConnectDialog {
                         button(
                             &theme,
                             "connect",
-                            if self.connecting { "Connecting…" } else { "Connect" },
+                            if self.connecting {
+                                "Connecting…"
+                            } else {
+                                "Connect"
+                            },
                             true,
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
@@ -277,7 +285,12 @@ fn field_label(theme: &Theme, label: &'static str) -> impl IntoElement {
         .child(label.to_uppercase())
 }
 
-fn button(theme: &Theme, id: &'static str, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+fn button(
+    theme: &Theme,
+    id: &'static str,
+    label: &'static str,
+    primary: bool,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .px(px(12.))
@@ -287,7 +300,9 @@ fn button(theme: &Theme, id: &'static str, label: &'static str, primary: bool) -
         .text_size(px(12.))
         .font_weight(FontWeight::MEDIUM)
         .when(primary, |el| {
-            el.bg(theme.text).border_color(theme.text).text_color(theme.bg)
+            el.bg(theme.text)
+                .border_color(theme.text)
+                .text_color(theme.bg)
         })
         .when(!primary, |el| {
             el.border_color(theme.line)

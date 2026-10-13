@@ -10,33 +10,45 @@ use crate::{NewConnection, OpenFile};
 
 impl Workspace {
     pub(crate) fn render_explorer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let mut list = div().id("explorer-list").flex_1().overflow_y_scroll().pb(px(8.));
+        let mut list = div()
+            .id("explorer-list")
+            .flex_1()
+            .overflow_y_scroll()
+            .pb(px(8.));
 
         match &self.session {
             None => {
-                list = list
-                    .child(empty_hint(theme, "No connection"))
-                    .child(
-                        panel_button(theme, "open-file", "Open SQLite file", "⌘O").on_click(
-                            cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx)),
-                        ),
-                    )
-                    .child(
-                        panel_button(theme, "connect-pg", "Connect to Postgres", "⌘N").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.new_connection(&NewConnection, window, cx)
-                            }),
-                        ),
-                    )
-                    .child(empty_hint(theme, "or drop a SQLite file here"));
+                list =
+                    list.child(empty_hint(theme, "No connection"))
+                        .child(
+                            panel_button(theme, "open-file", "Open SQLite file", "⌘O").on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.open_file(&OpenFile, window, cx)
+                                }),
+                            ),
+                        )
+                        .child(
+                            panel_button(theme, "connect-pg", "Connect to Postgres", "⌘N")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.new_connection(&NewConnection, window, cx)
+                                })),
+                        )
+                        .child(empty_hint(theme, "or drop a SQLite file here"));
             }
             Some(session) => {
                 list = list.child(
                     tree_row(0)
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(div().w(px(12.)).child("▾"))
-                        .child(div().flex_1().truncate().child(session.conn.name().to_string()))
-                        .when(session.conn.is_local(), |el| el.child(env_tag("LOCAL", theme.t3))),
+                        .child(
+                            div()
+                                .flex_1()
+                                .truncate()
+                                .child(session.conn.name().to_string()),
+                        )
+                        .when(session.conn.is_local(), |el| {
+                            el.child(env_tag("LOCAL", theme.t3))
+                        }),
                 );
                 let nested = session.shows_schemas();
                 for schema in &session.schemas {
@@ -49,15 +61,16 @@ impl Workspace {
                                 .cursor_pointer()
                                 .text_color(theme.t2)
                                 .hover(|s| s.bg(theme.s3))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.toggle_schema(&name, cx)
-                                }))
-                                .child(
-                                    div()
-                                        .w(px(12.))
-                                        .text_color(theme.t3)
-                                        .child(if collapsed { "▸" } else { "▾" }),
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.toggle_schema(&name, cx)
+                                    }),
                                 )
+                                .child(div().w(px(12.)).text_color(theme.t3).child(if collapsed {
+                                    "▸"
+                                } else {
+                                    "▾"
+                                }))
                                 .child(div().flex_1().truncate().child(schema.name.clone()))
                                 .child(count(theme, schema.objects.len())),
                         );
@@ -67,7 +80,13 @@ impl Workspace {
                     }
                     let depth = if nested { 2 } else { 1 };
                     for object in &schema.objects {
-                        list = list.children(self.render_object(&schema.name, object, depth, theme, cx));
+                        list = list.children(self.render_object(
+                            &schema.name,
+                            object,
+                            depth,
+                            theme,
+                            cx,
+                        ));
                     }
                     if schema.objects.is_empty() {
                         list = list.child(empty_hint(theme, "No tables"));

@@ -156,7 +156,9 @@ impl Connection for SqliteConnection {
         )?;
 
         let entries = list
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for (name, kind) in entries {
             let cols = columns
@@ -234,7 +236,10 @@ mod tests {
 
     #[test]
     fn select_returns_typed_values_and_decl_types() {
-        let result = rows(db().execute("select * from users order by id", 100).unwrap());
+        let result = rows(
+            db().execute("select * from users order by id", 100)
+                .unwrap(),
+        );
         assert_eq!(result.columns[1].name, "email");
         assert_eq!(result.columns[0].type_name.as_deref(), Some("INTEGER"));
         assert_eq!(result.rows[0][1], Value::Text("a@x.io".into()));
@@ -246,7 +251,10 @@ mod tests {
     #[test]
     fn multiple_statements_return_the_last_outcome() {
         let result = db()
-            .execute("update users set score = 2; select count(*) from users", 100)
+            .execute(
+                "update users set score = 2; select count(*) from users",
+                100,
+            )
             .unwrap();
         assert_eq!(result.statements, 2);
         assert_eq!(rows(result).rows[0][0], Value::Integer(2));
@@ -304,7 +312,10 @@ mod tests {
     #[test]
     fn explain_returns_plan_rows() {
         let db = db();
-        let result = rows(db.execute(&db.explain("select * from users where id = 1"), 10).unwrap());
+        let result = rows(
+            db.execute(&db.explain("select * from users where id = 1"), 10)
+                .unwrap(),
+        );
         assert!(result.columns.iter().any(|c| c.name == "detail"));
         assert!(!result.rows.is_empty());
     }

@@ -21,6 +21,7 @@ To build a proper app with its icon, `./scripts/bundle-macos.sh` creates `target
 
 | Shortcut | Action |
 |---|---|
+| `⌘K` / `⌘P` | Command palette: jump to a table or run any command |
 | `⌘O` | Open SQLite file |
 | `⌘N` | Connect to Postgres |
 | `⌘↵` | Run the statement under the cursor (or the selection) |
@@ -39,6 +40,9 @@ In the results grid: click a cell, shift-click or `⇧`+arrows to select a block
 `⌘A` all, `⌘C` copy (TSV, pastes into spreadsheets), `⇧⌘C` CSV, `⌥⌘C` JSON, `Esc` back to the
 editor. Click a header to sort (browse tabs sort on the server), drag a header edge to resize,
 double-click it to fit. Browse tabs have a `WHERE` filter.
+
+Drag the line under the editor to resize it (double-click to reset). When Postgres reports where a
+query failed, the cursor jumps there. View → Theme switches between System, Light and Dark.
 
 Double-click the title bar to zoom the window.
 

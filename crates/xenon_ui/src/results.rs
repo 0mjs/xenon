@@ -131,7 +131,11 @@ fn compare(a: &Value, b: &Value) -> Ordering {
 /// Final column widths: the user's dragged width where there is one, else the
 /// content-fit width.
 pub fn layout(natural: &[f32], manual: &[Option<f32>]) -> Vec<f32> {
-    natural.iter().zip(manual).map(|(n, m)| m.unwrap_or(*n)).collect()
+    natural
+        .iter()
+        .zip(manual)
+        .map(|(n, m)| m.unwrap_or(*n))
+        .collect()
 }
 
 /// A rectangular block of cells, in display coordinates.
@@ -166,7 +170,10 @@ impl Selection {
         let clamp = |value: usize, delta: isize, len: usize| {
             (value as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize
         };
-        let head = (clamp(self.head.0, dr, rows), clamp(self.head.1, dc, columns));
+        let head = (
+            clamp(self.head.0, dr, rows),
+            clamp(self.head.1, dc, columns),
+        );
         if extend {
             Self { head, ..self }
         } else {
@@ -219,10 +226,16 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
                 .border_r_1()
                 .border_color(theme.line_2),
         )
-        .children(columns.iter().zip(&view.widths).enumerate().map(|(ix, (column, width))| {
-            let direction = view.sort.filter(|(c, _)| *c == ix).map(|(_, d)| d);
-            header_cell(ix, column, *width, direction, theme, &callbacks)
-        }))
+        .children(
+            columns
+                .iter()
+                .zip(&view.widths)
+                .enumerate()
+                .map(|(ix, (column, width))| {
+                    let direction = view.sort.filter(|(c, _)| *c == ix).map(|(_, d)| d);
+                    header_cell(ix, column, *width, direction, theme, &callbacks)
+                }),
+        )
         .child(div().flex_1());
 
     let data = view.grid.data.clone();
@@ -234,7 +247,14 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
     let rows = uniform_list("result-rows", order.len(), move |range, _, _| {
         range
             .map(|ix| {
-                render_row(ix, &data.rows[order[ix]], &widths, selection, &theme, &row_callbacks)
+                render_row(
+                    ix,
+                    &data.rows[order[ix]],
+                    &widths,
+                    selection,
+                    &theme,
+                    &row_callbacks,
+                )
             })
             .collect()
     })
@@ -243,16 +263,20 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
     .w_full()
     .min_w(total_width);
 
-    div().id("result-grid").size_full().overflow_x_scroll().child(
-        div()
-            .w_full()
-            .min_w(total_width)
-            .h_full()
-            .flex()
-            .flex_col()
-            .child(header)
-            .child(rows),
-    )
+    div()
+        .id("result-grid")
+        .size_full()
+        .overflow_x_scroll()
+        .child(
+            div()
+                .w_full()
+                .min_w(total_width)
+                .h_full()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(rows),
+        )
 }
 
 fn header_cell(
@@ -324,14 +348,17 @@ fn header_cell(
                 .right(px(-RESIZE_HANDLE / 2.))
                 .w(px(RESIZE_HANDLE))
                 .cursor_col_resize()
-                .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    if event.click_count >= 2 {
-                        autofit(ix, window, cx);
-                    } else {
-                        resize(ix, event.position.x, width, window, cx);
-                    }
-                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        if event.click_count >= 2 {
+                            autofit(ix, window, cx);
+                        } else {
+                            resize(ix, event.position.x, width, window, cx);
+                        }
+                    },
+                )
                 .on_click(|_, _, cx| cx.stop_propagation()),
         )
 }
@@ -372,29 +399,34 @@ fn render_row(
                 .text_color(if row_selected { theme.acc } else { theme.t3 })
                 .child(SharedString::from((ix + 1).to_string())),
         )
-        .children(row.iter().zip(widths).enumerate().map(|(column, (value, width))| {
-            let selected = selection.is_some_and(|s| s.contains(ix, column));
-            let focused = selection.is_some_and(|s| s.head == (ix, column));
-            let select = callbacks.select.clone();
-            div()
-                .id(("cell", column))
-                .w(px(*width))
-                .h_full()
-                .flex_none()
-                .px(px(10.))
-                .flex()
-                .items_center()
-                .when(value.is_numeric(), |el| el.justify_end())
-                .border_r_1()
-                .border_color(theme.line_2)
-                .overflow_hidden()
-                .when(selected, |el| el.bg(theme.acc_wash))
-                .when(focused, |el| el.border_1().border_color(theme.acc))
-                .on_click(move |event: &ClickEvent, window, cx| {
-                    select(ix, column, event.modifiers().shift, window, cx)
-                })
-                .child(cell(value, theme))
-        }))
+        .children(
+            row.iter()
+                .zip(widths)
+                .enumerate()
+                .map(|(column, (value, width))| {
+                    let selected = selection.is_some_and(|s| s.contains(ix, column));
+                    let focused = selection.is_some_and(|s| s.head == (ix, column));
+                    let select = callbacks.select.clone();
+                    div()
+                        .id(("cell", column))
+                        .w(px(*width))
+                        .h_full()
+                        .flex_none()
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .when(value.is_numeric(), |el| el.justify_end())
+                        .border_r_1()
+                        .border_color(theme.line_2)
+                        .overflow_hidden()
+                        .when(selected, |el| el.bg(theme.acc_wash))
+                        .when(focused, |el| el.border_1().border_color(theme.acc))
+                        .on_click(move |event: &ClickEvent, window, cx| {
+                            select(ix, column, event.modifiers().shift, window, cx)
+                        })
+                        .child(cell(value, theme))
+                }),
+        )
         .child(div().flex_1())
         .into_any_element()
 }
@@ -443,18 +475,30 @@ mod tests {
         };
         let mut grid = Grid::new(data);
         let firsts = |grid: &Grid| -> Vec<Value> {
-            (0..grid.row_count()).map(|ix| grid.row(ix)[0].clone()).collect()
+            (0..grid.row_count())
+                .map(|ix| grid.row(ix)[0].clone())
+                .collect()
         };
 
         grid.set_sort(Some((0, SortDirection::Ascending)));
         assert_eq!(
             firsts(&grid),
-            [Value::Integer(2), Value::Integer(10), Value::Integer(33), Value::Null]
+            [
+                Value::Integer(2),
+                Value::Integer(10),
+                Value::Integer(33),
+                Value::Null
+            ]
         );
         grid.set_sort(Some((0, SortDirection::Descending)));
         assert_eq!(
             firsts(&grid),
-            [Value::Integer(33), Value::Integer(10), Value::Integer(2), Value::Null]
+            [
+                Value::Integer(33),
+                Value::Integer(10),
+                Value::Integer(2),
+                Value::Null
+            ]
         );
         grid.set_sort(Some((1, SortDirection::Descending)));
         assert_eq!(grid.row(0)[1], Value::Text("c".into()));
@@ -466,7 +510,10 @@ mod tests {
     #[test]
     fn decimals_sort_numerically() {
         assert_eq!(
-            compare(&Value::Decimal("9.5".into()), &Value::Decimal("10.25".into())),
+            compare(
+                &Value::Decimal("9.5".into()),
+                &Value::Decimal("10.25".into())
+            ),
             Ordering::Less
         );
     }

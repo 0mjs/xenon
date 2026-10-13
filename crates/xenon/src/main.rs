@@ -5,8 +5,10 @@ use gpui::{
 use gpui_component::Root;
 use gpui_platform::application;
 use xenon_ui::{
-    CancelQuery, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, Launch, NewConnection, NewTab, NextTab, OpenFile, PrevTab, Quit, RunAll,
-    RunQuery, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, Workspace,
+    CancelQuery, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, Launch, NewConnection,
+    NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery, ShowExplorer,
+    ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme,
+    Workspace,
 };
 
 fn main() {
@@ -78,6 +80,8 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Copy as JSON", CopyJson),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Command Palette…", OpenPalette),
+            MenuItem::separator(),
             MenuItem::action("Explorer", ShowExplorer),
             MenuItem::action("History", ShowHistory),
             MenuItem::separator(),
@@ -86,6 +90,12 @@ fn set_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Next Tab", NextTab),
             MenuItem::action("Previous Tab", PrevTab),
+            MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Theme").items([
+                MenuItem::action("Match System", UseSystemTheme),
+                MenuItem::action("Light", UseLightTheme),
+                MenuItem::action("Dark", UseDarkTheme),
+            ])),
         ]),
     ]);
 }
@@ -102,7 +112,9 @@ fn set_dock_icon() {
 
     let bundled = std::env::current_exe()
         .is_ok_and(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"));
-    let Some(main_thread) = MainThreadMarker::new() else { return };
+    let Some(main_thread) = MainThreadMarker::new() else {
+        return;
+    };
     if bundled {
         return;
     }

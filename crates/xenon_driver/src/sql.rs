@@ -234,7 +234,10 @@ mod tests {
 
     #[test]
     fn splits_on_top_level_semicolons() {
-        assert_eq!(texts("select 1; select 2;\nselect 3"), ["select 1", "select 2", "select 3"]);
+        assert_eq!(
+            texts("select 1; select 2;\nselect 3"),
+            ["select 1", "select 2", "select 3"]
+        );
     }
 
     #[test]
@@ -265,10 +268,19 @@ mod tests {
 
     #[test]
     fn backslash_escapes_only_in_escape_strings() {
-        assert_eq!(texts(r"select E'a\';b'; select 2"), [r"select E'a\';b'", "select 2"]);
+        assert_eq!(
+            texts(r"select E'a\';b'; select 2"),
+            [r"select E'a\';b'", "select 2"]
+        );
         // In a standard string a backslash is literal.
-        assert_eq!(texts(r"select 'C:\'; select 2"), [r"select 'C:\'", "select 2"]);
-        assert_eq!(texts(r"select type'x\'; select 2"), [r"select type'x\'", "select 2"]);
+        assert_eq!(
+            texts(r"select 'C:\'; select 2"),
+            [r"select 'C:\'", "select 2"]
+        );
+        assert_eq!(
+            texts(r"select type'x\'; select 2"),
+            [r"select type'x\'", "select 2"]
+        );
     }
 
     #[test]

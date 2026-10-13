@@ -2,6 +2,7 @@ mod connect;
 mod explorer;
 pub mod fonts;
 mod history;
+mod palette;
 mod results;
 pub mod theme;
 mod widgets;
@@ -41,7 +42,13 @@ actions!(
         CopySelection,
         CopyCsv,
         CopyJson,
-        FocusEditor
+        FocusEditor,
+        OpenPalette,
+        PaletteUp,
+        PaletteDown,
+        UseSystemTheme,
+        UseLightTheme,
+        UseDarkTheme
     ]
 );
 
@@ -92,6 +99,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-c", CopyCsv, Some(GRID_CONTEXT)),
         KeyBinding::new("cmd-alt-c", CopyJson, Some(GRID_CONTEXT)),
         KeyBinding::new("escape", FocusEditor, Some(GRID_CONTEXT)),
+        KeyBinding::new("cmd-k", OpenPalette, None),
+        KeyBinding::new("cmd-p", OpenPalette, None),
+        KeyBinding::new("up", PaletteUp, Some("Palette > Input")),
+        KeyBinding::new("down", PaletteDown, Some("Palette > Input")),
+        KeyBinding::new("ctrl-p", PaletteUp, Some("Palette > Input")),
+        KeyBinding::new("ctrl-n", PaletteDown, Some("Palette > Input")),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

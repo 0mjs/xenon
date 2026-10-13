@@ -14,6 +14,22 @@ use std::time::Duration;
 
 pub use anyhow::{Error, Result};
 
+/// A failed statement, with where in the statement the server says it failed.
+#[derive(Debug)]
+pub struct QueryError {
+    pub message: String,
+    /// 1-based character offset into the statement, when the engine reports one.
+    pub position: Option<usize>,
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for QueryError {}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,

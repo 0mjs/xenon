@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow};
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 
 /// Entries kept per connection; older ones are pruned.
 const HISTORY_LIMIT: usize = 5_000;
@@ -70,7 +70,8 @@ impl Store {
                  rows integer,
                  error text
              );
-             create index if not exists history_by_connection on history (connection, ran_at desc);",
+             create index if not exists history_by_connection on history (connection, ran_at desc);
+             create table if not exists settings (key text primary key, value text not null);",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -79,7 +80,9 @@ impl Store {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
         // A panic mid-write leaves SQLite consistent, so a poisoned lock is safe to reuse.
-        self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn record(&self, entry: NewHistoryEntry<'_>) -> Result<HistoryEntry> {
@@ -93,7 +96,14 @@ impl Store {
         conn.execute(
             "insert into history (connection, sql, ran_at, duration_ms, rows, error)
              values (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![entry.connection, entry.sql, ran_at, duration_ms, rows, entry.error],
+            params![
+                entry.connection,
+                entry.sql,
+                ran_at,
+                duration_ms,
+                rows,
+                entry.error
+            ],
         )?;
         let id = conn.last_insert_rowid();
         conn.execute(
@@ -114,11 +124,37 @@ impl Store {
         })
     }
 
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row("select value from settings where key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.lock().execute(
+            "insert into settings (key, value) values (?1, ?2)
+             on conflict (key) do update set value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     /// Newest first. `filter` matches anywhere in the SQL, case-insensitively.
-    pub fn history(&self, connection: &str, filter: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+    pub fn history(
+        &self,
+        connection: &str,
+        filter: &str,
+        limit: usize,
+    ) -> Result<Vec<HistoryEntry>> {
         let pattern = format!(
             "%{}%",
-            filter.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            filter
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
         );
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
@@ -203,11 +239,30 @@ mod tests {
     }
 
     #[test]
+    fn settings_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.setting("theme").unwrap(), None);
+        store.set_setting("theme", "dark").unwrap();
+        store.set_setting("theme", "light").unwrap();
+        assert_eq!(store.setting("theme").unwrap().as_deref(), Some("light"));
+    }
+
+    #[test]
     fn persists_across_reopen() {
         let dir = std::env::temp_dir().join(format!("xenon-store-test-{}", std::process::id()));
         let path = dir.join("nested").join("xenon.db");
-        Store::open(&path).unwrap().record(entry("a", "select 1")).unwrap();
-        assert_eq!(Store::open(&path).unwrap().history("a", "", 10).unwrap().len(), 1);
+        Store::open(&path)
+            .unwrap()
+            .record(entry("a", "select 1"))
+            .unwrap();
+        assert_eq!(
+            Store::open(&path)
+                .unwrap()
+                .history("a", "", 10)
+                .unwrap()
+                .len(),
+            1
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

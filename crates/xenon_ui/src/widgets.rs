@@ -120,9 +120,86 @@ pub fn group_digits(n: usize) -> String {
     out
 }
 
+/// Re-indent JSON text for reading. Returns `None` unless `text` is an object or
+/// array with balanced brackets (strings are respected), so ordinary text is
+/// never mangled.
+pub fn pretty_json(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return None;
+    }
+    let mut out = String::with_capacity(trimmed.len() * 2);
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.push_str(&"  ".repeat(depth));
+    };
+    let mut chars = trimmed.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_string {
+            out.push(ch);
+            match (escaped, ch) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            '{' | '[' => {
+                out.push(ch);
+                // Keep empty containers on one line.
+                if matches!(chars.peek(), Some('}') | Some(']')) {
+                    continue;
+                }
+                depth += 1;
+                newline(&mut out, depth);
+            }
+            '}' | ']' => {
+                if !matches!(out.chars().last(), Some('{') | Some('[')) {
+                    depth = depth.checked_sub(1)?;
+                    newline(&mut out, depth);
+                }
+                out.push(ch);
+            }
+            ',' => {
+                out.push(ch);
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    (depth == 0 && !in_string).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pretty_prints_json() {
+        assert_eq!(
+            pretty_json(r#"{"theme":"dark","tags":["a","b, c"],"empty":{},"n":1}"#).unwrap(),
+            "{\n  \"theme\": \"dark\",\n  \"tags\": [\n    \"a\",\n    \"b, c\"\n  ],\n  \"empty\": {},\n  \"n\": 1\n}"
+        );
+        assert_eq!(pretty_json(r#"["x\"]"]"#).unwrap(), "[\n  \"x\\\"]\"\n]");
+    }
+
+    #[test]
+    fn leaves_non_json_alone() {
+        assert_eq!(pretty_json("hello"), None);
+        assert_eq!(pretty_json("{unbalanced"), None);
+        assert_eq!(pretty_json("{\"a\": 1}}"), None);
+    }
 
     #[test]
     fn groups_thousands() {

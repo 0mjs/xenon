@@ -156,7 +156,10 @@ mod tests {
         let (a, b) = (col("id"), col("note"));
         let rows = vec![
             vec![Value::Integer(1), Value::Text("plain".into())],
-            vec![Value::Integer(2), Value::Text("has \"quotes\", commas\nand lines".into())],
+            vec![
+                Value::Integer(2),
+                Value::Text("has \"quotes\", commas\nand lines".into()),
+            ],
             vec![Value::Integer(3), Value::Null],
         ];
         let rows = refs(&rows);
@@ -164,7 +167,10 @@ mod tests {
             render(Format::Csv, &[&a, &b], &rows),
             "id,note\n1,plain\n2,\"has \"\"quotes\"\", commas\nand lines\"\n3,\n"
         );
-        assert_eq!(render(Format::Tsv, &[&a, &b], &rows[..1]), "id\tnote\n1\tplain\n");
+        assert_eq!(
+            render(Format::Tsv, &[&a, &b], &rows[..1]),
+            "id\tnote\n1\tplain\n"
+        );
     }
 
     #[test]
@@ -177,7 +183,12 @@ mod tests {
                 Value::Text("Line \"one\"\n".into()),
                 Value::Decimal("$1.00".into()),
             ],
-            vec![Value::Integer(2), Value::Null, Value::Real(f64::NAN), Value::Real(2.5)],
+            vec![
+                Value::Integer(2),
+                Value::Null,
+                Value::Real(f64::NAN),
+                Value::Real(2.5),
+            ],
         ];
         assert_eq!(
             render(Format::Json, &[&a, &b, &c, &d], &refs(&rows)),
@@ -201,6 +212,9 @@ mod tests {
         let c = col("data");
         let v = Value::Blob(vec![0x01, 0xab]);
         assert_eq!(render(Format::Tsv, &[&c], &[vec![&v]]), "\\x01ab");
-        assert_eq!(render(Format::Json, &[&c], &[vec![&v]]), "[\n  {\"data\": \"\\\\x01ab\"}\n]");
+        assert_eq!(
+            render(Format::Json, &[&c], &[vec![&v]]),
+            "[\n  {\"data\": \"\\\\x01ab\"}\n]"
+        );
     }
 }

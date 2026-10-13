@@ -23,9 +23,8 @@ impl Workspace {
         };
         let connection = session.conn.id();
         let filter = self.history_filter.read(cx).value().to_string();
-        let task = cx.background_spawn(async move {
-            store.history(&connection, &filter, HISTORY_SHOWN)
-        });
+        let task =
+            cx.background_spawn(async move { store.history(&connection, &filter, HISTORY_SHOWN) });
         cx.spawn(async move |this, cx| {
             let entries = task.await;
             this.update(cx, |this, cx| {
@@ -64,11 +63,16 @@ impl Workspace {
 
         if self.session.is_none() {
             return panel
-                .child(empty_hint(theme, "Connect to a database to see its history"))
+                .child(empty_hint(
+                    theme,
+                    "Connect to a database to see its history",
+                ))
                 .into_any_element();
         }
         if self.history.is_empty() {
-            return panel.child(empty_hint(theme, "Nothing yet")).into_any_element();
+            return panel
+                .child(empty_hint(theme, "Nothing yet"))
+                .into_any_element();
         }
 
         let now = now_ms();
@@ -119,10 +123,12 @@ impl Workspace {
             .border_color(theme.line_2)
             .cursor_pointer()
             .hover(|s| s.bg(theme.s3))
-            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                // Click loads the query; double-click runs it.
-                this.use_history_entry(sql.clone(), event.click_count() >= 2, window, cx);
-            }))
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    // Click loads the query; double-click runs it.
+                    this.use_history_entry(sql.clone(), event.click_count() >= 2, window, cx);
+                }),
+            )
             .child(
                 div()
                     .font_family(MONO_FONT)

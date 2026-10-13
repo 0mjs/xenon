@@ -15,22 +15,26 @@ use gpui::{
 use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use xenon_driver::export::{self, Format};
 use xenon_driver::sql::{SortDirection, browse_table, statement_at};
-use xenon_driver::{CancelHandle, Connection, QueryOutcome, QueryResult, Schema};
+use xenon_driver::{
+    CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema,
+};
 use xenon_postgres::PostgresConnection;
 use xenon_sqlite::SqliteConnection;
 use xenon_store::{HistoryEntry, NewHistoryEntry, Store};
 
 use crate::connect::{ConnectDialog, ConnectEvent, PgTarget};
+use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
-    centered_hint, empty_hint, format_duration, group_digits, kbd, panel_label,
+    centered_hint, empty_hint, format_duration, group_digits, kbd, panel_label, pretty_json,
 };
 use crate::{
     CancelQuery, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown, ExtendLeft,
     ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection,
-    NewTab, NextTab, OpenFile, PrevTab, RunAll, RunQuery, SelectAllCells, ShowExplorer,
-    ShowHistory, ToggleExplorer, ToggleInspector,
+    NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery, SelectAllCells,
+    ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme,
+    UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -39,6 +43,9 @@ const RAIL_WIDTH: f32 = 44.;
 const SIDE_PANEL_WIDTH: f32 = 240.;
 const INSPECTOR_WIDTH: f32 = 260.;
 const EDITOR_HEIGHT: f32 = 220.;
+const MIN_EDITOR_HEIGHT: f32 = 72.;
+/// Space always left for the results below a dragged editor.
+const MIN_RESULTS_HEIGHT: f32 = 180.;
 const TAB_MAX_WIDTH: f32 = 180.;
 /// Room for the macOS traffic lights in the transparent title bar.
 const TRAFFIC_LIGHT_INSET: f32 = 78.;
@@ -87,6 +94,41 @@ pub(crate) enum RunScope {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum ThemeChoice {
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    const SETTING: &str = "theme";
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "light" => ThemeChoice::Light,
+            "dark" => ThemeChoice::Dark,
+            _ => ThemeChoice::System,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            ThemeChoice::System => "system",
+            ThemeChoice::Light => "light",
+            ThemeChoice::Dark => "dark",
+        }
+    }
+
+    fn mode(self, window: &Window) -> Mode {
+        match self {
+            ThemeChoice::System => Mode::from_appearance(window.appearance()),
+            ThemeChoice::Light => Mode::Light,
+            ThemeChoice::Dark => Mode::Dark,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidePanel {
     Explorer,
     History,
@@ -129,6 +171,9 @@ pub(crate) struct Tab {
     selection: Option<Selection>,
     /// Widths the user dragged, by column name; kept across re-runs.
     column_widths: HashMap<String, f32>,
+    /// Byte offset in the editor where the last run's SQL began, to place
+    /// error positions; `None` when the SQL ran was rewritten (Explain).
+    run_origin: Option<usize>,
 }
 
 impl Tab {
@@ -141,12 +186,16 @@ impl Tab {
     }
 }
 
-/// A column-resize drag in progress.
-struct Resizing {
-    tab_id: usize,
-    column: String,
-    start_x: Pixels,
-    start_width: f32,
+/// A mouse drag in progress.
+enum Drag {
+    Column {
+        tab_id: usize,
+        column: String,
+        start_x: Pixels,
+        start_width: f32,
+    },
+    /// The divider between the editor and the results.
+    Split { start_y: Pixels, start_height: f32 },
 }
 
 pub struct Workspace {
@@ -165,7 +214,12 @@ pub struct Workspace {
     pub(crate) history_filter: Entity<InputState>,
     side_panel: SidePanel,
     grid_focus: FocusHandle,
-    resizing: Option<Resizing>,
+    drag: Option<Drag>,
+    /// A failed query's error position, applied to the editor on the next frame.
+    pending_error_jump: Option<(usize, usize, usize)>,
+    editor_height: f32,
+    theme_choice: ThemeChoice,
+    palette: Option<(Entity<Palette>, Subscription)>,
     connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
     show_side_panel: bool,
     show_inspector: bool,
@@ -174,13 +228,14 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            theme::apply(Mode::from_appearance(window.appearance()), cx);
-            cx.notify();
+        let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+            if this.theme_choice == ThemeChoice::System {
+                theme::apply(Mode::from_appearance(window.appearance()), cx);
+                cx.notify();
+            }
         });
 
-        let history_filter =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter history"));
+        let history_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter history"));
         let filter_changes = cx.subscribe(&history_filter, |this, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 this.reload_history(cx);
@@ -194,6 +249,11 @@ impl Workspace {
                 None
             }
         };
+        let theme_choice = store
+            .as_ref()
+            .and_then(|store| store.setting(ThemeChoice::SETTING).ok().flatten())
+            .map_or(ThemeChoice::System, |value| ThemeChoice::parse(&value));
+        theme::apply(theme_choice.mode(window), cx);
 
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -209,7 +269,11 @@ impl Workspace {
             history_filter,
             side_panel: SidePanel::Explorer,
             grid_focus: cx.focus_handle(),
-            resizing: None,
+            drag: None,
+            pending_error_jump: None,
+            editor_height: EDITOR_HEIGHT,
+            theme_choice,
+            palette: None,
             connect_dialog: None,
             show_side_panel: true,
             show_inspector: true,
@@ -217,7 +281,9 @@ impl Workspace {
         };
         this.add_tab(None, window, cx);
         // Deferred so it runs after gpui-component's Root has been built around us.
-        cx.defer_in(window, |this: &mut Self, window, cx| this.focus_editor(window, cx));
+        cx.defer_in(window, |this: &mut Self, window, cx| {
+            this.focus_editor(window, cx)
+        });
 
         match launch {
             Some(Launch::Sqlite(path)) => this.open_path(path, cx),
@@ -237,7 +303,12 @@ impl Workspace {
         &self.tabs[self.active]
     }
 
-    fn add_tab(&mut self, browse: Option<(String, String)>, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_tab(
+        &mut self,
+        browse: Option<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.next_tab_id += 1;
         let id = self.next_tab_id;
         let editor = cx.new(|cx| {
@@ -251,15 +322,18 @@ impl Workspace {
                 let filter = cx.new(|cx| {
                     InputState::new(window, cx).placeholder("e.g. status = 'paid' and total > 100")
                 });
-                let filter_enter =
-                    cx.subscribe_in(&filter, window, move |this, _, event: &InputEvent, window, cx| {
+                let filter_enter = cx.subscribe_in(
+                    &filter,
+                    window,
+                    move |this, _, event: &InputEvent, window, cx| {
                         if let InputEvent::PressEnter { .. } = event
                             && let Some(index) = this.tabs.iter().position(|t| t.id == id)
                         {
                             this.active = index;
                             this.run_browse(window, cx);
                         }
-                    });
+                    },
+                );
                 let title = SharedString::from(table.clone());
                 (
                     title,
@@ -283,6 +357,7 @@ impl Workspace {
             grid: None,
             selection: None,
             column_widths: HashMap::new(),
+            run_origin: None,
         });
         self.active = self.tabs.len() - 1;
         cx.notify();
@@ -406,13 +481,18 @@ impl Workspace {
         .detach();
     }
 
-    pub(crate) fn new_connection(&mut self, _: &NewConnection, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_connection(
+        &mut self,
+        _: &NewConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.connect_dialog.is_some() {
             return;
         }
         let dialog = cx.new(|cx| ConnectDialog::new(window, cx));
-        let subscription = cx.subscribe_in(&dialog, window, |this, _, event, window, cx| {
-            match event {
+        let subscription =
+            cx.subscribe_in(&dialog, window, |this, _, event, window, cx| match event {
                 ConnectEvent::Submit(target) => {
                     let target = match target {
                         PgTarget::Url(url) => PgTarget::Url(url.clone()),
@@ -425,8 +505,7 @@ impl Workspace {
                     this.focus_editor(window, cx);
                     cx.notify();
                 }
-            }
-        });
+            });
         self.connect_dialog = Some((dialog, subscription));
         cx.notify();
     }
@@ -476,19 +555,21 @@ impl Workspace {
         let editor = tab.editor.read(cx);
         let text = editor.value().to_string();
         let selection = editor.selected_range();
-        let sql = if !selection.is_empty() {
-            text.get(selection).unwrap_or_default().to_string()
+        let range = if !selection.is_empty() && text.get(selection.clone()).is_some() {
+            selection
         } else {
             match scope {
-                RunScope::All => text,
+                RunScope::All => 0..text.len(),
                 RunScope::Statement | RunScope::Explain => {
                     match statement_at(&text, editor.cursor()) {
-                        Some(range) => text[range].to_string(),
+                        Some(range) => range,
                         None => return,
                     }
                 }
             }
         };
+        let origin = (scope != RunScope::Explain).then_some(range.start);
+        let sql = text[range].to_string();
         if sql.trim().is_empty() {
             return;
         }
@@ -538,10 +619,14 @@ impl Workspace {
         });
         let task = cx.spawn(async move |this, cx| {
             let (result, schemas) = work.await;
-            this.update(cx, |this, cx| this.finish_query(tab_id, result, schemas, cx))
-                .ok();
+            this.update(cx, |this, cx| {
+                this.finish_query(tab_id, result, schemas, cx)
+            })
+            .ok();
         });
-        self.active_tab_mut().query = Query::Running {
+        let tab = self.active_tab_mut();
+        tab.run_origin = origin;
+        tab.query = Query::Running {
             cancel,
             _task: task,
         };
@@ -576,9 +661,41 @@ impl Workspace {
             Err(err) => {
                 tab.grid = None;
                 tab.query = Query::Failed(format!("{err:#}").into());
+                let position = err.downcast_ref::<QueryError>().and_then(|e| e.position);
+                if let (Some(position), Some(origin)) = (position, tab.run_origin) {
+                    self.pending_error_jump = Some((tab_id, origin, position));
+                }
             }
         }
         cx.notify();
+    }
+
+    /// Put the editor's cursor on the word a failed statement points at.
+    fn jump_to_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((tab_id, origin, position)) = self.pending_error_jump.take() else {
+            return;
+        };
+        if self.active_tab().id != tab_id {
+            return;
+        }
+        let editor = self.active_tab().editor.clone();
+        editor.update(cx, |editor, cx| {
+            let text = editor.value().to_string();
+            let Some(tail) = text.get(origin..) else {
+                return;
+            };
+            // Positions count characters from 1.
+            let Some((offset, _)) = tail.char_indices().nth(position.saturating_sub(1)) else {
+                return;
+            };
+            let start = origin + offset;
+            let end = start
+                + text[start..]
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .unwrap_or(text.len() - start);
+            editor.set_selected_range(start..end.max(start), cx);
+            editor.focus(window, cx);
+        });
     }
 
     fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, _: &mut Context<Self>) {
@@ -588,7 +705,13 @@ impl Workspace {
     }
 
     /// Show a table's rows, in the tab already browsing it or in a new one.
-    pub(crate) fn browse(&mut self, schema: &str, table: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn browse(
+        &mut self,
+        schema: &str,
+        table: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.session.is_none() {
             return;
         }
@@ -615,7 +738,10 @@ impl Workspace {
             &browse.schema,
             &browse.table,
             &browse.filter.read(cx).value(),
-            browse.order.as_ref().map(|(column, dir)| (column.as_str(), *dir)),
+            browse
+                .order
+                .as_ref()
+                .map(|(column, dir)| (column.as_str(), *dir)),
             BROWSE_LIMIT,
         );
         let editor = self.active_tab().editor.clone();
@@ -642,7 +768,11 @@ impl Workspace {
         let name = grid.data.columns[column].name.clone();
         tab.selection = None;
         if let Some(browse) = &mut tab.browse {
-            let current = browse.order.as_ref().filter(|(c, _)| *c == name).map(|(_, d)| *d);
+            let current = browse
+                .order
+                .as_ref()
+                .filter(|(c, _)| *c == name)
+                .map(|(_, d)| *d);
             browse.order = SortDirection::cycle(current).map(|dir| (name, dir));
             self.run_browse(window, cx);
         } else {
@@ -652,10 +782,20 @@ impl Workspace {
         }
     }
 
-    fn select_cell(&mut self, row: usize, column: usize, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn select_cell(
+        &mut self,
+        row: usize,
+        column: usize,
+        extend: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = &mut self.tabs[self.active];
         tab.selection = Some(match (tab.selection, extend) {
-            (Some(current), true) => Selection { head: (row, column), ..current },
+            (Some(current), true) => Selection {
+                head: (row, column),
+                ..current
+            },
             _ => Selection::cell(row, column),
         });
         self.grid_focus.focus(window, cx);
@@ -673,7 +813,8 @@ impl Workspace {
             Some(current) => current.step(dr, dc, extend, rows, columns),
             None => Selection::cell(0, 0),
         };
-        grid.scroll.scroll_to_item(next.head.0, ScrollStrategy::Nearest);
+        grid.scroll
+            .scroll_to_item(next.head.0, ScrollStrategy::Nearest);
         tab.selection = Some(next);
         cx.notify();
     }
@@ -694,28 +835,143 @@ impl Workspace {
 
     fn copy(&mut self, format: Format, cx: &mut Context<Self>) {
         let tab = self.active_tab();
-        let (Some(grid), Some(selection)) = (&tab.grid, tab.selection) else { return };
+        let (Some(grid), Some(selection)) = (&tab.grid, tab.selection) else {
+            return;
+        };
         let columns: Vec<_> = selection.columns().map(|c| &grid.data.columns[c]).collect();
         let rows: Vec<Vec<_>> = selection
             .rows()
             .map(|r| selection.columns().map(|c| &grid.row(r)[c]).collect())
             .collect();
-        cx.write_to_clipboard(ClipboardItem::new_string(export::render(format, &columns, &rows)));
+        cx.write_to_clipboard(ClipboardItem::new_string(export::render(
+            format, &columns, &rows,
+        )));
     }
 
-    fn resize_drag(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(resizing) = &self.resizing else { return };
+    fn drag_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = &self.drag else { return };
         if event.pressed_button != Some(MouseButton::Left) {
-            self.resizing = None;
+            self.drag = None;
             return;
         }
-        let width = (resizing.start_width + f32::from(event.position.x - resizing.start_x))
-            .max(results::MIN_COLUMN);
-        let (tab_id, column) = (resizing.tab_id, resizing.column.clone());
-        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-            tab.column_widths.insert(column, width.round());
-            cx.notify();
+        match drag {
+            Drag::Column {
+                tab_id,
+                column,
+                start_x,
+                start_width,
+            } => {
+                let width =
+                    (start_width + f32::from(event.position.x - *start_x)).max(results::MIN_COLUMN);
+                let (tab_id, column) = (*tab_id, column.clone());
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    tab.column_widths.insert(column, width.round());
+                }
+            }
+            Drag::Split {
+                start_y,
+                start_height,
+            } => {
+                let max = f32::from(window.viewport_size().height) - MIN_RESULTS_HEIGHT;
+                self.editor_height = (start_height + f32::from(event.position.y - *start_y))
+                    .clamp(MIN_EDITOR_HEIGHT, max.max(MIN_EDITOR_HEIGHT))
+                    .round();
+            }
         }
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------- palette
+
+    fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            return;
+        }
+        let mut items = Vec::new();
+        if let Some(session) = &self.session {
+            let nested = session.shows_schemas();
+            for schema in &session.schemas {
+                for object in &schema.objects {
+                    items.push(palette::Item {
+                        kind: match object.kind {
+                            ObjectKind::Table => "TABLE",
+                            ObjectKind::View => "VIEW",
+                        },
+                        label: object.name.clone().into(),
+                        detail: nested.then(|| schema.name.clone().into()),
+                        keys: None,
+                        target: palette::Target::Table {
+                            schema: schema.name.clone(),
+                            table: object.name.clone(),
+                        },
+                    });
+                }
+            }
+        }
+        // Keys are listed here rather than looked up: several bindings only
+        // apply inside the editor or grid, which the palette's focus isn't.
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 21] = [
+            ("Run Statement", "⌘↵", Box::new(RunQuery)),
+            ("Run All", "⇧⌘↵", Box::new(RunAll)),
+            ("Explain", "⌘E", Box::new(Explain)),
+            ("Cancel Query", "⌘.", Box::new(CancelQuery)),
+            ("New Query Tab", "⌘T", Box::new(NewTab)),
+            ("Close Tab", "⌘W", Box::new(CloseTab)),
+            ("Next Tab", "⌃⇥", Box::new(NextTab)),
+            ("Previous Tab", "⌃⇧⇥", Box::new(PrevTab)),
+            ("Open SQLite File…", "⌘O", Box::new(OpenFile)),
+            ("Connect to Postgres…", "⌘N", Box::new(NewConnection)),
+            ("Show Explorer", "⇧⌘E", Box::new(ShowExplorer)),
+            ("Show History", "⌘Y", Box::new(ShowHistory)),
+            ("Toggle Side Panel", "⌘B", Box::new(ToggleExplorer)),
+            ("Toggle Inspector", "⌘I", Box::new(ToggleInspector)),
+            ("Copy Cells as CSV", "⇧⌘C", Box::new(CopyCsv)),
+            ("Copy Cells as JSON", "⌥⌘C", Box::new(CopyJson)),
+            ("Theme: Match System", "", Box::new(UseSystemTheme)),
+            ("Theme: Light", "", Box::new(UseLightTheme)),
+            ("Theme: Dark", "", Box::new(UseDarkTheme)),
+            ("Focus Editor", "", Box::new(FocusEditor)),
+            ("Quit Xenon", "⌘Q", Box::new(Quit)),
+        ];
+        for (label, keys, action) in commands {
+            items.push(palette::Item {
+                kind: "COMMAND",
+                label: label.into(),
+                detail: None,
+                keys: (!keys.is_empty()).then(|| keys.into()),
+                target: palette::Target::Action(action),
+            });
+        }
+
+        let palette = cx.new(|cx| Palette::new(items, window, cx));
+        let subscription = cx.subscribe_in(&palette, window, |this, _, event, window, cx| {
+            this.palette = None;
+            this.focus_editor(window, cx);
+            match event {
+                PaletteEvent::Pick(palette::Target::Table { schema, table }) => {
+                    let (schema, table) = (schema.clone(), table.clone());
+                    this.browse(&schema, &table, window, cx);
+                }
+                PaletteEvent::Pick(palette::Target::Action(action)) => {
+                    window.dispatch_action(action.boxed_clone(), cx);
+                }
+                PaletteEvent::Dismiss => {}
+            }
+            cx.notify();
+        });
+        self.palette = Some((palette, subscription));
+        cx.notify();
+    }
+
+    fn set_theme(&mut self, choice: ThemeChoice, window: &mut Window, cx: &mut Context<Self>) {
+        self.theme_choice = choice;
+        theme::apply(choice.mode(window), cx);
+        if let Some(store) = &self.store
+            && let Err(err) = store.set_setting(ThemeChoice::SETTING, choice.as_str())
+        {
+            eprintln!("xenon: could not save the theme: {err:#}");
+        }
+        cx.notify();
     }
 
     // -------------------------------------------------------------- panels
@@ -769,7 +1025,10 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.pending_error_jump.is_some() {
+            self.jump_to_error(window, cx);
+        }
         let theme = cx.theme().clone();
 
         let body = div()
@@ -778,9 +1037,13 @@ impl Render for Workspace {
             .flex_1()
             .min_h(px(0.))
             .child(self.render_rail(&theme, cx))
-            .when(self.show_side_panel, |el| el.child(self.render_side_panel(&theme, cx)))
+            .when(self.show_side_panel, |el| {
+                el.child(self.render_side_panel(&theme, cx))
+            })
             .child(self.render_center(&theme, cx))
-            .when(self.show_inspector, |el| el.child(self.render_inspector(&theme)));
+            .when(self.show_inspector, |el| {
+                el.child(self.render_inspector(&theme))
+            });
 
         div()
             .id("workspace")
@@ -793,19 +1056,50 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::explain))
             .on_action(cx.listener(Self::select_all_cells))
             .on_action(cx.listener(|this, _: &MoveUp, _, cx| this.step_selection(-1, 0, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveDown, _, cx| this.step_selection(1, 0, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveLeft, _, cx| this.step_selection(0, -1, false, cx)))
-            .on_action(cx.listener(|this, _: &MoveRight, _, cx| this.step_selection(0, 1, false, cx)))
-            .on_action(cx.listener(|this, _: &ExtendUp, _, cx| this.step_selection(-1, 0, true, cx)))
-            .on_action(cx.listener(|this, _: &ExtendDown, _, cx| this.step_selection(1, 0, true, cx)))
-            .on_action(cx.listener(|this, _: &ExtendLeft, _, cx| this.step_selection(0, -1, true, cx)))
-            .on_action(cx.listener(|this, _: &ExtendRight, _, cx| this.step_selection(0, 1, true, cx)))
+            .on_action(
+                cx.listener(|this, _: &MoveDown, _, cx| this.step_selection(1, 0, false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveLeft, _, cx| this.step_selection(0, -1, false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveRight, _, cx| this.step_selection(0, 1, false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendUp, _, cx| this.step_selection(-1, 0, true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendDown, _, cx| this.step_selection(1, 0, true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendLeft, _, cx| this.step_selection(0, -1, true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendRight, _, cx| this.step_selection(0, 1, true, cx)),
+            )
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(Format::Tsv, cx)))
             .on_action(cx.listener(|this, _: &CopyCsv, _, cx| this.copy(Format::Csv, cx)))
             .on_action(cx.listener(|this, _: &CopyJson, _, cx| this.copy(Format::Json, cx)))
-            .on_action(cx.listener(|this, _: &FocusEditor, window, cx| this.focus_editor(window, cx)))
-            .on_mouse_move(cx.listener(Self::resize_drag))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.resizing = None))
+            .on_action(
+                cx.listener(|this, _: &FocusEditor, window, cx| this.focus_editor(window, cx)),
+            )
+            .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(|this, _: &UseSystemTheme, w, cx| {
+                this.set_theme(ThemeChoice::System, w, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UseLightTheme, w, cx| {
+                this.set_theme(ThemeChoice::Light, w, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &UseDarkTheme, w, cx| {
+                    this.set_theme(ThemeChoice::Dark, w, cx)
+                }),
+            )
+            .on_mouse_move(cx.listener(Self::drag_move))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.drag = None),
+            )
             .on_action(cx.listener(Self::cancel_query))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
@@ -834,6 +1128,9 @@ impl Render for Workspace {
             .when_some(self.connect_dialog.as_ref(), |el, (dialog, _)| {
                 el.child(dialog.clone())
             })
+            .when_some(self.palette.as_ref(), |el, (palette, _)| {
+                el.child(palette.clone())
+            })
     }
 }
 
@@ -856,7 +1153,9 @@ impl Workspace {
                 .border_color(theme.line)
                 .cursor_pointer()
                 .when(active, |el| el.bg(theme.s1).text_color(theme.text))
-                .when(!active, |el| el.text_color(theme.t3).hover(|s| s.text_color(theme.t2)))
+                .when(!active, |el| {
+                    el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.activate_tab(index, window, cx);
@@ -944,6 +1243,13 @@ impl Workspace {
             .child(div().flex_1().h_full())
             .child(
                 div()
+                    .id("go-to-anything")
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(theme.t3))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_palette(&OpenPalette, window, cx);
+                    }))
                     .mr(px(8.))
                     .flex()
                     .flex_none()
@@ -976,7 +1282,9 @@ impl Workspace {
                 .text_color(if active { theme.text } else { theme.t3 })
                 .when(active, |el| el.border_l_2().border_color(theme.acc))
                 .when(!active, |el| el.hover(|s| s.text_color(theme.t2)))
-                .on_click(cx.listener(move |this, _, window, cx| this.show_panel(panel, window, cx)))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.show_panel(panel, window, cx)),
+                )
                 .child(glyph)
         };
 
@@ -1014,7 +1322,7 @@ impl Workspace {
     fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         let editor = div()
-            .h(px(EDITOR_HEIGHT))
+            .h(px(self.editor_height))
             .flex_none()
             .relative()
             .bg(theme.s2)
@@ -1032,53 +1340,91 @@ impl Workspace {
             .flex()
             .flex_col()
             .child(editor)
+            .child(
+                div()
+                    .id("split")
+                    .h(px(5.))
+                    .mt(px(-3.))
+                    .mb(px(-2.))
+                    .flex_none()
+                    .cursor_row_resize()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                            if event.click_count >= 2 {
+                                this.editor_height = EDITOR_HEIGHT;
+                                cx.notify();
+                            } else {
+                                this.drag = Some(Drag::Split {
+                                    start_y: event.position.y,
+                                    start_height: this.editor_height,
+                                });
+                            }
+                        }),
+                    ),
+            )
             .when_some(tab.browse.as_ref(), |el, browse| {
                 el.child(self.render_filter_bar(browse, theme, cx))
             })
             .child(self.render_results_bar(theme))
-            .child(div().flex_1().min_h(px(0.)).child(self.render_results(theme, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(self.render_results(theme, cx)),
+            )
     }
 
     fn render_toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let running = matches!(self.active_tab().query, Query::Running { .. });
-        let button = |id: &'static str, label: &'static str, keys: Option<&'static str>, primary: bool| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(10.))
-                .py(px(4.))
-                .border_1()
-                .cursor_pointer()
-                .font_family(UI_FONT)
-                .text_size(px(11.5))
-                .font_weight(FontWeight::MEDIUM)
-                .when(primary, |el| el.bg(theme.text).border_color(theme.text).text_color(theme.bg))
-                .when(!primary, |el| {
-                    el.bg(theme.s1)
-                        .border_color(theme.line)
-                        .text_color(theme.t2)
-                        .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-                })
-                .child(label)
-                .when_some(keys, |el, keys| {
-                    el.child(
-                        div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.))
-                            .opacity(0.7)
-                            .child(keys),
-                    )
-                })
-        };
+        let button =
+            |id: &'static str, label: &'static str, keys: Option<&'static str>, primary: bool| {
+                div()
+                    .id(id)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(4.))
+                    .border_1()
+                    .cursor_pointer()
+                    .font_family(UI_FONT)
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .when(primary, |el| {
+                        el.bg(theme.text)
+                            .border_color(theme.text)
+                            .text_color(theme.bg)
+                    })
+                    .when(!primary, |el| {
+                        el.bg(theme.s1)
+                            .border_color(theme.line)
+                            .text_color(theme.t2)
+                            .hover(|s| s.text_color(theme.text).border_color(theme.t3))
+                    })
+                    .child(label)
+                    .when_some(keys, |el, keys| {
+                        el.child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.))
+                                .opacity(0.7)
+                                .child(keys),
+                        )
+                    })
+            };
 
-        let mut bar = div().absolute().top(px(8.)).right(px(10.)).flex().gap(px(6.));
+        let mut bar = div()
+            .absolute()
+            .top(px(8.))
+            .right(px(10.))
+            .flex()
+            .gap(px(6.));
         if running {
-            bar = bar.child(
-                button("cancel", "Cancel", Some("⌘."), true)
-                    .on_click(cx.listener(|this, _, w, cx| this.cancel_query(&CancelQuery, w, cx))),
-            );
+            bar = bar
+                .child(button("cancel", "Cancel", Some("⌘."), true).on_click(
+                    cx.listener(|this, _, w, cx| this.cancel_query(&CancelQuery, w, cx)),
+                ));
         } else {
             bar = bar
                 .child(
@@ -1090,14 +1436,20 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::All, w, cx))),
                 )
                 .child(
-                    button("run", "Run", Some("⌘↵"), true)
-                        .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::Statement, w, cx))),
+                    button("run", "Run", Some("⌘↵"), true).on_click(
+                        cx.listener(|this, _, w, cx| this.run(RunScope::Statement, w, cx)),
+                    ),
                 );
         }
         bar
     }
 
-    fn render_filter_bar(&self, browse: &Browse, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_filter_bar(
+        &self,
+        browse: &Browse,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let sorted = browse.order.as_ref().map(|(column, direction)| {
             let arrow = match direction {
                 SortDirection::Ascending => "▲",
@@ -1213,7 +1565,11 @@ impl Workspace {
             let widths = results::layout(&grid.natural, &tab.manual_widths(grid));
             let sort = match &tab.browse {
                 Some(browse) => browse.order.as_ref().and_then(|(name, dir)| {
-                    grid.data.columns.iter().position(|c| &c.name == name).map(|ix| (ix, *dir))
+                    grid.data
+                        .columns
+                        .iter()
+                        .position(|c| &c.name == name)
+                        .map(|ix| (ix, *dir))
                 }),
                 None => grid.sort,
             };
@@ -1224,23 +1580,28 @@ impl Workspace {
                 select: Rc::new({
                     let this = this.clone();
                     move |row, column, extend, window, cx| {
-                        this.update(cx, |this, cx| this.select_cell(row, column, extend, window, cx))
-                            .ok();
+                        this.update(cx, |this, cx| {
+                            this.select_cell(row, column, extend, window, cx)
+                        })
+                        .ok();
                     }
                 }),
                 sort: Rc::new({
                     let this = this.clone();
                     move |column, window, cx| {
-                        this.update(cx, |this, cx| this.sort_column(column, window, cx)).ok();
+                        this.update(cx, |this, cx| this.sort_column(column, window, cx))
+                            .ok();
                     }
                 }),
                 resize_start: Rc::new({
                     let this = this.clone();
                     move |column, x, width, _, cx| {
                         this.update(cx, |this, _| {
-                            let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) else { return };
+                            let Some(tab) = this.tabs.iter().find(|t| t.id == tab_id) else {
+                                return;
+                            };
                             let Some(grid) = &tab.grid else { return };
-                            this.resizing = Some(Resizing {
+                            this.drag = Some(Drag::Column {
                                 tab_id,
                                 column: grid.data.columns[column].name.clone(),
                                 start_x: x,
@@ -1253,7 +1614,9 @@ impl Workspace {
                 autofit: Rc::new({
                     move |column, _, cx| {
                         this.update(cx, |this, cx| {
-                            let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) else { return };
+                            let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                                return;
+                            };
                             let Some(grid) = &tab.grid else { return };
                             let name = grid.data.columns[column].name.clone();
                             let natural = grid.natural[column];
@@ -1305,7 +1668,12 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .gap(px(6.))
-                .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("Xenon"))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Xenon"),
+                )
                 .child(
                     div()
                         .text_color(theme.t3)
@@ -1325,10 +1693,13 @@ impl Workspace {
             .border_l_1()
             .border_color(theme.line);
 
-        let selected = tab.selection.zip(tab.grid.as_ref()).and_then(|(selection, grid)| {
-            let ix = selection.head.0;
-            (ix < grid.row_count()).then(|| (ix, grid.row(ix), &grid.data.columns))
-        });
+        let selected = tab
+            .selection
+            .zip(tab.grid.as_ref())
+            .and_then(|(selection, grid)| {
+                let ix = selection.head.0;
+                (ix < grid.row_count()).then(|| (ix, grid.row(ix), &grid.data.columns))
+            });
         let Some((ix, row, columns)) = selected else {
             return panel
                 .child(panel_label(theme, "Inspector"))
@@ -1351,11 +1722,17 @@ impl Workspace {
                     .border_color(theme.line_2)
                     .font_family(MONO_FONT)
                     .text_size(px(11.))
-                    .child(div().text_color(theme.t3).child(SharedString::from(column.name.clone())))
+                    .child(
+                        div()
+                            .text_color(theme.t3)
+                            .child(SharedString::from(column.name.clone())),
+                    )
                     .child(if value.is_null() {
                         div().italic().text_color(theme.t3).child("NULL")
                     } else {
-                        div().child(SharedString::from(value.display().into_owned()))
+                        let text = value.display();
+                        let shown = pretty_json(&text).unwrap_or_else(|| text.into_owned());
+                        div().child(SharedString::from(shown))
                     })
             }));
         panel.child(fields)
@@ -1399,7 +1776,11 @@ impl Workspace {
         };
 
         bar.child(div().flex_1()).child(
-            cell(concat!("xenon ", env!("CARGO_PKG_VERSION")).into(), theme.t3).border_l_1(),
+            cell(
+                concat!("xenon ", env!("CARGO_PKG_VERSION")).into(),
+                theme.t3,
+            )
+            .border_l_1(),
         )
     }
 }

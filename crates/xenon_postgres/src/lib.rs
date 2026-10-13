@@ -16,8 +16,8 @@ use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::Type;
 use tokio_postgres::{CancelToken, Client, Config, SimpleQueryMessage};
 use xenon_driver::{
-    CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryOutcome, QueryResult,
-    ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
+    QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -162,7 +162,10 @@ impl PostgresConnection {
             config.get_user().unwrap_or("postgres"),
             name.rsplit('@').next().unwrap_or("localhost"),
             config.get_ports().first().copied().unwrap_or(5432),
-            config.get_dbname().or(config.get_user()).unwrap_or("postgres"),
+            config
+                .get_dbname()
+                .or(config.get_user())
+                .unwrap_or("postgres"),
         );
         let local = config.get_hosts().iter().all(|host| match host {
             tokio_postgres::config::Host::Tcp(name) => {
@@ -173,10 +176,7 @@ impl PostgresConnection {
         });
 
         runtime().block_on(async {
-            let (client, connection) = config
-                .connect(tls.clone())
-                .await
-                .map_err(describe_error)?;
+            let (client, connection) = config.connect(tls.clone()).await.map_err(describe_error)?;
             runtime().spawn(async move {
                 // A dropped connection surfaces as an error on the next query.
                 let _ = connection.await;
@@ -197,7 +197,10 @@ impl PostgresConnection {
                 name,
                 id,
                 local,
-                version: format!("postgres {}", version.split_whitespace().next().unwrap_or("")),
+                version: format!(
+                    "postgres {}",
+                    version.split_whitespace().next().unwrap_or("")
+                ),
                 cancel: Arc::new(PgCancel {
                     token: client.cancel_token(),
                     tls,
@@ -487,7 +490,11 @@ fn describe_error(err: tokio_postgres::Error) -> anyhow::Error {
         return anyhow!(message);
     };
     let mut message = format!("{} {}: {}", db.severity(), db.code().code(), db.message());
-    if let Some(ErrorPosition::Original(position)) = db.position() {
+    let position = match db.position() {
+        Some(ErrorPosition::Original(position)) => Some(*position as usize),
+        _ => None,
+    };
+    if let Some(position) = position {
         message.push_str(&format!(" (at character {position})"));
     }
     if let Some(detail) = db.detail() {
@@ -496,7 +503,7 @@ fn describe_error(err: tokio_postgres::Error) -> anyhow::Error {
     if let Some(hint) = db.hint() {
         message.push_str(&format!("\nHINT: {hint}"));
     }
-    anyhow!(message)
+    anyhow::Error::new(QueryError { message, position })
 }
 
 #[cfg(test)]
@@ -528,8 +535,14 @@ mod tests {
             typed_value("12345678901234567890.123".into(), &Type::NUMERIC),
             Value::Decimal("12345678901234567890.123".into())
         );
-        assert_eq!(typed_value("t".into(), &Type::BOOL), Value::Text("true".into()));
-        assert_eq!(typed_value("{a,b}".into(), &Type::TEXT_ARRAY), Value::Text("{a,b}".into()));
+        assert_eq!(
+            typed_value("t".into(), &Type::BOOL),
+            Value::Text("true".into())
+        );
+        assert_eq!(
+            typed_value("{a,b}".into(), &Type::TEXT_ARRAY),
+            Value::Text("{a,b}".into())
+        );
     }
 
     /// Integration tests run against a live server when `XENON_TEST_PG_URL` is set,
@@ -557,8 +570,17 @@ mod tests {
             )
             .unwrap(),
         );
-        let labels: Vec<_> = result.columns.iter().map(|c| c.type_name.clone().unwrap()).collect();
-        assert_eq!(labels, ["int8", "float8", "numeric", "bool", "text", "text[]", "interval"]);
+        let labels: Vec<_> = result
+            .columns
+            .iter()
+            .map(|c| c.type_name.clone().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "int8", "float8", "numeric", "bool", "text", "text[]", "interval"
+            ]
+        );
         let row = &result.rows[0];
         assert_eq!(row[0], Value::Integer(1));
         assert_eq!(row[1], Value::Real(2.5));
@@ -588,10 +610,17 @@ mod tests {
     fn live_row_limit_stops_the_query() {
         let Some(db) = live() else { return };
         let started = Instant::now();
-        let result = rows(db.execute("select g from generate_series(1, 50000000) g", 1000).unwrap());
+        let result = rows(
+            db.execute("select g from generate_series(1, 50000000) g", 1000)
+                .unwrap(),
+        );
         assert_eq!(result.rows.len(), 1000);
         assert!(result.truncated);
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
         // The connection is still usable afterwards.
         assert!(db.execute("select 1", 10).is_ok());
     }
@@ -599,9 +628,17 @@ mod tests {
     #[test]
     fn live_errors_are_descriptive() {
         let Some(db) = live() else { return };
-        let err = db.execute("select emial from pg_class", 10).unwrap_err().to_string();
-        assert!(err.starts_with("ERROR 42703: column \"emial\" does not exist"), "{err}");
+        let err = db
+            .execute("select emial from pg_class", 10)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("ERROR 42703: column \"emial\" does not exist"),
+            "{err}"
+        );
         assert!(err.contains("at character 8"), "{err}");
+        let err = db.execute("select emial from pg_class", 10).unwrap_err();
+        assert_eq!(err.downcast_ref::<QueryError>().unwrap().position, Some(8));
     }
 
     #[test]
@@ -612,7 +649,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
             cancel.cancel();
         });
-        let err = db.execute("select pg_sleep(10)", 10).unwrap_err().to_string();
+        let err = db
+            .execute("select pg_sleep(10)", 10)
+            .unwrap_err()
+            .to_string();
         canceller.join().unwrap();
         assert!(err.contains("57014"), "{err}");
     }
@@ -620,15 +660,25 @@ mod tests {
     /// Expects the test server to use a self-signed certificate, as a local test server does.
     #[test]
     fn live_verify_full_rejects_self_signed_certificates() {
-        let Ok(url) = std::env::var("XENON_TEST_PG_URL") else { return };
+        let Ok(url) = std::env::var("XENON_TEST_PG_URL") else {
+            return;
+        };
         let (url, _) = extract_sslmode(&url);
-        let url = url.replace("sslmode=require", "").trim_end_matches(['?', '&']).to_string();
+        let url = url
+            .replace("sslmode=require", "")
+            .trim_end_matches(['?', '&'])
+            .to_string();
         let separator = if url.contains('?') { '&' } else { '?' };
-        assert!(PostgresConnection::connect_url(&format!("{url}{separator}sslmode=require")).is_ok());
+        assert!(
+            PostgresConnection::connect_url(&format!("{url}{separator}sslmode=require")).is_ok()
+        );
         let err = PostgresConnection::connect_url(&format!("{url}{separator}sslmode=verify-full"))
             .err()
             .expect("self-signed certificate must be rejected");
-        assert!(err.to_string().to_lowercase().contains("certificate"), "{err}");
+        assert!(
+            err.to_string().to_lowercase().contains("certificate"),
+            "{err}"
+        );
     }
 
     #[test]
