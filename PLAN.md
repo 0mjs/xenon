@@ -102,7 +102,7 @@ render immediately is still to do.
 | M1 ✅ | **SQLite end-to-end** | Open a `.db`, see tables, run a query, see results in a virtual grid |
 | M2 ✅ | **Postgres** | Connect via form or URL, introspect schema, run + cancel queries, SSL |
 | M3 ✅ | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
-| M4 ✅ | **Grid polish** | Columns stretch to fill and resize, copy as TSV/CSV/JSON, table browser with sort/filter, Run/Explain toolbar. Richer per-type rendering (JSON, timestamps) moves to M5 |
+| M4 ✅ | **Grid polish** | Content-sized columns (stripes run to the edge), drag to resize, double-click to fit, copy as TSV/CSV/JSON, table browser with sort/filter, Run/Explain toolbar. Richer per-type rendering (JSON, timestamps) moves to M5 |
 | M5 | **Feel** | Command palette, keybindings, light/dark, empty states, error UX, perf pass |
 | M6 | **Ship v0.1** | Signed macOS build, README, screenshots, GitHub release |
 
@@ -129,8 +129,8 @@ work; the accent only marks focus.
 - **Status bar:** connection, server version, transaction mode, read/write, cursor position.
 
 **Grid:** 25 px rows, real column borders, subtle zebra, type under each header, NULL italic
-and dimmed, numbers right-aligned with tabular figures, faint neutral data bars behind numeric
-values, focused cell outlined in accent.
+and dimmed, numbers right-aligned, focused cell outlined in accent. Columns are sized to their
+content and never stretched; stripes and borders continue to the pane's edge.
 
 **Colour tokens**
 

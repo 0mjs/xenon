@@ -1,6 +1,7 @@
 //! The results grid: a virtualized list of rows inside a horizontal scroller,
-//! with resizable columns that stretch to fill the pane, cell selection and
-//! client-side sorting.
+//! with content-sized, resizable columns, cell selection and client-side
+//! sorting. Columns keep their own width; stripes and borders run on to the
+//! pane's edge, so resizing one column never moves the others' widths.
 
 use std::cmp::Ordering;
 use std::ops::Range;
@@ -23,9 +24,6 @@ pub const INDEX_WIDTH: f32 = 48.;
 const MONO_ADVANCE: f32 = 6.9;
 pub const MIN_COLUMN: f32 = 48.;
 const MAX_NATURAL: f32 = 360.;
-/// An auto-sized column grows to at most this multiple of its natural width
-/// when sharing out spare space.
-const MAX_STRETCH: f32 = 3.;
 /// Rows sampled when estimating column widths.
 const WIDTH_SAMPLE: usize = 200;
 /// Characters shown in a cell; the inspector shows the full value.
@@ -130,34 +128,10 @@ fn compare(a: &Value, b: &Value) -> Ordering {
     }
 }
 
-/// Final column widths. Manual widths are kept; the spare space beyond every
-/// column's width is shared among auto-sized columns in proportion to their
-/// natural width, each growing to at most `MAX_STRETCH` times that.
-pub fn layout(natural: &[f32], manual: &[Option<f32>], available: f32) -> Vec<f32> {
-    let mut widths: Vec<f32> = natural
-        .iter()
-        .zip(manual)
-        .map(|(n, m)| m.unwrap_or(*n))
-        .collect();
-    let mut spare = available - INDEX_WIDTH - widths.iter().sum::<f32>();
-    // Share repeatedly: a column that hits its cap returns its leftover share.
-    for _ in 0..4 {
-        let growable: Vec<usize> = (0..widths.len())
-            .filter(|&ix| manual[ix].is_none() && widths[ix] < natural[ix] * MAX_STRETCH)
-            .collect();
-        let weight: f32 = growable.iter().map(|&ix| natural[ix]).sum();
-        if spare < 1. || weight <= 0. {
-            break;
-        }
-        let mut used = 0.;
-        for ix in growable {
-            let grow = (spare * natural[ix] / weight).min(natural[ix] * MAX_STRETCH - widths[ix]);
-            widths[ix] += grow;
-            used += grow;
-        }
-        spare -= used;
-    }
-    widths.iter().map(|w| w.floor()).collect()
+/// Final column widths: the user's dragged width where there is one, else the
+/// content-fit width.
+pub fn layout(natural: &[f32], manual: &[Option<f32>]) -> Vec<f32> {
+    natural.iter().zip(manual).map(|(n, m)| m.unwrap_or(*n)).collect()
 }
 
 /// A rectangular block of cells, in display coordinates.
@@ -230,6 +204,7 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
 
     let header = div()
         .h(px(HEADER_HEIGHT))
+        .w_full()
         .flex_none()
         .flex()
         .flex_row()
@@ -247,7 +222,8 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
         .children(columns.iter().zip(&view.widths).enumerate().map(|(ix, (column, width))| {
             let direction = view.sort.filter(|(c, _)| *c == ix).map(|(_, d)| d);
             header_cell(ix, column, *width, direction, theme, &callbacks)
-        }));
+        }))
+        .child(div().flex_1());
 
     let data = view.grid.data.clone();
     let order = view.grid.order.clone();
@@ -264,11 +240,13 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
     })
     .track_scroll(&view.grid.scroll)
     .flex_1()
-    .w(total_width);
+    .w_full()
+    .min_w(total_width);
 
     div().id("result-grid").size_full().overflow_x_scroll().child(
         div()
-            .w(total_width)
+            .w_full()
+            .min_w(total_width)
             .h_full()
             .flex()
             .flex_col()
@@ -417,6 +395,7 @@ fn render_row(
                 })
                 .child(cell(value, theme))
         }))
+        .child(div().flex_1())
         .into_any_element()
 }
 
@@ -442,31 +421,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_keeps_natural_widths_when_there_is_no_room() {
-        assert_eq!(layout(&[100., 200.], &[None, None], 200.), [100., 200.]);
-    }
-
-    #[test]
-    fn layout_shares_spare_space_proportionally() {
-        // 400 spare: 100 gets a third, 200 two thirds.
-        let widths = layout(&[100., 200.], &[None, None], INDEX_WIDTH + 700.);
-        assert_eq!(widths, [233., 466.]);
-    }
-
-    #[test]
-    fn layout_caps_stretch_and_redistributes() {
-        // A tiny column caps at 3x; the rest of the space goes to the other.
-        let widths = layout(&[64., 300.], &[None, None], INDEX_WIDTH + 1200.);
-        assert_eq!(widths, [192., 900.]);
-        // Everything capped: leftover space stays empty.
-        let widths = layout(&[64.], &[None], INDEX_WIDTH + 5000.);
-        assert_eq!(widths, [192.]);
-    }
-
-    #[test]
-    fn layout_respects_manual_widths() {
-        let widths = layout(&[100., 100.], &[Some(50.), None], INDEX_WIDTH + 400.);
-        assert_eq!(widths, [50., 300.]);
+    fn layout_uses_manual_widths_over_natural() {
+        assert_eq!(layout(&[100., 200.], &[None, Some(50.)]), [100., 50.]);
     }
 
     #[test]

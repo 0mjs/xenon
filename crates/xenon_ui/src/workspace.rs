@@ -10,7 +10,7 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, ClickEvent, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, FontWeight,
     IntoElement, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Render, Rgba,
-    ScrollStrategy, SharedString, Subscription, Task, Window, canvas, div, prelude::*, px,
+    ScrollStrategy, SharedString, Subscription, Task, Window, div, prelude::*, px,
 };
 use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use xenon_driver::export::{self, Format};
@@ -165,8 +165,6 @@ pub struct Workspace {
     pub(crate) history_filter: Entity<InputState>,
     side_panel: SidePanel,
     grid_focus: FocusHandle,
-    /// Width of the results pane, measured each frame, for stretching columns.
-    results_width: f32,
     resizing: Option<Resizing>,
     connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
     show_side_panel: bool,
@@ -211,7 +209,6 @@ impl Workspace {
             history_filter,
             side_panel: SidePanel::Explorer,
             grid_focus: cx.focus_handle(),
-            results_width: 0.,
             resizing: None,
             connect_dialog: None,
             show_side_panel: true,
@@ -1213,7 +1210,7 @@ impl Workspace {
             if grid.data.columns.is_empty() {
                 return centered_hint(theme, "The query returned no columns.");
             }
-            let widths = results::layout(&grid.natural, &tab.manual_widths(grid), self.results_width);
+            let widths = results::layout(&grid.natural, &tab.manual_widths(grid));
             let sort = match &tab.browse {
                 Some(browse) => browse.order.as_ref().and_then(|(name, dir)| {
                     grid.data.columns.iter().position(|c| &c.name == name).map(|ix| (ix, *dir))
@@ -1254,7 +1251,6 @@ impl Workspace {
                     }
                 }),
                 autofit: Rc::new({
-                    let this = this.clone();
                     move |column, _, cx| {
                         this.update(cx, |this, cx| {
                             let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) else { return };
@@ -1269,26 +1265,6 @@ impl Workspace {
                 }),
             };
 
-            let measured = self.results_width;
-            let measure = canvas(
-                move |bounds, window, cx| {
-                    let width = f32::from(bounds.size.width);
-                    if (width - measured).abs() > 0.5 {
-                        let this = this.clone();
-                        window.defer(cx, move |_, cx| {
-                            this.update(cx, |this, cx| {
-                                this.results_width = width;
-                                cx.notify();
-                            })
-                            .ok();
-                        });
-                    }
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .inset_0();
-
             let view = results::View {
                 grid,
                 widths,
@@ -1300,8 +1276,6 @@ impl Workspace {
                 .key_context("ResultsGrid")
                 .track_focus(&self.grid_focus)
                 .size_full()
-                .relative()
-                .child(measure)
                 .child(results::render(view, theme, callbacks))
                 .into_any_element();
         }
