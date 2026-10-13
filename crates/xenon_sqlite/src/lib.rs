@@ -193,6 +193,10 @@ impl Connection for SqliteConnection {
     fn is_local(&self) -> bool {
         true
     }
+
+    fn explain(&self, sql: &str) -> String {
+        format!("explain query plan {sql}")
+    }
 }
 
 fn to_value(value: ValueRef<'_>) -> Value {
@@ -295,6 +299,14 @@ mod tests {
         std::fs::write(&junk, b"this is not a database at all, just some text").unwrap();
         assert!(SqliteConnection::open(&junk).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn explain_returns_plan_rows() {
+        let db = db();
+        let result = rows(db.execute(&db.explain("select * from users where id = 1"), 10).unwrap());
+        assert!(result.columns.iter().any(|c| c.name == "detail"));
+        assert!(!result.rows.is_empty());
     }
 
     #[test]

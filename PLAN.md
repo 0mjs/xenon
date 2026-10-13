@@ -102,7 +102,7 @@ render immediately is still to do.
 | M1 ✅ | **SQLite end-to-end** | Open a `.db`, see tables, run a query, see results in a virtual grid |
 | M2 ✅ | **Postgres** | Connect via form or URL, introspect schema, run + cancel queries, SSL |
 | M3 ✅ | **Editor polish** | Highlighting, run-under-cursor, tabs, query history |
-| M4 | **Grid polish** | Column resize, copy formats, type rendering, table browser with sort/filter |
+| M4 ✅ | **Grid polish** | Columns stretch to fill and resize, copy as TSV/CSV/JSON, table browser with sort/filter, Run/Explain toolbar. Richer per-type rendering (JSON, timestamps) moves to M5 |
 | M5 | **Feel** | Command palette, keybindings, light/dark, empty states, error UX, perf pass |
 | M6 | **Ship v0.1** | Signed macOS build, README, screenshots, GitHub release |
 

@@ -176,6 +176,49 @@ fn has_code(text: &str) -> bool {
     false
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    /// Header clicks cycle ascending → descending → unsorted.
+    pub fn cycle(current: Option<SortDirection>) -> Option<SortDirection> {
+        match current {
+            None => Some(SortDirection::Ascending),
+            Some(SortDirection::Ascending) => Some(SortDirection::Descending),
+            Some(SortDirection::Descending) => None,
+        }
+    }
+}
+
+/// The query behind "browse a table": `select *` with an optional raw `where`
+/// condition and sort column, capped at `limit` rows.
+pub fn browse_table(
+    quote: impl Fn(&str) -> String,
+    schema: &str,
+    table: &str,
+    filter: &str,
+    order: Option<(&str, SortDirection)>,
+    limit: usize,
+) -> String {
+    let mut sql = format!("select * from {}.{}", quote(schema), quote(table));
+    let filter = filter.trim().trim_end_matches(';').trim();
+    if !filter.is_empty() {
+        sql.push_str(&format!("\nwhere {filter}"));
+    }
+    if let Some((column, direction)) = order {
+        let direction = match direction {
+            SortDirection::Ascending => "asc",
+            SortDirection::Descending => "desc",
+        };
+        sql.push_str(&format!("\norder by {} {direction}", quote(column)));
+    }
+    sql.push_str(&format!("\nlimit {limit};"));
+    sql
+}
+
 fn same_line(sql: &str, a: usize, b: usize) -> bool {
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     !sql[lo..hi].contains('\n')
@@ -264,6 +307,34 @@ mod tests {
     fn statement_at_on_empty_input() {
         assert_eq!(statement_at("", 0), None);
         assert_eq!(statement_at("-- only a comment", 5), None);
+    }
+
+    #[test]
+    fn browse_table_builds_filter_and_order() {
+        let quote = |s: &str| format!("\"{s}\"");
+        assert_eq!(
+            browse_table(quote, "public", "orders", "", None, 1000),
+            "select * from \"public\".\"orders\"\nlimit 1000;"
+        );
+        assert_eq!(
+            browse_table(
+                quote,
+                "public",
+                "orders",
+                "  status = 'paid';  ",
+                Some(("total", SortDirection::Descending)),
+                50
+            ),
+            "select * from \"public\".\"orders\"\nwhere status = 'paid'\norder by \"total\" desc\nlimit 50;"
+        );
+    }
+
+    #[test]
+    fn sort_cycles() {
+        use SortDirection::*;
+        assert_eq!(SortDirection::cycle(None), Some(Ascending));
+        assert_eq!(SortDirection::cycle(Some(Ascending)), Some(Descending));
+        assert_eq!(SortDirection::cycle(Some(Descending)), None);
     }
 
     #[test]

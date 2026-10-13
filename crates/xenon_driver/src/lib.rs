@@ -5,6 +5,7 @@
 //! a separate [`CancelHandle`] so it can be triggered while a query holds the
 //! connection.
 
+pub mod export;
 pub mod sql;
 
 use std::borrow::Cow;
@@ -132,6 +133,11 @@ pub trait Connection: Send + Sync {
     /// True for a file on this machine or a server on localhost.
     fn is_local(&self) -> bool {
         false
+    }
+
+    /// Wrap a statement so it returns its query plan as rows.
+    fn explain(&self, sql: &str) -> String {
+        format!("explain {sql}")
     }
 
     /// Quote an identifier for this engine's SQL dialect.

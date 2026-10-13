@@ -5,7 +5,7 @@ use gpui::{
 use gpui_component::Root;
 use gpui_platform::application;
 use xenon_ui::{
-    CancelQuery, CloseTab, Launch, NewConnection, NewTab, NextTab, OpenFile, PrevTab, Quit, RunAll,
+    CancelQuery, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, Launch, NewConnection, NewTab, NextTab, OpenFile, PrevTab, Quit, RunAll,
     RunQuery, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, Workspace,
 };
 
@@ -70,7 +70,12 @@ fn set_menus(cx: &mut App) {
         Menu::new("Query").items([
             MenuItem::action("Run Statement", RunQuery),
             MenuItem::action("Run All", RunAll),
+            MenuItem::action("Explain", Explain),
             MenuItem::action("Cancel", CancelQuery),
+            MenuItem::separator(),
+            MenuItem::action("Copy Cells", CopySelection),
+            MenuItem::action("Copy as CSV", CopyCsv),
+            MenuItem::action("Copy as JSON", CopyJson),
         ]),
         Menu::new("View").items([
             MenuItem::action("Explorer", ShowExplorer),

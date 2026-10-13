@@ -19,6 +19,7 @@ actions!(
         NewConnection,
         RunQuery,
         RunAll,
+        Explain,
         CancelQuery,
         NewTab,
         CloseTab,
@@ -27,9 +28,25 @@ actions!(
         ShowExplorer,
         ShowHistory,
         ToggleExplorer,
-        ToggleInspector
+        ToggleInspector,
+        MoveUp,
+        MoveDown,
+        MoveLeft,
+        MoveRight,
+        ExtendUp,
+        ExtendDown,
+        ExtendLeft,
+        ExtendRight,
+        SelectAllCells,
+        CopySelection,
+        CopyCsv,
+        CopyJson,
+        FocusEditor
     ]
 );
+
+/// Key context of the focused results grid.
+const GRID_CONTEXT: &str = "ResultsGrid";
 
 /// The editor's key context. Bindings here must be registered after
 /// `gpui_component::init` so they win over the editor's own (`cmd-enter`
@@ -60,6 +77,21 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-.", CancelQuery, Some(EDITOR_CONTEXT)),
         KeyBinding::new("cmd-b", ToggleExplorer, Some("Workspace")),
         KeyBinding::new("cmd-i", ToggleInspector, Some("Workspace")),
+        KeyBinding::new("cmd-e", Explain, Some("Workspace")),
+        KeyBinding::new("cmd-e", Explain, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("up", MoveUp, Some(GRID_CONTEXT)),
+        KeyBinding::new("down", MoveDown, Some(GRID_CONTEXT)),
+        KeyBinding::new("left", MoveLeft, Some(GRID_CONTEXT)),
+        KeyBinding::new("right", MoveRight, Some(GRID_CONTEXT)),
+        KeyBinding::new("shift-up", ExtendUp, Some(GRID_CONTEXT)),
+        KeyBinding::new("shift-down", ExtendDown, Some(GRID_CONTEXT)),
+        KeyBinding::new("shift-left", ExtendLeft, Some(GRID_CONTEXT)),
+        KeyBinding::new("shift-right", ExtendRight, Some(GRID_CONTEXT)),
+        KeyBinding::new("cmd-a", SelectAllCells, Some(GRID_CONTEXT)),
+        KeyBinding::new("cmd-c", CopySelection, Some(GRID_CONTEXT)),
+        KeyBinding::new("cmd-shift-c", CopyCsv, Some(GRID_CONTEXT)),
+        KeyBinding::new("cmd-alt-c", CopyJson, Some(GRID_CONTEXT)),
+        KeyBinding::new("escape", FocusEditor, Some(GRID_CONTEXT)),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
 }

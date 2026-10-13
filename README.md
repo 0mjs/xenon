@@ -25,6 +25,7 @@ To build a proper app with its icon, `./scripts/bundle-macos.sh` creates `target
 | `⌘N` | Connect to Postgres |
 | `⌘↵` | Run the statement under the cursor (or the selection) |
 | `⇧⌘↵` | Run everything in the editor (or the selection) |
+| `⌘E` | Explain the statement under the cursor |
 | `⌘.` | Cancel the running query |
 | `⌘T` / `⌘W` | New / close query tab |
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab (also `⇧⌘]` / `⇧⌘[`) |
@@ -33,6 +34,11 @@ To build a proper app with its icon, `./scripts/bundle-macos.sh` creates `target
 | `⌘B` | Toggle side panel |
 | `⌘I` | Toggle inspector |
 | `⌘Q` | Quit |
+
+In the results grid: click a cell, shift-click or `⇧`+arrows to select a block, arrows to move,
+`⌘A` all, `⌘C` copy (TSV, pastes into spreadsheets), `⇧⌘C` CSV, `⌥⌘C` JSON, `Esc` back to the
+editor. Click a header to sort (browse tabs sort on the server), drag a header edge to resize,
+double-click it to fit. Browse tabs have a `WHERE` filter.
 
 Double-click the title bar to zoom the window.
 
