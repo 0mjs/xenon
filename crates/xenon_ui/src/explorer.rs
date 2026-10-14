@@ -7,7 +7,9 @@ use xenon_store::{SavedConnection, Target};
 use crate::assets;
 use crate::palette::fuzzy_score;
 use crate::theme::{MONO_FONT, Theme};
-use crate::widgets::{connection_tags, empty_hint, env_tag, panel_label, search_field, tree_row};
+use crate::widgets::{
+    Engine, connection_tags, empty_hint, engine_logo, env_tag, panel_label, search_field, tree_row,
+};
 use crate::workspace::Workspace;
 
 impl Workspace {
@@ -147,9 +149,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (engine, local) = match &saved.target {
-            Target::Sqlite { .. } => ("SQ", true),
+            Target::Sqlite { .. } => (Engine::Sqlite, true),
             Target::Postgres { host, .. } => (
-                "PG",
+                Engine::Postgres,
                 matches!(host.as_str(), "" | "localhost" | "127.0.0.1" | "::1"),
             ),
         };
@@ -169,10 +171,9 @@ impl Workspace {
             .child(
                 div()
                     .w(px(18.))
-                    .font_family(MONO_FONT)
-                    .text_size(px(9.))
-                    .text_color(theme.t3)
-                    .child(engine),
+                    .flex()
+                    .flex_none()
+                    .child(engine_logo(engine, 13., if active { theme.acc } else { theme.t3 })),
             )
             .child(div().flex_1().truncate().child(saved.name.clone()))
             .children(

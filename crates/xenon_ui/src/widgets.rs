@@ -370,6 +370,67 @@ pub fn overlay_panel(theme: &Theme) -> gpui::Div {
         .shadow(overlay_shadow(theme))
 }
 
+/// Database engines Xenon shows a logo for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    Postgres,
+    Sqlite,
+    MySql,
+    MariaDb,
+    DuckDb,
+    SqlServer,
+    Unknown,
+}
+
+impl Engine {
+    /// From a display name like "Postgres" or "SQL Server".
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "Postgres" | "PostgreSQL" => Engine::Postgres,
+            "SQLite" => Engine::Sqlite,
+            "MySQL" => Engine::MySql,
+            "MariaDB" => Engine::MariaDb,
+            "DuckDB" => Engine::DuckDb,
+            "SQL Server" => Engine::SqlServer,
+            _ => Engine::Unknown,
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Engine::Postgres => "db-postgresql",
+            Engine::Sqlite => "db-sqlite",
+            Engine::MySql => "db-mysql",
+            Engine::MariaDb => "db-mariadb",
+            Engine::DuckDb => "db-duckdb",
+            Engine::SqlServer => "db-microsoftsqlserver",
+            Engine::Unknown => "database",
+        }
+    }
+}
+
+/// An engine's logo, one colour.
+pub fn engine_logo(engine: Engine, size: f32, color: Rgba) -> gpui::Svg {
+    gpui::svg()
+        .path(crate::assets::icon(engine.icon()))
+        .size(px(size))
+        .flex_none()
+        .text_color(color)
+}
+
+/// An engine's logo on a 34px tile: accent when it can be used, muted when not yet.
+pub fn engine_badge(theme: &Theme, engine: Engine, available: bool) -> gpui::Div {
+    div()
+        .size(px(34.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_CONTROL + 1.))
+        .bg(if available { theme.acc_wash } else { theme.s3 })
+        .child(engine_logo(engine, 20., if available { theme.acc } else { theme.t3 }))
+}
+
 pub fn tree_row(depth: usize) -> gpui::Div {
     div()
         .h(px(24.))

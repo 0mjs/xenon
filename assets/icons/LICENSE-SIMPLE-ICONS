@@ -1,0 +1,8 @@
+The database logos in this folder (db-*.svg) come from Simple Icons
+(https://simpleicons.org, https://github.com/simple-icons/simple-icons), version 16.35.0,
+released under CC0 1.0 Universal (public domain dedication).
+
+The logos themselves are trademarks of their respective owners (PostgreSQL Global Development
+Group, SQLite Consortium, Oracle (MySQL), MariaDB Foundation, DuckDB Foundation, Microsoft).
+Xenon uses them only to identify which database a connection is for, and makes no claim of
+endorsement.

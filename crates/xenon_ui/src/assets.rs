@@ -1,4 +1,5 @@
-//! Icons bundled into the binary (Lucide, ISC licensed; see assets/icons/LICENSE-LUCIDE).
+//! Icons bundled into the binary: Lucide UI icons (ISC, see assets/icons/LICENSE-LUCIDE) and
+//! database logos from Simple Icons (`db-*`, CC0; the marks belong to their owners).
 
 use std::borrow::Cow;
 
@@ -17,6 +18,12 @@ icons![
     "clock",
     "close",
     "database",
+    "db-duckdb",
+    "db-mariadb",
+    "db-microsoftsqlserver",
+    "db-mysql",
+    "db-postgresql",
+    "db-sqlite",
     "eye",
     "folder-search",
     "panel-left-close",

@@ -10,7 +10,7 @@ use xenon_postgres::{ConnectOptions, SslMode};
 use xenon_store::{Environment, SavedConnection, Target};
 
 use crate::theme::{ActiveTheme, MONO_FONT, Theme};
-use crate::widgets::{self, ButtonKind, RADIUS_CONTROL};
+use crate::widgets::{self, ButtonKind, Engine, RADIUS_CONTROL};
 
 /// What the dialog is for.
 #[derive(Clone)]
@@ -381,7 +381,11 @@ impl Render for ConnectDialog {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(engine_badge(&theme, if is_sqlite { "SQ" } else { "PG" }))
+            .child(widgets::engine_badge(
+                &theme,
+                if is_sqlite { Engine::Sqlite } else { Engine::Postgres },
+                true,
+            ))
             .child(
                 div()
                     .flex()
@@ -552,23 +556,6 @@ impl Render for ConnectDialog {
             .bg(theme.scrim)
             .child(panel)
     }
-}
-
-/// The two-letter engine mark used on cards and dialogs.
-pub fn engine_badge(theme: &Theme, label: &'static str) -> impl IntoElement {
-    div()
-        .size(px(32.))
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .rounded(px(RADIUS_CONTROL + 1.))
-        .bg(theme.acc_wash)
-        .font_family(MONO_FONT)
-        .text_size(px(11.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.acc)
-        .child(label)
 }
 
 fn section(theme: &Theme, label: &'static str, content: impl IntoElement) -> gpui::Div {

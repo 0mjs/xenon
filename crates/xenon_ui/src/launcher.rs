@@ -8,7 +8,8 @@ use crate::detect::tilde;
 use crate::discover::{Found, FoundTarget};
 use crate::theme::{MONO_FONT, Theme};
 use crate::widgets::{
-    ButtonKind, RADIUS_CARD, RADIUS_CONTROL, button, connection_tags, env_tag, field_sized,
+    ButtonKind, Engine, RADIUS_CARD, RADIUS_CONTROL, button, connection_tags, engine_badge, env_tag,
+    field_sized,
 };
 use crate::workspace::Workspace;
 use crate::{NewConnection, OpenFile};
@@ -127,7 +128,7 @@ impl Workspace {
     fn render_tiles(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let tile = |id: &'static str,
                     name: &'static str,
-                    badge: &'static str,
+                    engine: Engine,
                     kind: &'static str,
                     available: bool| {
             div()
@@ -147,7 +148,7 @@ impl Workspace {
                     el.cursor_pointer()
                         .hover(|s| s.border_color(theme.acc).bg(theme.s3))
                 })
-                .child(engine_badge(theme, badge, available))
+                .child(engine_badge(theme, engine, available))
                 .child(
                     div()
                         .flex()
@@ -172,17 +173,17 @@ impl Workspace {
         div()
             .flex()
             .gap(px(GAP))
-            .child(tile("tile-postgres", "Postgres", "PG", "Server", true).on_click(
+            .child(tile("tile-postgres", "Postgres", Engine::Postgres, "Server", true).on_click(
                 cx.listener(|this, _, window, cx| this.new_connection(&NewConnection, window, cx)),
             ))
             .child(
-                tile("tile-sqlite", "SQLite", "SQ", "Open a file", true).on_click(
+                tile("tile-sqlite", "SQLite", Engine::Sqlite, "Open a file", true).on_click(
                     cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx)),
                 ),
             )
-            .child(tile("tile-mysql", "MySQL", "MY", "Server", false))
-            .child(tile("tile-duckdb", "DuckDB", "DK", "File", false))
-            .child(tile("tile-sqlserver", "SQL Server", "MS", "Server", false))
+            .child(tile("tile-mysql", "MySQL", Engine::MySql, "Server", false))
+            .child(tile("tile-duckdb", "DuckDB", Engine::DuckDb, "File", false))
+            .child(tile("tile-sqlserver", "SQL Server", Engine::SqlServer, "Server", false))
             .into_any_element()
     }
 
@@ -235,7 +236,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (engine, detail, local) = match &saved.target {
-            Target::Sqlite { path } => ("SQ", tilde(path), true),
+            Target::Sqlite { path } => (Engine::Sqlite, tilde(path), true),
             Target::Postgres {
                 host,
                 port,
@@ -243,7 +244,7 @@ impl Workspace {
                 user,
                 ..
             } => (
-                "PG",
+                Engine::Postgres,
                 format!("{user}@{host}:{}/{database}", port.unwrap_or(5432)),
                 matches!(host.as_str(), "" | "localhost" | "127.0.0.1" | "::1"),
             ),
@@ -437,17 +438,7 @@ impl Workspace {
                                 this.connect_found(&target, window, cx)
                             }))
                     })
-                    .child(engine_badge(
-                        theme,
-                        match found.engine() {
-                            "Postgres" => "PG",
-                            "MySQL" => "MY",
-                            "SQL Server" => "MS",
-                            "DuckDB" => "DK",
-                            _ => "··",
-                        },
-                        available,
-                    ))
+                    .child(engine_badge(theme, Engine::from_name(found.engine()), available))
                     .child(
                         div()
                             .flex_1()
@@ -514,20 +505,4 @@ fn section(
                 .children(trailing),
         )
         .child(content)
-}
-
-fn engine_badge(theme: &Theme, label: &'static str, available: bool) -> impl IntoElement {
-    div()
-        .size(px(32.))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(RADIUS_CONTROL + 1.))
-        .bg(if available { theme.acc_wash } else { theme.s3 })
-        .font_family(MONO_FONT)
-        .text_size(px(11.))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(if available { theme.acc } else { theme.t3 })
-        .child(label)
 }
