@@ -17,7 +17,11 @@ const ROW_HEIGHT: f32 = 36.;
 const VISIBLE_ROWS: usize = 10;
 
 pub enum Target {
-    Table { schema: String, table: String },
+    Table {
+        session: usize,
+        schema: String,
+        table: String,
+    },
     Action(Box<dyn Action>),
 }
 

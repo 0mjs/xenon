@@ -82,7 +82,7 @@ so it can join the test fleet.
 | ✅ URL paste, host/port form, all libpq SSL modes, Keychain secrets | 0.1 |
 | ✅ Connections home, environments (prod/dev), read-only mode, typed confirmation on prod | 0.2 |
 | ✅ Discover local databases (Docker, ports, `.pgpass`, `pg_service.conf`, `.env`) | 0.2 |
-| Several connections open at once; tabs bound to a connection | 0.2 |
+| ✅ Several connections open at once; tabs bound to a connection | 0.2 |
 | SSH tunnels: password, key, agent, `~/.ssh/config` hosts, jump hosts (`ProxyJump`) | 0.2 |
 | Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.3 |
 | Reconnect after sleep or network loss, keep tabs and unsaved edits | 0.3 |

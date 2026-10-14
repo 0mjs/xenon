@@ -84,6 +84,20 @@ impl Shot {
     }
 }
 
+/// A second database, so screens can show several connections at once.
+fn analytics(dir: &Path) -> PathBuf {
+    let path = dir.join("analytics.db");
+    let _ = std::fs::remove_file(&path);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "create table events (id integer primary key, name text, user_id integer, at text);
+         create table sessions (id integer primary key, user_id integer, started text, seconds integer);
+         insert into events (name, user_id, at) values ('signup', 1, '2026-10-01'), ('login', 1, '2026-10-02');",
+    )
+    .unwrap();
+    path
+}
+
 /// A small, realistic database for the screens that show data.
 fn fixture(dir: &Path) -> PathBuf {
     let path = dir.join("shop.db");
@@ -174,6 +188,7 @@ fn snapshots() {
     // SAFETY: set before any other thread reads the environment.
     unsafe { std::env::set_var("XENON_DATA_DIR", &data) };
     let shop = fixture(&data);
+    let second = analytics(&data);
     seed_saved(&Store::open(&data.join("xenon.db")).unwrap(), &shop);
 
     for (mode, suffix) in [(Mode::Dark, "dark"), (Mode::Light, "light")] {
@@ -183,7 +198,10 @@ fn snapshots() {
         shot.save(&format!("02-connect-dialog-{suffix}"));
 
         let mut shot = Shot::new(mode, Some(&shop), &root);
-        shot.act(|w, window, cx| w.browse("main", "orders", window, cx));
+        shot.act(|w, window, cx| {
+            let id = w.sessions[0].id;
+            w.browse(id, "main", "orders", window, cx)
+        });
         shot.act(|w, window, cx| {
             w.select_cell(2, 2, false, window, cx);
             w.select_cell(5, 4, true, window, cx);
@@ -205,7 +223,7 @@ fn snapshots() {
         shot.save(&format!("05-query-history-{suffix}"));
 
         shot.act(|w, window, cx| {
-            if let Some(session) = &mut w.session {
+            if let Some(session) = w.sessions.first_mut() {
                 session.environment = Environment::Production;
             }
             let editor = w.active_tab().editor.clone();
@@ -213,5 +231,30 @@ fn snapshots() {
             w.run(RunScope::All, window, cx);
         });
         shot.save(&format!("06-confirm-{suffix}"));
+
+        // Two connections open side by side.
+        let mut shot = Shot::new(mode, Some(&shop), &root);
+        shot.act(|w, window, cx| w.open_path(second.clone(), window, cx));
+        shot.act(|w, window, cx| {
+            let id = w.sessions[1].id;
+            w.browse(id, "main", "events", window, cx)
+        });
+        shot.save(&format!("07-two-connections-{suffix}"));
+        shot.act(|w, window, cx| w.open_palette(&crate::OpenPalette, window, cx));
+        shot.save(&format!("08-palette-two-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.palette = None;
+            cx.notify();
+        });
+        shot.act(|w, window, cx| w.open_connect_tab(window, cx));
+        shot.save(&format!("09-connect-tab-{suffix}"));
+
+        // Closing a connection closes only its tabs; the other stays open.
+        shot.act(|w, window, cx| {
+            let first = w.sessions[0].id;
+            w.close_session(first, window, cx);
+            assert_eq!(w.sessions.len(), 1);
+            assert!(w.tabs().iter().all(|tab| tab.session != Some(first)));
+        });
     }
 }

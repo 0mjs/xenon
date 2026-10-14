@@ -34,13 +34,13 @@ use crate::results::{self, Grid, Selection};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
     centered_hint, connection_tags, empty_hint, env_tag, field, format_duration, group_digits, kbd,
-    kbd_on_accent, panel_label, pretty_json, ButtonKind, RADIUS_CONTROL, self as widgets,
+    kbd_on_accent, panel_label, pretty_json, ButtonKind, Engine, RADIUS_CONTROL, self as widgets,
 };
 use crate::{
     CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown,
     ExtendLeft, ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp,
     NewConnection, NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery,
-    SelectAllCells, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme,
+    SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme,
     UseLightTheme, UseSystemTheme,
 };
 
@@ -55,7 +55,7 @@ const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
-const TAB_MAX_WIDTH: f32 = 180.;
+const TAB_MAX_WIDTH: f32 = 240.;
 /// Room for the macOS traffic lights in the transparent title bar.
 const TRAFFIC_LIGHT_INSET: f32 = 78.;
 /// Rows kept from a single result set; the rest are dropped and flagged.
@@ -79,7 +79,10 @@ impl Launch {
     }
 }
 
+/// An open connection. Several can be open at once; each tab belongs to one.
 pub(crate) struct Session {
+    pub id: usize,
+    pub engine: Engine,
     pub conn: Arc<dyn Connection>,
     pub version: String,
     pub schemas: Vec<Schema>,
@@ -88,6 +91,11 @@ pub(crate) struct Session {
     pub environment: Environment,
     pub read_only: bool,
     pub saved_id: Option<i64>,
+    /// Explorer state: tables showing their columns (`schema.table`), folded
+    /// schemas, and whether the whole connection is folded.
+    pub expanded: HashSet<String>,
+    pub collapsed_schemas: HashSet<String>,
+    pub collapsed: bool,
 }
 
 /// Everything needed to open (and maybe remember) a connection.
@@ -337,6 +345,8 @@ impl Browse {
 /// One query tab: its own editor and its own results.
 pub(crate) struct Tab {
     id: usize,
+    /// The connection this tab runs against; `None` shows the Connect screen.
+    pub(crate) session: Option<usize>,
     title: SharedString,
     browse: Option<Browse>,
     pub(crate) editor: Entity<EditorState>,
@@ -379,12 +389,10 @@ pub struct Workspace {
     tabs: Vec<Tab>,
     active: usize,
     next_tab_id: usize,
-    pub(crate) session: Option<Session>,
+    pub(crate) sessions: Vec<Session>,
+    next_session_id: usize,
     /// A problem opening a database, shown in the explorer.
     pub(crate) notice: Option<SharedString>,
-    /// Explorer keys (`schema.table`) whose columns are shown.
-    pub(crate) expanded: HashSet<String>,
-    pub(crate) collapsed_schemas: HashSet<String>,
     pub(crate) store: Option<Arc<Store>>,
     pub(crate) history: Vec<HistoryEntry>,
     pub(crate) history_filter: Entity<InputState>,
@@ -477,10 +485,9 @@ impl Workspace {
             tabs: Vec::new(),
             active: 0,
             next_tab_id: 0,
-            session: None,
+            sessions: Vec::new(),
+            next_session_id: 0,
             notice: None,
-            expanded: HashSet::new(),
-            collapsed_schemas: HashSet::new(),
             store,
             history: Vec::new(),
             history_filter,
@@ -515,15 +522,15 @@ impl Workspace {
         };
         this.reload_saved();
         this.rediscover(cx);
-        this.add_tab(None, window, cx);
+        this.add_tab(None, None, window, cx);
         // Deferred so it runs after gpui-component's Root has been built around us.
         cx.defer_in(window, |this: &mut Self, window, cx| {
             this.focus_editor(window, cx)
         });
 
         match launch {
-            Some(Launch::Sqlite(path)) => this.open_path(path, cx),
-            Some(Launch::Postgres(url)) => this.connect_url(url, cx),
+            Some(Launch::Sqlite(path)) => this.open_path(path, window, cx),
+            Some(Launch::Postgres(url)) => this.connect_url(url, window, cx),
             None => {}
         }
         this
@@ -531,13 +538,32 @@ impl Workspace {
 
     // ---------------------------------------------------------------- tabs
 
+    #[cfg(test)]
+    pub(crate) fn tabs(&self) -> &[Tab] {
+        &self.tabs
+    }
+
     pub(crate) fn active_tab(&self) -> &Tab {
         &self.tabs[self.active]
+    }
+
+    pub(crate) fn session(&self, id: usize) -> Option<&Session> {
+        self.sessions.iter().find(|s| s.id == id)
+    }
+
+    fn session_mut(&mut self, id: usize) -> Option<&mut Session> {
+        self.sessions.iter_mut().find(|s| s.id == id)
+    }
+
+    /// The connection the active tab runs against.
+    pub(crate) fn active_session(&self) -> Option<&Session> {
+        self.active_tab().session.and_then(|id| self.session(id))
     }
 
     fn add_tab(
         &mut self,
         browse: Option<(String, String)>,
+        session: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -578,6 +604,7 @@ impl Workspace {
                     }),
                 )
             }
+            None if session.is_none() => ("Connect".into(), None),
             None => (
                 SharedString::from(format!("Query {}", self.free_query_number())),
                 None,
@@ -585,6 +612,7 @@ impl Workspace {
         };
         self.tabs.push(Tab {
             id,
+            session,
             title,
             browse,
             editor,
@@ -611,20 +639,57 @@ impl Workspace {
 
     fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
+            let switched = self.tabs[index].session != self.active_tab().session;
             self.active = index;
+            if switched {
+                self.reload_history(cx);
+            }
             self.focus_editor(window, cx);
             cx.notify();
         }
+    }
+
+    /// Show the Connect screen in a tab: the open one if there is one, else a new one.
+    pub(crate) fn open_connect_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.tabs.iter().position(|tab| tab.session.is_none()) {
+            Some(index) => self.active = index,
+            None => self.add_tab(None, None, window, cx),
+        }
+        self.paste_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Point a tab at session `id` after connecting: the Connect tab you're on
+    /// becomes a query tab for it; otherwise an existing tab for an already
+    /// open connection comes forward, or a new query tab opens.
+    fn attach(&mut self, id: usize, existing: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_tab().session.is_none() {
+            let number = self.free_query_number();
+            let tab = &mut self.tabs[self.active];
+            tab.session = Some(id);
+            tab.title = format!("Query {number}").into();
+        } else if let Some(index) = existing
+            .then(|| self.tabs.iter().position(|tab| tab.session == Some(id)))
+            .flatten()
+        {
+            self.active = index;
+        } else {
+            self.add_tab(None, Some(id), window, cx);
+        }
+        self.reload_history(cx);
+        self.focus_editor(window, cx);
+        cx.notify();
     }
 
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Query::Running { cancel, .. } = &self.tabs[index].query {
             cancel.cancel();
         }
-        self.tabs.remove(index);
+        let session = self.tabs.remove(index).session;
         if self.tabs.is_empty() {
             // There's always one tab; closing the last gives a clean "Query 1".
-            self.add_tab(None, window, cx);
+            self.add_tab(None, session, window, cx);
         } else if self.active >= self.tabs.len() || index < self.active {
             self.active = self.active.saturating_sub(1).min(self.tabs.len() - 1);
         }
@@ -633,7 +698,8 @@ impl Workspace {
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_tab(None, window, cx);
+        let session = self.active_tab().session;
+        self.add_tab(None, session, window, cx);
         self.focus_editor(window, cx);
     }
 
@@ -658,7 +724,7 @@ impl Workspace {
     // ---------------------------------------------------------- connecting
 
     /// Open a SQLite file. Files are remembered with the saved connections.
-    pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    pub fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let path_text = path.display().to_string();
         let known = self
             .saved
@@ -679,10 +745,10 @@ impl Workspace {
                 target: RequestTarget::Sqlite(path_text),
             },
         };
-        self.open_profile(profile, cx);
+        self.open_profile(profile, window, cx);
     }
 
-    fn connect_url(&mut self, url: String, cx: &mut Context<Self>) {
+    fn connect_url(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         match ConnectOptions::from_url(&url) {
             Ok(options) => {
                 let host = if options.host.is_empty() {
@@ -705,6 +771,7 @@ impl Workspace {
                         read_only: false,
                         target: RequestTarget::Postgres(options),
                     },
+                    window,
                     cx,
                 )
             }
@@ -715,15 +782,30 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn connect_to_saved(&mut self, saved: &SavedConnection, cx: &mut Context<Self>) {
-        self.open_profile(Profile::from_saved(saved), cx);
+    pub(crate) fn connect_to_saved(
+        &mut self,
+        saved: &SavedConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_profile(Profile::from_saved(saved), window, cx);
     }
 
     /// Connect off the main thread (reading a saved password from the Keychain
-    /// first), then make it the active session and remember it if asked.
+    /// first), then open it alongside any other connections and remember it if
+    /// asked. A connection that's already open is brought forward instead.
     /// Errors go to the connection dialog when it's open.
-    fn open_profile(&mut self, profile: Profile, cx: &mut Context<Self>) {
+    fn open_profile(&mut self, profile: Profile, window: &mut Window, cx: &mut Context<Self>) {
         self.notice = None;
+        if let Some(id) = profile
+            .saved_id
+            .and_then(|saved| self.sessions.iter().find(|s| s.saved_id == Some(saved)))
+            .map(|s| s.id)
+        {
+            self.connect_dialog = None;
+            self.attach(id, true, window, cx);
+            return;
+        }
         let store = self.store.clone();
         let task = cx.background_spawn(async move {
             let conn = profile.connect()?;
@@ -731,12 +813,29 @@ impl Workspace {
             let saved_id = profile.remember(store.as_deref())?;
             anyhow::Ok((conn, schemas, profile, saved_id))
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let opened = task.await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
                 match opened {
                     Ok((conn, schemas, profile, saved_id)) => {
-                        this.session = Some(Session {
+                        this.connect_dialog = None;
+                        this.reload_saved();
+                        // The same database reached another way (a pasted URL for a
+                        // saved connection, say): use the one already open.
+                        if let Some(id) =
+                            this.sessions.iter().find(|s| s.conn.id() == conn.id()).map(|s| s.id)
+                        {
+                            this.attach(id, true, window, cx);
+                            return;
+                        }
+                        this.next_session_id += 1;
+                        let id = this.next_session_id;
+                        this.sessions.push(Session {
+                            id,
+                            engine: match profile.target {
+                                RequestTarget::Sqlite(_) => Engine::Sqlite,
+                                RequestTarget::Postgres(_) => Engine::Postgres,
+                            },
                             version: conn.server_version(),
                             conn,
                             schemas,
@@ -744,22 +843,11 @@ impl Workspace {
                             environment: profile.environment,
                             read_only: profile.read_only,
                             saved_id,
+                            expanded: HashSet::new(),
+                            collapsed_schemas: HashSet::new(),
+                            collapsed: false,
                         });
-                        // Keep everyone's SQL; results belong to the old connection.
-                        for tab in &mut this.tabs {
-                            if let Query::Running { cancel, .. } = &tab.query {
-                                cancel.cancel();
-                            }
-                            tab.query = Query::Idle;
-                            tab.grid = None;
-                            tab.selection = None;
-                            tab.browse = None;
-                        }
-                        this.expanded.clear();
-                        this.collapsed_schemas.clear();
-                        this.connect_dialog = None;
-                        this.reload_saved();
-                        this.reload_history(cx);
+                        this.attach(id, false, window, cx);
                         this.bench_start(cx);
                     }
                     Err(err) => {
@@ -841,10 +929,10 @@ impl Workspace {
                         cx,
                     );
                 }
-                Ok(_) => self.connect_url(url, cx),
+                Ok(_) => self.connect_url(url, window, cx),
                 Err(err) => self.paste_note = (format!("{err:#}").into(), true),
             },
-            Detected::Sqlite(path) => self.open_path(path, cx),
+            Detected::Sqlite(path) => self.open_path(path, window, cx),
             Detected::NotYet(engine) => {
                 self.paste_note = (
                     format!("{engine} support is coming in Xenon 0.2.").into(),
@@ -882,6 +970,7 @@ impl Workspace {
                     read_only: false,
                     target: RequestTarget::Postgres(options.clone()),
                 },
+                window,
                 cx,
             );
         } else {
@@ -896,29 +985,50 @@ impl Workspace {
         }
     }
 
-    /// Disconnect and go back to the connections home.
+    /// Disconnect the active tab's connection.
     fn close_connection(
         &mut self,
         _: &CloseConnection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.take().is_none() {
-            return;
+        if let Some(id) = self.active_tab().session {
+            self.close_session(id, window, cx);
         }
-        for tab in &mut self.tabs {
-            if let Query::Running { cancel, .. } = &tab.query {
+    }
+
+    /// Disconnect session `id` and close its tabs. With nothing left open, the
+    /// window goes back to the Connect screen.
+    pub(crate) fn close_session(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.sessions.iter().position(|s| s.id == id) else {
+            return;
+        };
+        self.sessions.remove(index);
+        let active_id = self.active_tab().id;
+        self.tabs.retain(|tab| {
+            let closing = tab.session == Some(id);
+            if closing && let Query::Running { cancel, .. } = &tab.query {
                 cancel.cancel();
             }
-            tab.query = Query::Idle;
-            tab.grid = None;
-            tab.selection = None;
-            tab.browse = None;
+            !closing
+        });
+        if self.tabs.is_empty() {
+            let next = self.sessions.first().map(|s| s.id);
+            self.add_tab(None, next, window, cx);
         }
-        self.history.clear();
-        self.rediscover(cx);
-        self.paste_input
-            .update(cx, |input, cx| input.focus(window, cx));
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or(self.tabs.len() - 1);
+        self.reload_history(cx);
+        if self.sessions.is_empty() {
+            self.rediscover(cx);
+            self.paste_input
+                .update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            self.focus_editor(window, cx);
+        }
         cx.notify();
     }
 
@@ -1019,7 +1129,7 @@ impl Workspace {
         let subscription =
             cx.subscribe_in(&dialog, window, |this, _, event, window, cx| match event {
                 ConnectEvent::Submit(request) => {
-                    this.open_profile(Profile::from_request(request.clone()), cx)
+                    this.open_profile(Profile::from_request(request.clone()), window, cx)
                 }
                 ConnectEvent::Test(request) => this.test_connection(request.clone(), cx),
                 ConnectEvent::Dismiss => {
@@ -1070,18 +1180,19 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn open_file(&mut self, _: &OpenFile, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: Some("Open".into()),
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await
                 && let Some(path) = paths.into_iter().next()
             {
-                this.update(cx, |this, cx| this.open_path(path, cx)).ok();
+                this.update_in(cx, |this, window, cx| this.open_path(path, window, cx))
+                    .ok();
             }
         })
         .detach();
@@ -1102,7 +1213,7 @@ impl Workspace {
     }
 
     pub(crate) fn run(&mut self, scope: RunScope, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else {
+        let Some(session) = self.active_session() else {
             self.notice = Some("Open a database first (⌘O or ⌘N).".into());
             cx.notify();
             return;
@@ -1187,7 +1298,11 @@ impl Workspace {
         origin: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = &self.session else { return };
+        let Some(session_id) = self.tabs.iter().find(|t| t.id == tab_id).and_then(|t| t.session)
+        else {
+            return;
+        };
+        let Some(session) = self.session(session_id) else { return };
         let conn = session.conn.clone();
         let store = self.store.clone();
         let cancel = conn.cancel_handle();
@@ -1230,7 +1345,7 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let (result, schemas) = work.await;
             this.update(cx, |this, cx| {
-                this.finish_query(tab_id, result, schemas, cx)
+                this.finish_query(tab_id, session_id, result, schemas, cx)
             })
             .ok();
         });
@@ -1248,11 +1363,12 @@ impl Workspace {
     fn finish_query(
         &mut self,
         tab_id: usize,
+        session_id: usize,
         result: anyhow::Result<QueryResult>,
         schemas: Option<Vec<Schema>>,
         cx: &mut Context<Self>,
     ) {
-        if let (Some(session), Some(schemas)) = (&mut self.session, schemas) {
+        if let (Some(session), Some(schemas)) = (self.session_mut(session_id), schemas) {
             session.schemas = schemas;
         }
         self.reload_history(cx);
@@ -1405,29 +1521,34 @@ impl Workspace {
     /// Show a table's rows, in the tab already browsing it or in a new one.
     pub(crate) fn browse(
         &mut self,
+        session: usize,
         schema: &str,
         table: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.is_none() {
+        if self.session(session).is_none() {
             return;
         }
         let key = format!("{schema}.{table}");
-        match self
-            .tabs
-            .iter()
-            .position(|tab| tab.browse.as_ref().is_some_and(|b| b.key() == key))
-        {
-            Some(index) => self.active = index,
-            None => self.add_tab(Some((schema.to_string(), table.to_string())), window, cx),
+        match self.tabs.iter().position(|tab| {
+            tab.session == Some(session) && tab.browse.as_ref().is_some_and(|b| b.key() == key)
+        }) {
+            Some(index) => self.activate_tab(index, window, cx),
+            None => self.add_tab(
+                Some((schema.to_string(), table.to_string())),
+                Some(session),
+                window,
+                cx,
+            ),
         }
+        self.reload_history(cx);
         self.run_browse(window, cx);
     }
 
     /// Regenerate the active browse tab's query from its filter and sort, and run it.
     fn run_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(session), Some(browse)) = (&self.session, &self.active_tab().browse) else {
+        let (Some(session), Some(browse)) = (self.active_session(), &self.active_tab().browse) else {
             return;
         };
         let conn = session.conn.clone();
@@ -1594,19 +1715,31 @@ impl Workspace {
             return;
         }
         let mut items = Vec::new();
-        if let Some(session) = &self.session {
+        // Tables from every open connection, the active one's first.
+        let active = self.active_tab().session;
+        let mut sessions: Vec<&Session> = self.sessions.iter().collect();
+        sessions.sort_by_key(|s| Some(s.id) != active);
+        let several = sessions.len() > 1;
+        for session in sessions {
             let nested = session.shows_schemas();
             for schema in &session.schemas {
                 for object in &schema.objects {
+                    let detail = match (nested, several) {
+                        (true, true) => Some(format!("{} · {}", schema.name, session.name)),
+                        (true, false) => Some(schema.name.clone()),
+                        (false, true) => Some(session.name.clone()),
+                        (false, false) => None,
+                    };
                     items.push(palette::Item {
                         kind: match object.kind {
                             ObjectKind::Table => "TABLE",
                             ObjectKind::View => "VIEW",
                         },
                         label: object.name.clone().into(),
-                        detail: nested.then(|| schema.name.clone().into()),
+                        detail: detail.map(Into::into),
                         keys: None,
                         target: palette::Target::Table {
+                            session: session.id,
                             schema: schema.name.clone(),
                             table: object.name.clone(),
                         },
@@ -1616,7 +1749,7 @@ impl Workspace {
         }
         // Keys are listed here rather than looked up: several bindings only
         // apply inside the editor or grid, which the palette's focus isn't.
-        let commands: [(&str, &str, Box<dyn gpui::Action>); 21] = [
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 23] = [
             ("Run Statement", "⌘↵", Box::new(RunQuery)),
             ("Run All", "⇧⌘↵", Box::new(RunAll)),
             ("Explain", "⌘E", Box::new(Explain)),
@@ -1625,6 +1758,8 @@ impl Workspace {
             ("Close Tab", "⌘W", Box::new(CloseTab)),
             ("Next Tab", "⌃⇥", Box::new(NextTab)),
             ("Previous Tab", "⌃⇧⇥", Box::new(PrevTab)),
+            ("Connections…", "⇧⌘N", Box::new(ShowConnections)),
+            ("Close Connection", "⇧⌘W", Box::new(CloseConnection)),
             ("Open SQLite File…", "⌘O", Box::new(OpenFile)),
             ("Connect to Postgres…", "⌘N", Box::new(NewConnection)),
             ("Show Explorer", "⇧⌘E", Box::new(ShowExplorer)),
@@ -1654,9 +1789,13 @@ impl Workspace {
             this.palette = None;
             this.focus_editor(window, cx);
             match event {
-                PaletteEvent::Pick(palette::Target::Table { schema, table }) => {
-                    let (schema, table) = (schema.clone(), table.clone());
-                    this.browse(&schema, &table, window, cx);
+                PaletteEvent::Pick(palette::Target::Table {
+                    session,
+                    schema,
+                    table,
+                }) => {
+                    let (session, schema, table) = (*session, schema.clone(), table.clone());
+                    this.browse(session, &schema, &table, window, cx);
                 }
                 PaletteEvent::Pick(palette::Target::Action(action)) => {
                     window.dispatch_action(action.boxed_clone(), cx);
@@ -1682,16 +1821,27 @@ impl Workspace {
 
     // -------------------------------------------------------------- panels
 
-    pub(crate) fn toggle_expanded(&mut self, key: &str, cx: &mut Context<Self>) {
-        if !self.expanded.remove(key) {
-            self.expanded.insert(key.to_string());
+    pub(crate) fn toggle_expanded(&mut self, session: usize, key: &str, cx: &mut Context<Self>) {
+        if let Some(session) = self.session_mut(session)
+            && !session.expanded.remove(key)
+        {
+            session.expanded.insert(key.to_string());
         }
         cx.notify();
     }
 
-    pub(crate) fn toggle_schema(&mut self, schema: &str, cx: &mut Context<Self>) {
-        if !self.collapsed_schemas.remove(schema) {
-            self.collapsed_schemas.insert(schema.to_string());
+    pub(crate) fn toggle_schema(&mut self, session: usize, schema: &str, cx: &mut Context<Self>) {
+        if let Some(session) = self.session_mut(session)
+            && !session.collapsed_schemas.remove(schema)
+        {
+            session.collapsed_schemas.insert(schema.to_string());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_session(&mut self, session: usize, cx: &mut Context<Self>) {
+        if let Some(session) = self.session_mut(session) {
+            session.collapsed = !session.collapsed;
         }
         cx.notify();
     }
@@ -1776,7 +1926,7 @@ impl Render for Workspace {
                 el.child(self.render_side_panel(&theme, cx))
             })
             .child(self.render_center(&theme, cx))
-            .when(self.show_inspector && self.session.is_some(), |el| {
+            .when(self.show_inspector && self.active_session().is_some(), |el| {
                 el.child(self.render_inspector(&theme))
             });
 
@@ -1820,6 +1970,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::close_connection))
+            .on_action(cx.listener(|this, _: &ShowConnections, window, cx| {
+                this.open_connect_tab(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &UseSystemTheme, w, cx| {
                 this.set_theme(ThemeChoice::System, w, cx)
             }))
@@ -1845,9 +1998,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(Self::toggle_explorer))
             .on_action(cx.listener(Self::toggle_inspector))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.0.first() {
-                    this.open_path(path.clone(), cx);
+                    this.open_path(path.clone(), window, cx);
                 }
             }))
             .size_full()
@@ -1875,14 +2028,28 @@ impl Render for Workspace {
 
 impl Workspace {
     fn render_titlebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // Production tabs are underlined in red instead of the accent.
-        let underline = match &self.session {
-            Some(session) if session.environment == Environment::Production => theme.err,
-            _ => theme.acc,
-        };
+        let several = self.sessions.len() > 1;
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
             let active = index == self.active;
             let running = matches!(tab.query, Query::Running { .. });
+            let session = tab.session.and_then(|id| self.session(id));
+            // Production tabs are underlined in red instead of the accent.
+            let underline = match session {
+                Some(session) if session.environment == Environment::Production => theme.err,
+                _ => theme.acc,
+            };
+            let mark = match session {
+                Some(session) => widgets::engine_logo(
+                    session.engine,
+                    12.,
+                    if active { theme.acc } else { theme.t3 },
+                ),
+                None => svg()
+                    .path(assets::icon("plus"))
+                    .size(px(12.))
+                    .flex_none()
+                    .text_color(if active { theme.acc } else { theme.t3 }),
+            };
             div()
                 .id(("tab", tab.id))
                 .group("tab")
@@ -1905,10 +2072,26 @@ impl Workspace {
                     cx.stop_propagation();
                     this.activate_tab(index, window, cx);
                 }))
+                .child(mark)
+                .child(
+                    div()
+                        .flex()
+                        .min_w(px(0.))
+                        .gap(px(5.))
+                        .child(div().flex_none().child(tab.title.clone()))
+                        // Which connection, once there's more than one to tell apart.
+                        .when_some(session.filter(|_| several), |el, session| {
+                            el.child(
+                                div()
+                                    .truncate()
+                                    .text_color(theme.t3)
+                                    .child(session.name.clone()),
+                            )
+                        }),
+                )
                 .when(running, |el| {
-                    el.child(div().size(px(6.)).rounded_full().bg(theme.acc))
+                    el.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.acc))
                 })
-                .child(div().truncate().child(tab.title.clone()))
                 .child(
                     div()
                         .id(("close-tab", tab.id))
@@ -1984,7 +2167,7 @@ impl Workspace {
                             .text_color(theme.t2),
                     ),
             )
-            .when(self.session.is_some(), |el| el.child(
+            .when(!self.sessions.is_empty(), |el| el.child(
                 div()
                     .id("tab-strip")
                     .h_full()
@@ -2101,7 +2284,37 @@ impl Workspace {
             .flex_col()
             .border_r_1()
             .border_color(theme.line)
-            .child(panel_label(theme, label))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pr(px(8.))
+                    .child(panel_label(theme, label))
+                    .when(self.side_panel == SidePanel::Explorer, |el| {
+                        el.child(
+                            div()
+                                .id("explorer-connect")
+                                .mt(px(4.))
+                                .size(px(22.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(RADIUS_CONTROL))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.s3))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_connect_tab(window, cx)
+                                }))
+                                .child(
+                                    svg()
+                                        .path(assets::icon("plus"))
+                                        .size(px(14.))
+                                        .text_color(theme.t2),
+                                ),
+                        )
+                    }),
+            )
             .child(content)
             .child(
                 // Drag the edge to resize; double-click to reset.
@@ -2131,7 +2344,7 @@ impl Workspace {
     }
 
     fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        if self.session.is_none() {
+        if self.active_session().is_none() {
             return div()
                 .flex_1()
                 .min_w(px(0.))
@@ -2206,7 +2419,7 @@ impl Workspace {
         let small = |button: gpui::Stateful<gpui::Div>| button.h(px(26.)).px(px(10.));
 
         // Where this query runs: the connection, then what the tab is.
-        let context = self.session.as_ref().map(|session| {
+        let context = self.active_session().map(|session| {
             div()
                 .flex()
                 .items_center()
@@ -2519,7 +2732,7 @@ impl Workspace {
                 .into_any_element(),
             Query::Running { .. } => centered_hint(theme, "Running…"),
             Query::Done(_) => centered_hint(theme, "Done."),
-            Query::Idle if self.session.is_some() => centered_hint(
+            Query::Idle if self.active_session().is_some() => centered_hint(
                 theme,
                 "⌘↵ runs the statement under the cursor, ⇧⌘↵ runs everything.",
             ),
@@ -2626,7 +2839,7 @@ impl Workspace {
             .font_family(MONO_FONT)
             .text_size(px(10.5));
 
-        bar = match &self.session {
+        bar = match self.active_session() {
             Some(session) => bar
                 .child(
                     cell("".into(), theme.t2)
@@ -2656,8 +2869,14 @@ impl Workspace {
                 )),
             None => bar.child(cell("no connection".into(), theme.t3)),
         };
+        let open = self.sessions.len();
+        bar = bar.when(open > 1, |bar| {
+            bar.child(div().flex_1()).child(
+                cell(format!("{open} connections open").into(), theme.t3).border_l_1(),
+            )
+        });
 
-        bar.child(div().flex_1()).child(
+        bar.when(open <= 1, |bar| bar.child(div().flex_1())).child(
             cell(
                 concat!("xenon ", env!("CARGO_PKG_VERSION")).into(),
                 theme.t3,

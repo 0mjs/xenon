@@ -6,7 +6,7 @@ use gpui_component::Root;
 use gpui_platform::application;
 use xenon_ui::{
     CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, Launch,
-    NewConnection, NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery,
+    NewConnection, NewTab, ShowConnections, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery,
     ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme,
     UseSystemTheme, Workspace,
 };
@@ -70,6 +70,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("New Query Tab", NewTab),
             MenuItem::action("Close Tab", CloseTab),
             MenuItem::separator(),
+            MenuItem::action("Connections…", ShowConnections),
             MenuItem::action("Open SQLite File…", OpenFile),
             MenuItem::action("Connect to Postgres…", NewConnection),
             MenuItem::action("Close Connection", CloseConnection),

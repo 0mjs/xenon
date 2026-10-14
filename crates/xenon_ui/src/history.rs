@@ -15,7 +15,7 @@ const HISTORY_SHOWN: usize = 300;
 impl Workspace {
     /// Reload the panel's entries from the store, applying the filter.
     pub(crate) fn reload_history(&mut self, cx: &mut Context<Self>) {
-        let (Some(store), Some(session)) = (self.store.clone(), &self.session) else {
+        let (Some(store), Some(session)) = (self.store.clone(), self.active_session()) else {
             self.history.clear();
             cx.notify();
             return;
@@ -61,7 +61,7 @@ impl Workspace {
             )),
         );
 
-        if self.session.is_none() {
+        if self.active_session().is_none() {
             return panel
                 .child(empty_hint(
                     theme,

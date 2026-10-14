@@ -250,6 +250,7 @@ impl Workspace {
             ),
         };
         let group = SharedString::from(format!("card-{}", saved.id));
+        let open = self.sessions.iter().any(|s| s.saved_id == Some(saved.id));
         let (connect, edit, forget) = (saved.clone(), saved.clone(), saved.clone());
         let icon_button = |id: (&'static str, usize), icon: &'static str, danger: bool| {
             div()
@@ -288,7 +289,9 @@ impl Workspace {
             .border_color(theme.line)
             .cursor_pointer()
             .hover(|s| s.border_color(theme.acc).bg(theme.s3))
-            .on_click(cx.listener(move |this, _, _, cx| this.connect_to_saved(&connect, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.connect_to_saved(&connect, window, cx)
+            }))
             .child(engine_badge(theme, engine, true))
             .child(
                 div()
@@ -314,7 +317,8 @@ impl Workspace {
                                     .into_iter()
                                     .filter(|(label, _)| *label != "LOCAL")
                                     .map(|(label, color)| env_tag(label, color)),
-                            ),
+                            )
+                            .when(open, |el| el.child(env_tag("OPEN", theme.ok))),
                     )
                     .child(
                         div()
