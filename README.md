@@ -18,8 +18,8 @@ Version 0.1, early. See [PLAN.md](PLAN.md) for what's next.
 ## Install
 
 Download `Xenon-0.1.0.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
-drag Xenon to Applications. This build isn't notarized yet, so the first time, right-click the
-app and choose **Open**.
+drag Xenon to Applications. It's signed with Carbon Software's Developer ID and notarized by
+Apple.
 
 Requires macOS 12 or later.
 
@@ -68,11 +68,12 @@ cargo run -p xenon                     # empty window
 cargo run -p xenon -- path/to/file.db  # open a SQLite database
 cargo run -p xenon -- "postgres://user:pass@localhost/db?sslmode=require"
 
-./scripts/bundle-macos.sh              # target/release/Xenon.app and Xenon-<version>.dmg
+./scripts/bundle-macos.sh              # local Xenon.app + DMG, signed ad hoc (this Mac only)
+./scripts/release-macos.sh             # notarized release DMG in target/xcode
 ```
 
-The bundle script signs with your "Developer ID Application" certificate when one is in the
-keychain, and notarizes when `XENON_NOTARY_PROFILE` names a `notarytool` profile.
+`release-macos.sh` archives the Xcode wrapper in `macos/` and lets Xcode sign it with the team's
+cloud-managed Developer ID certificate and notarize it, using the account signed in to Xcode.
 `XENON_TRACE=1` prints startup and query timings.
 
 ## Tests
