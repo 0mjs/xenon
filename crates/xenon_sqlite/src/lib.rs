@@ -149,9 +149,12 @@ impl Connection for SqliteConnection {
     fn introspect(&self) -> Result<Vec<Schema>> {
         let conn = self.lock()?;
         let mut objects = Vec::new();
+        // `table_list` marks the internal tables behind FTS and other virtual
+        // tables as "shadow", so they can be left out.
         let mut list = conn.prepare(
-            "select name, type from sqlite_schema \
-             where type in ('table', 'view') and name not like 'sqlite_%' \
+            "select name, type from pragma_table_list \
+             where schema = 'main' and type in ('table', 'view', 'virtual') \
+               and name not like 'sqlite_%' \
              order by name collate nocase",
         )?;
         let mut columns = conn.prepare(
@@ -285,6 +288,23 @@ mod tests {
     #[test]
     fn empty_input_is_an_error() {
         assert!(db().execute("  -- just a comment\n", 100).is_err());
+    }
+
+    #[test]
+    fn introspect_hides_full_text_search_internals() {
+        let db = db();
+        db.execute("create virtual table notes_fts using fts5(body)", 10)
+            .unwrap();
+        let names: Vec<String> = db.introspect().unwrap()[0]
+            .objects
+            .iter()
+            .map(|o| o.name.clone())
+            .collect();
+        assert!(names.contains(&"notes_fts".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.starts_with("notes_fts_")),
+            "{names:?}"
+        );
     }
 
     #[test]
