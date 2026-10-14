@@ -1,9 +1,9 @@
 {
-  "name": "Steel",
+  "name": "Xenon",
   "author": "Carbon Software",
   "themes": [
     {
-      "name": "Steel Dark",
+      "name": "Xenon Dark",
       "mode": "dark",
       "font.family": "Archivo",
       "font.size": 12,
@@ -13,47 +13,47 @@
       "radius.lg": 0,
       "shadow": false,
       "colors": {
-        "background": "#121317",
+        "background": "#0b0c0e",
         "foreground": "#eceef2",
-        "border": "#2b2e36",
-        "input.border": "#2b2e36",
-        "ring": "#7ba7e8",
-        "caret": "#7ba7e8",
-        "selection.background": "#7ba7e84d",
-        "muted.background": "#20232a",
-        "muted.foreground": "#6c717c",
-        "accent.background": "#20232a",
+        "border": "#23252b",
+        "input.border": "#23252b",
+        "ring": "#b9c7dc",
+        "caret": "#b9c7dc",
+        "selection.background": "#b9c7dc40",
+        "muted.background": "#111215",
+        "muted.foreground": "#686c76",
+        "accent.background": "#111215",
         "accent.foreground": "#eceef2",
-        "popover.background": "#17191d",
+        "popover.background": "#111215",
         "popover.foreground": "#eceef2",
-        "list.background": "#121317",
-        "list.active.background": "#7ba7e826",
-        "list.active.border": "#7ba7e8",
-        "list.hover.background": "#20232a",
-        "primary.background": "#7ba7e8",
-        "primary.hover.background": "#93b8ee",
-        "primary.active.background": "#6a97da",
+        "list.background": "#0b0c0e",
+        "list.active.background": "#b9c7dc1f",
+        "list.active.border": "#b9c7dc",
+        "list.hover.background": "#111215",
+        "primary.background": "#b9c7dc",
+        "primary.hover.background": "#cdd8e8",
+        "primary.active.background": "#a5b4cb",
         "primary.foreground": "#0b0c0e",
         "danger.background": "#e0837a",
         "danger.foreground": "#0f1012",
         "scrollbar.background": "#00000000",
         "scrollbar.thumb.background": "#6c717c99",
-        "scrollbar.thumb.hover.background": "#a4a9b3"
+        "scrollbar.thumb.hover.background": "#a2a6af"
       },
       "highlight": {
         "editor.foreground": "#eceef2",
-        "editor.background": "#17191d",
-        "editor.active_line.background": "#20232a",
-        "editor.line_number": "#6c717c",
-        "editor.active_line_number": "#a4a9b3",
+        "editor.background": "#101114",
+        "editor.active_line.background": "#17191d",
+        "editor.line_number": "#686c76",
+        "editor.active_line_number": "#a2a6af",
         "editor.invisible": "#64677066",
         "syntax": {
           "keyword": {
-            "color": "#c3cfe6",
+            "color": "#eceef2",
             "font_weight": 600
           },
           "function": {
-            "color": "#7ba7e8"
+            "color": "#b9c7dc"
           },
           "string": {
             "color": "#8cc49c"
@@ -71,17 +71,17 @@
             "color": "#d8b06a"
           },
           "comment": {
-            "color": "#6c717c",
+            "color": "#686c76",
             "font_style": "italic"
           },
           "type": {
-            "color": "#a4a9b3"
+            "color": "#a2a6af"
           },
           "operator": {
-            "color": "#a4a9b3"
+            "color": "#a2a6af"
           },
           "punctuation": {
-            "color": "#a4a9b3"
+            "color": "#a2a6af"
           },
           "property": {
             "color": "#eceef2"
@@ -93,7 +93,7 @@
       }
     },
     {
-      "name": "Steel Light",
+      "name": "Xenon Light",
       "mode": "light",
       "font.family": "Archivo",
       "font.size": 12,
@@ -107,9 +107,9 @@
         "foreground": "#111318",
         "border": "#cfd3da",
         "input.border": "#cfd3da",
-        "ring": "#2f64c0",
-        "caret": "#2f64c0",
-        "selection.background": "#2f64c033",
+        "ring": "#4b5d78",
+        "caret": "#4b5d78",
+        "selection.background": "#4b5d7833",
         "muted.background": "#e3e6eb",
         "muted.foreground": "#8c929d",
         "accent.background": "#e3e6eb",
@@ -117,12 +117,12 @@
         "popover.background": "#ffffff",
         "popover.foreground": "#111318",
         "list.background": "#f4f5f7",
-        "list.active.background": "#2f64c01f",
-        "list.active.border": "#2f64c0",
+        "list.active.background": "#4b5d781f",
+        "list.active.border": "#4b5d78",
         "list.hover.background": "#e3e6eb",
-        "primary.background": "#2f64c0",
-        "primary.hover.background": "#2a59ab",
-        "primary.active.background": "#244e97",
+        "primary.background": "#4b5d78",
+        "primary.hover.background": "#42536b",
+        "primary.active.background": "#3a495e",
         "primary.foreground": "#ffffff",
         "danger.background": "#b2402f",
         "danger.foreground": "#ffffff",
@@ -139,11 +139,11 @@
         "editor.invisible": "#93969d66",
         "syntax": {
           "keyword": {
-            "color": "#1f3f78",
+            "color": "#1d2633",
             "font_weight": 600
           },
           "function": {
-            "color": "#2f64c0"
+            "color": "#4b5d78"
           },
           "string": {
             "color": "#3f7d50"

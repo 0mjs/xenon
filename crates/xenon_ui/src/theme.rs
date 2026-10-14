@@ -69,31 +69,32 @@ impl Theme {
         }
     }
 
-    /// Darker chrome, brighter text and a clearer steel-blue accent than the
-    /// first cut, so panels separate and focus reads at a glance.
+    /// Near-black chrome, so panels separate by a shade, and the Xenon silver
+    /// accent for focus and the main action.
     pub fn dark() -> Self {
         Self {
             mode: Mode::Dark,
-            bg: rgb(0x0b0c0e),
-            s1: rgb(0x121317),
-            s2: rgb(0x17191d),
-            s3: rgb(0x20232a),
-            line: rgb(0x2b2e36),
-            line_2: rgb(0x1d1f24),
+            bg: rgb(0x060607),
+            s1: rgb(0x0b0c0e),
+            s2: rgb(0x101114),
+            s3: rgb(0x17191d),
+            line: rgb(0x23252b),
+            line_2: rgb(0x16171b),
             text: rgb(0xeceef2),
-            t2: rgb(0xa4a9b3),
-            t3: rgb(0x6c717c),
-            acc: rgb(0x7ba7e8),
-            acc_wash: rgba(0x7ba7e826),
+            t2: rgb(0xa2a6af),
+            t3: rgb(0x686c76),
+            // Xenon: the cold silver-white of a xenon lamp.
+            acc: rgb(0xb9c7dc),
+            acc_wash: rgba(0xb9c7dc1f),
             ok: rgb(0x8cc49c),
             warn: rgb(0xd8b06a),
             err: rgb(0xe0837a),
             on_acc: rgb(0x0b0c0e),
-            overlay: rgb(0x16181c),
-            field: rgb(0x0f1013),
-            raised: rgb(0x2a2d35),
-            scrim: rgba(0x05060799),
-            shadow: rgba(0x00000080),
+            overlay: rgb(0x111215),
+            field: rgb(0x08090a),
+            raised: rgb(0x22252b),
+            scrim: rgba(0x020203b3),
+            shadow: rgba(0x00000099),
         }
     }
 
@@ -109,8 +110,8 @@ impl Theme {
             text: rgb(0x111318),
             t2: rgb(0x535a66),
             t3: rgb(0x8c929d),
-            acc: rgb(0x2f64c0),
-            acc_wash: rgba(0x2f64c01f),
+            acc: rgb(0x4b5d78),
+            acc_wash: rgba(0x4b5d781f),
             ok: rgb(0x3f7d50),
             warn: rgb(0x8f6516),
             err: rgb(0xb2402f),
@@ -131,8 +132,8 @@ pub fn install(cx: &mut App) {
     registry
         .load_themes_from_str(include_str!("../../../assets/themes/steel.json"))
         .expect("bundled steel.json is valid");
-    let dark = registry.themes()["Steel Dark"].clone();
-    let light = registry.themes()["Steel Light"].clone();
+    let dark = registry.themes()["Xenon Dark"].clone();
+    let light = registry.themes()["Xenon Light"].clone();
 
     let component_theme = gpui_component::Theme::global_mut(cx);
     component_theme.dark_theme = dark;

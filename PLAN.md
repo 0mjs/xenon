@@ -109,7 +109,7 @@ render immediately is still to do.
 
 Start with SQLite (M1) — no server needed, fastest path to a working loop.
 
-## Design direction: Carbon / Steel
+## Design direction: Carbon / Xenon
 
 Reference mock: `ui-concepts/06-carbon-steel.html` (local throwaway, not committed; this section is the record).
 
@@ -138,24 +138,24 @@ content and never stretched; stripes and borders continue to the pane's edge.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|
-| `bg` | `#0b0c0e` | `#e6e8ec` | Title bar, rail, status bar |
-| `s1` | `#121317` | `#f4f5f7` | Panels |
-| `s2` | `#17191d` | `#ffffff` | Editor, inputs |
-| `s3` | `#20232a` | `#e3e6eb` | Hover, current line |
-| `line` | `#2b2e36` | `#cfd3da` | Panel borders |
-| `line-2` | `#1d1f24` | `#e4e7eb` | Grid lines |
+| `bg` | `#060607` | `#e6e8ec` | Title bar, rail, status bar |
+| `s1` | `#0b0c0e` | `#f4f5f7` | Panels |
+| `s2` | `#101114` | `#ffffff` | Editor, inputs |
+| `s3` | `#17191d` | `#e3e6eb` | Hover, current line |
+| `line` | `#23252b` | `#cfd3da` | Panel borders |
+| `line-2` | `#16171b` | `#e4e7eb` | Grid lines |
 | `text` | `#eceef2` | `#111318` | Primary text |
-| `t2` | `#a4a9b3` | `#535a66` | Secondary text |
-| `t3` | `#6c717c` | `#8c929d` | Labels, line numbers, NULL |
-| `acc` (steel) | `#7ba7e8` | `#2f64c0` | Focus and primary actions: caret, active tab (2px), selection, Run/Connect, rail and table icons |
-| `acc-wash` | `rgba(123,167,232,.15)` | `rgba(47,100,192,.12)` | Selected row / tree item |
+| `t2` | `#a2a6af` | `#535a66` | Secondary text |
+| `t3` | `#686c76` | `#8c929d` | Labels, line numbers, NULL |
+| `acc` (xenon) | `#b9c7dc` | `#4b5d78` | Focus and primary actions: caret, active tab (2px), selection, Run/Connect, rail and table icons. The cold silver of a xenon lamp |
+| `acc-wash` | `rgba(185,199,220,.12)` | `rgba(75,93,120,.12)` | Selected row / tree item |
 | `ok` | `#8cc49c` | `#3f7d50` | Success, strings |
 | `warn` | `#d8b06a` | `#8f6516` | READ tag, numbers |
 | `err` | `#e0837a` | `#b2402f` | PROD tag, errors, destructive |
 | `on-acc` | `#0b0c0e` | `#ffffff` | Text on accent / danger fills |
-| `overlay` | `#16181c` | `#ffffff` | Dialogs, palette |
-| `field` | `#0f1013` | `#ffffff` | Text field fill (slightly inset) |
-| `raised` | `#2a2d35` | `#ffffff` | Chosen segment of a segmented control |
+| `overlay` | `#111215` | `#ffffff` | Dialogs, palette |
+| `field` | `#08090a` | `#ffffff` | Text field fill (slightly inset) |
+| `raised` | `#22252b` | `#ffffff` | Chosen segment of a segmented control |
 | `scrim` | `rgba(5,6,7,.6)` | `rgba(17,19,24,.18)` | Behind dialogs |
 | `shadow` | `rgba(0,0,0,.5)` | `rgba(17,19,24,.18)` | Under floating surfaces |
 
