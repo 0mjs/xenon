@@ -193,30 +193,6 @@ pub fn connection_tags(
     tags
 }
 
-pub fn panel_button(
-    theme: &Theme,
-    id: &'static str,
-    label: &'static str,
-    keys: &'static str,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .mx(px(12.))
-        .mt(px(4.))
-        .px(px(10.))
-        .py(px(6.))
-        .flex()
-        .items_center()
-        .justify_between()
-        .border_1()
-        .border_color(theme.line)
-        .text_color(theme.t2)
-        .cursor_pointer()
-        .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-        .child(label)
-        .child(kbd(theme, keys))
-}
-
 pub fn format_duration(elapsed: Duration) -> String {
     let ms = elapsed.as_secs_f64() * 1000.;
     if ms < 1. {

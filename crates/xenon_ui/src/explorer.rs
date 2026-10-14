@@ -7,11 +7,8 @@ use xenon_store::{SavedConnection, Target};
 use crate::assets;
 use crate::palette::fuzzy_score;
 use crate::theme::{MONO_FONT, Theme};
-use crate::widgets::{
-    connection_tags, empty_hint, env_tag, panel_button, panel_label, search_field, tree_row,
-};
+use crate::widgets::{connection_tags, empty_hint, env_tag, panel_label, search_field, tree_row};
 use crate::workspace::Workspace;
-use crate::{NewConnection, OpenFile};
 
 impl Workspace {
     pub(crate) fn render_explorer(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -23,22 +20,7 @@ impl Workspace {
 
         match &self.session {
             None => {
-                list =
-                    list.child(empty_hint(theme, "No connection"))
-                        .child(
-                            panel_button(theme, "open-file", "Open SQLite file", "⌘O").on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.open_file(&OpenFile, window, cx)
-                                }),
-                            ),
-                        )
-                        .child(
-                            panel_button(theme, "connect-pg", "Connect to Postgres", "⌘N")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.new_connection(&NewConnection, window, cx)
-                                })),
-                        )
-                        .child(empty_hint(theme, "or drop a SQLite file here"));
+                list = list.child(empty_hint(theme, "Not connected"));
             }
             Some(session) => {
                 let filter = self.explorer_filter.read(cx).value().trim().to_string();

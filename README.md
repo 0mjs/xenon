@@ -25,9 +25,11 @@ Requires macOS 12 or later.
 
 ## Use
 
-Open a SQLite file with `⌘O` (or drop it on the window), or connect to Postgres with `⌘N`:
-paste a `postgres://` URL or fill in the fields, then **Test** and **Connect**. Saved connections
-and recent files are listed under **Saved** in the explorer (✎ to edit, ✕ to remove).
+With nothing open, Xenon shows **Connect**: paste a `postgres://` URL, a `DATABASE_URL=` line or a
+database file path and press Enter; pick a database type; reopen a saved connection; or use one
+**found on this Mac** (Docker containers, servers on the usual ports, `~/.pgpass`,
+`~/.pg_service.conf`, or a project's `.env` files). `⌘O` opens a SQLite file, `⌘N` connects to
+Postgres, `⇧⌘W` closes the connection and returns here.
 
 ![The command palette](docs/screenshots/palette.png)
 

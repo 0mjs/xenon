@@ -18,6 +18,11 @@ pub enum Subject {
     New,
     /// A saved connection, with its password from the Keychain.
     Saved(SavedConnection, String),
+    /// A new connection with fields filled in (from discovery or a paste).
+    Prefill {
+        name: String,
+        options: ConnectOptions,
+    },
 }
 
 /// A filled-in dialog: where to connect and how to remember it.
@@ -95,6 +100,14 @@ impl ConnectDialog {
                 Environment::None,
                 false,
             ),
+            Subject::Prefill { name, options } => (
+                0,
+                name.clone(),
+                None,
+                options.clone(),
+                Environment::None,
+                false,
+            ),
             Subject::Saved(saved, password) => {
                 let (path, options) = match &saved.target {
                     Target::Sqlite { path } => (Some(path.clone()), ConnectOptions::default()),
@@ -161,10 +174,13 @@ impl ConnectDialog {
             })
             .collect();
 
-        let first = if sqlite_path.is_some() || id != 0 {
-            &name
-        } else {
-            &url
+        // Start where typing is needed: the password when a pre-filled form
+        // lacks one, the name when editing, otherwise the URL.
+        let first = match &subject {
+            Subject::Prefill { options, .. } if options.password.is_empty() => &password,
+            Subject::Prefill { .. } => &name,
+            _ if sqlite_path.is_some() || id != 0 => &name,
+            _ => &url,
         };
         first.update(cx, |input, cx| input.focus(window, cx));
 

@@ -27,6 +27,8 @@ use xenon_store::{
 use crate::assets;
 use crate::confirm::{ConfirmDialog, ConfirmEvent};
 use crate::connect::{ConnectDialog, ConnectEvent, Request, RequestTarget, Subject};
+use crate::detect::{Detected, detect};
+use crate::discover::{Found, FoundTarget};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
@@ -35,11 +37,11 @@ use crate::widgets::{
     kbd_on_accent, panel_label, pretty_json,
 };
 use crate::{
-    CancelQuery, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown, ExtendLeft,
-    ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection,
-    NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery, SelectAllCells,
-    ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme,
-    UseSystemTheme,
+    CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown,
+    ExtendLeft, ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp,
+    NewConnection, NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery,
+    SelectAllCells, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme,
+    UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -194,9 +196,48 @@ impl Profile {
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct FieldFocus {
+    pub paste: bool,
     pub explorer: bool,
     pub history: bool,
     pub browse: bool,
+}
+
+fn is_local_host(host: &str) -> bool {
+    matches!(host, "" | "localhost" | "127.0.0.1" | "::1")
+}
+
+/// What the paste field shows under itself as you type.
+fn paste_note(text: &str) -> (SharedString, bool) {
+    let note = match detect(text) {
+        Detected::Postgres(url) => match ConnectOptions::from_url(&url) {
+            Ok(o) => format!(
+                "Postgres · {}@{}:{}/{} · press Enter",
+                if o.user.is_empty() {
+                    "postgres"
+                } else {
+                    &o.user
+                },
+                if o.host.is_empty() {
+                    "localhost"
+                } else {
+                    &o.host
+                },
+                o.port.unwrap_or(5432),
+                if o.database.is_empty() {
+                    "postgres"
+                } else {
+                    &o.database
+                },
+            ),
+            Err(_) => "Postgres · incomplete URL".into(),
+        },
+        Detected::Sqlite(path) => format!("SQLite file · {} · press Enter", path.display()),
+        Detected::NotYet(engine) => {
+            return (format!("{engine} · coming in Xenon 0.2").into(), true);
+        }
+        Detected::Unknown => String::new(),
+    };
+    (note.into(), false)
 }
 
 /// An action waiting on the confirmation dialog.
@@ -360,6 +401,13 @@ pub struct Workspace {
     side_panel_width: f32,
     /// Which text fields have focus, refreshed each render, for focus rings.
     pub(crate) field_focus: FieldFocus,
+    /// The launcher's "paste anything" field and what it recognised (text, is_error).
+    pub(crate) paste_input: Entity<InputState>,
+    pub(crate) paste_note: (SharedString, bool),
+    /// Databases found on this Mac, and in a scanned project's .env files.
+    pub(crate) found: Vec<Found>,
+    pub(crate) project_found: Vec<Found>,
+    pub(crate) discovering: bool,
     theme_choice: ThemeChoice,
     palette: Option<(Entity<Palette>, Subscription)>,
     connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
@@ -382,6 +430,24 @@ impl Workspace {
 
         let history_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter history"));
         let explorer_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter tables"));
+        let paste_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(
+                "Paste a postgres:// URL, a DATABASE_URL= line, or a database file path",
+            )
+        });
+        let paste_events = cx.subscribe_in(
+            &paste_input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let text = input.read(cx).value().to_string();
+                    this.paste_note = paste_note(&text);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.connect_pasted(window, cx),
+                _ => {}
+            },
+        );
         let explorer_changes = cx.subscribe(&explorer_filter, |_, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 cx.notify();
@@ -432,6 +498,11 @@ impl Workspace {
             editor_height: EDITOR_HEIGHT,
             side_panel_width: SIDE_PANEL_WIDTH,
             field_focus: FieldFocus::default(),
+            paste_input,
+            paste_note: (SharedString::default(), false),
+            found: Vec::new(),
+            project_found: Vec::new(),
+            discovering: false,
             theme_choice,
             palette: None,
             connect_dialog: None,
@@ -440,9 +511,10 @@ impl Workspace {
             explorer_filter,
             show_side_panel: true,
             show_inspector: true,
-            _subscriptions: vec![appearance, filter_changes, explorer_changes],
+            _subscriptions: vec![appearance, filter_changes, explorer_changes, paste_events],
         };
         this.reload_saved();
+        this.rediscover(cx);
         this.add_tab(None, window, cx);
         // Deferred so it runs after gpui-component's Root has been built around us.
         cx.defer_in(window, |this: &mut Self, window, cx| {
@@ -705,6 +777,149 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Look for databases on this Mac, off the main thread.
+    pub(crate) fn rediscover(&mut self, cx: &mut Context<Self>) {
+        if self.discovering {
+            return;
+        }
+        self.discovering = true;
+        let task = cx.background_spawn(async move { crate::discover::discover() });
+        cx.spawn(async move |this, cx| {
+            let found = task.await;
+            this.update(cx, |this, cx| {
+                this.found = found;
+                this.discovering = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Ask for a project folder and list the database URLs in its .env files.
+    pub(crate) fn scan_project(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Scan".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(root) = paths.into_iter().next() else {
+                return;
+            };
+            let found = cx
+                .background_spawn(async move { crate::discover::scan_env_files(&root) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.project_found = found;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Connect to whatever is in the paste field.
+    fn connect_pasted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.paste_input.read(cx).value().to_string();
+        match detect(&text) {
+            Detected::Postgres(url) => match ConnectOptions::from_url(&url) {
+                Ok(options) if options.password.is_empty() && !is_local_host(&options.host) => {
+                    self.open_connection_dialog(
+                        Subject::Prefill {
+                            name: String::new(),
+                            options,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                Ok(_) => self.connect_url(url, cx),
+                Err(err) => self.paste_note = (format!("{err:#}").into(), true),
+            },
+            Detected::Sqlite(path) => self.open_path(path, cx),
+            Detected::NotYet(engine) => {
+                self.paste_note = (
+                    format!("{engine} support is coming in Xenon 0.2.").into(),
+                    true,
+                )
+            }
+            Detected::Unknown if text.trim().is_empty() => {}
+            Detected::Unknown => self.paste_note = (
+                "Not recognised. Try a postgres:// URL, a DATABASE_URL= line or a .db file path."
+                    .into(),
+                true,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Connect to something discovery found, or open the form pre-filled when
+    /// it still needs a password.
+    pub(crate) fn connect_found(
+        &mut self,
+        found: &Found,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let FoundTarget::Postgres(options) = &found.target else {
+            return;
+        };
+        if found.ready() {
+            self.open_profile(
+                Profile {
+                    saved_id: None,
+                    save: false,
+                    name: found.detail(),
+                    environment: Environment::None,
+                    read_only: false,
+                    target: RequestTarget::Postgres(options.clone()),
+                },
+                cx,
+            );
+        } else {
+            self.open_connection_dialog(
+                Subject::Prefill {
+                    name: found.name.clone(),
+                    options: options.clone(),
+                },
+                window,
+                cx,
+            );
+        }
+    }
+
+    /// Disconnect and go back to the connections home.
+    fn close_connection(
+        &mut self,
+        _: &CloseConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.take().is_none() {
+            return;
+        }
+        for tab in &mut self.tabs {
+            if let Query::Running { cancel, .. } = &tab.query {
+                cancel.cancel();
+            }
+            tab.query = Query::Idle;
+            tab.grid = None;
+            tab.selection = None;
+            tab.browse = None;
+        }
+        self.history.clear();
+        self.rediscover(cx);
+        self.paste_input
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
     /// Try a connection from the dialog without switching to it.
@@ -1540,6 +1755,7 @@ impl Render for Workspace {
             gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
         };
         self.field_focus = FieldFocus {
+            paste: focused(&self.paste_input, cx),
             explorer: focused(&self.explorer_filter, cx),
             history: focused(&self.history_filter, cx),
             browse: self
@@ -1603,6 +1819,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &FocusEditor, window, cx| this.focus_editor(window, cx)),
             )
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::close_connection))
             .on_action(cx.listener(|this, _: &UseSystemTheme, w, cx| {
                 this.set_theme(ThemeChoice::System, w, cx)
             }))
@@ -1905,7 +2122,14 @@ impl Workspace {
             )
     }
 
-    fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if self.session.is_none() {
+            return div()
+                .flex_1()
+                .min_w(px(0.))
+                .child(self.render_launcher(theme, cx))
+                .into_any_element();
+        }
         let tab = self.active_tab();
         let editor = div()
             .h(px(self.editor_height))
@@ -1959,6 +2183,7 @@ impl Workspace {
                     .min_h(px(0.))
                     .child(self.render_results(theme, cx)),
             )
+            .into_any_element()
     }
 
     fn render_toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {

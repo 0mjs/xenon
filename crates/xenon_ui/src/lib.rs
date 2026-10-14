@@ -2,9 +2,12 @@ pub mod assets;
 mod bench;
 mod confirm;
 mod connect;
+mod detect;
+mod discover;
 mod explorer;
 pub mod fonts;
 mod history;
+mod launcher;
 mod palette;
 mod results;
 pub mod theme;
@@ -21,6 +24,7 @@ actions!(
         Quit,
         OpenFile,
         NewConnection,
+        CloseConnection,
         RunQuery,
         RunAll,
         Explain,
@@ -85,6 +89,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-o", OpenFile, None),
         KeyBinding::new("cmd-n", NewConnection, None),
+        KeyBinding::new("cmd-shift-w", CloseConnection, None),
         KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-w", CloseTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
