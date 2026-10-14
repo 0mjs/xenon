@@ -83,6 +83,11 @@ cargo test --workspace
 XENON_TEST_PG_URL="postgres://postgres:secret@localhost:5432/postgres" cargo test -p xenon_postgres
 ```
 
+## License
+
+Xenon is free software under the [GNU General Public License v3.0](LICENSE). Copyright © Carbon
+Software Ltd. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending code.
+
 ## Credits
 
 Fonts: Archivo and IBM Plex Mono, under the SIL Open Font License (`assets/fonts`). UI built on

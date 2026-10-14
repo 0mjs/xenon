@@ -6,6 +6,9 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "GPL-3.0-only"
+authors = ["Carbon Software Ltd"]
+repository = "https://github.com/0mjs/xenon"
 
 [workspace.dependencies]
 xenon_driver = { path = "crates/xenon_driver" }
