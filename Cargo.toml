@@ -41,5 +41,12 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = 
 
 gpui-component = { version = "=0.7.3", features = ["tree-sitter-sql"] }
 
+# Lean dev builds: dependencies optimised (the UI is unusably slow otherwise) but
+# without debug info, which was most of target/debug's size; our own crates keep
+# line tables so backtraces still point at the right lines.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
