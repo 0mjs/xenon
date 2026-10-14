@@ -56,6 +56,7 @@ products.
 | **4** | Snowflake | REST (SQL API) | Snowflake | 1.x |
 | **4** | Trino / Presto | HTTP client | Trino, Presto, Athena-compatible | 1.x |
 | **4** | SurrealDB | `surrealdb` | SurrealDB 1.x/2.x | 1.x |
+| **4** | Convex | HTTP, using a deploy key and the admin functions the Convex CLI uses | Convex Cloud, self-hosted Convex | 1.x (experimental) |
 | **4** | Firebird | `rsfbclient` | Firebird 3+ | Later |
 | **4** | SQL Anywhere, others | ODBC bridge | Anything with an ODBC driver | Later |
 
@@ -63,6 +64,12 @@ Tier 1 engines get everything in this roadmap. Tier 2 engines get everything the
 supports. Tier 3 engines get a different UI built for their data model (see
 [Non-relational](#non-relational-tier-3)). Tier 4 engines are read-mostly at first: browse,
 query and export.
+
+**Convex** has no SQL and no wire protocol: data is reached through deployed TypeScript functions.
+Xenon would browse tables and documents (reusing the MongoDB document UI) through the same
+admin-key endpoints the Convex CLI and dashboard use. Those aren't a stable public API, so it
+stays experimental and read-mostly until Convex documents one. Self-hosted Convex runs in Docker,
+so it can join the test fleet.
 
 ---
 
