@@ -113,7 +113,8 @@ Start with SQLite (M1) — no server needed, fastest path to a working loop.
 Reference mock: `ui-concepts/06-carbon-steel.html` (local throwaway, not committed; this section is the record).
 
 **Character:** lean, minimal, humble. Dense like an instrument, never "SaaS". Neutrals do the
-work; the accent only marks focus.
+work; one steel-blue accent marks focus and the primary action (revised after first use: darker
+chrome and more contrast so panels separate).
 
 **Layout** (four panels)
 
@@ -136,27 +137,27 @@ content and never stretched; stripes and borders continue to the pane's edge.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|
-| `bg` | `#0f1012` | `#eeeff1` | Title bar, rail, status bar |
-| `s1` | `#141518` | `#f6f6f7` | Panels |
-| `s2` | `#18191d` | `#fbfbfc` | Editor, inputs |
-| `s3` | `#1e2024` | `#e9eaec` | Hover, current line |
-| `line` | `#2a2c31` | `#d6d8dc` | Panel borders |
-| `line-2` | `#202226` | `#e4e5e8` | Grid lines |
-| `text` | `#e4e5e8` | `#17181b` | Primary text, primary button fill |
-| `t2` | `#9b9ea6` | `#5a5e66` | Secondary text |
-| `t3` | `#646770` | `#93969d` | Labels, line numbers, NULL |
-| `acc` (steel) | `#8fa3bd` | `#4b6481` | Focus only: caret, active tab, selection |
-| `acc-wash` | `rgba(143,163,189,.11)` | `rgba(75,100,129,.10)` | Selected row / tree item |
-| `ok` | `#94b39d` | `#4d7a5a` | Success, strings |
-| `warn` | `#c9a96e` | `#8a6822` | READ tag, numbers |
-| `err` | `#d0817a` | `#a8473f` | PROD tag, errors, destructive |
+| `bg` | `#0b0c0e` | `#e6e8ec` | Title bar, rail, status bar |
+| `s1` | `#121317` | `#f4f5f7` | Panels |
+| `s2` | `#17191d` | `#ffffff` | Editor, inputs |
+| `s3` | `#20232a` | `#e3e6eb` | Hover, current line |
+| `line` | `#2b2e36` | `#cfd3da` | Panel borders |
+| `line-2` | `#1d1f24` | `#e4e7eb` | Grid lines |
+| `text` | `#eceef2` | `#111318` | Primary text |
+| `t2` | `#a4a9b3` | `#535a66` | Secondary text |
+| `t3` | `#6c717c` | `#8c929d` | Labels, line numbers, NULL |
+| `acc` (steel) | `#7ba7e8` | `#2f64c0` | Focus and primary actions: caret, active tab (2px), selection, Run/Connect, rail and table icons |
+| `acc-wash` | `rgba(123,167,232,.15)` | `rgba(47,100,192,.12)` | Selected row / tree item |
+| `ok` | `#8cc49c` | `#3f7d50` | Success, strings |
+| `warn` | `#d8b06a` | `#8f6516` | READ tag, numbers |
+| `err` | `#e0837a` | `#b2402f` | PROD tag, errors, destructive |
 
 Syntax: keywords = `text` (weight 500), functions = `acc`, strings = `ok`, numbers = `warn`,
 comments = `t3` italic.
 
 **Type:** Archivo (UI, 500/600; headings 22 px max) + IBM Plex Mono (editor, grid, labels).
 
-**Components:** primary button is solid `text` on `bg` (no colour); secondary buttons are
+**Components:** primary button is solid accent; secondary buttons are
 outlined. Env tags are 1 px outlined mono caps. Errors: left danger border, error code, line/col,
 "did you mean" with `Tab` to apply. Destructive statements on PROD need the table name typed.
 

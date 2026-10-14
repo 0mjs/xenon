@@ -7980,6 +7980,7 @@ dependencies = [
  "anyhow",
  "gpui-component",
  "gpui-pre",
+ "libc",
  "xenon_driver",
  "xenon_postgres",
  "xenon_sqlite",

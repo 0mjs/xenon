@@ -8,11 +8,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, ClickEvent, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, FontWeight,
-    IntoElement, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Render, Rgba,
-    ScrollStrategy, SharedString, Subscription, Task, Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle,
+    FontWeight, IntoElement, MouseButton, MouseMoveEvent, PathPromptOptions, Pixels, Render, Rgba,
+    ScrollStrategy, SharedString, Subscription, Task, Window, div, prelude::*, px, svg,
 };
-use gpui_component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use xenon_driver::export::{self, Format};
 use xenon_driver::sql::{Risk, SortDirection, assess, browse_table, statement_at};
 use xenon_driver::{
@@ -24,14 +24,15 @@ use xenon_store::{
     Environment, HistoryEntry, NewHistoryEntry, SavedConnection, Store, Target, secrets,
 };
 
+use crate::assets;
 use crate::confirm::{ConfirmDialog, ConfirmEvent};
 use crate::connect::{ConnectDialog, ConnectEvent, Request, RequestTarget, Subject};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
-    centered_hint, connection_tags, empty_hint, env_tag, format_duration, group_digits, kbd,
-    panel_label, pretty_json,
+    centered_hint, connection_tags, empty_hint, env_tag, field, format_duration, group_digits, kbd,
+    kbd_on_accent, panel_label, pretty_json,
 };
 use crate::{
     CancelQuery, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown, ExtendLeft,
@@ -43,8 +44,10 @@ use crate::{
 
 const TITLEBAR_HEIGHT: f32 = 34.;
 const STATUSBAR_HEIGHT: f32 = 24.;
-const RAIL_WIDTH: f32 = 44.;
+const RAIL_WIDTH: f32 = 48.;
 const SIDE_PANEL_WIDTH: f32 = 240.;
+const MIN_SIDE_PANEL_WIDTH: f32 = 180.;
+const MAX_SIDE_PANEL_WIDTH: f32 = 520.;
 const INSPECTOR_WIDTH: f32 = 260.;
 const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
@@ -189,6 +192,13 @@ impl Profile {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct FieldFocus {
+    pub explorer: bool,
+    pub history: bool,
+    pub browse: bool,
+}
+
 /// An action waiting on the confirmation dialog.
 enum Pending {
     Run {
@@ -319,6 +329,8 @@ enum Drag {
     },
     /// The divider between the editor and the results.
     Split { start_y: Pixels, start_height: f32 },
+    /// The side panel's right edge.
+    SidePanel { start_x: Pixels, start_width: f32 },
 }
 
 pub struct Workspace {
@@ -341,7 +353,13 @@ pub struct Workspace {
     /// A failed query's error position, applied to the editor on the next frame.
     pending_error_jump: Option<(usize, usize, usize)>,
     first_frame_traced: bool,
+    bench: Option<crate::bench::Bench>,
+    bench_pending_sql: Option<String>,
+    bench_frame_requested: bool,
     editor_height: f32,
+    side_panel_width: f32,
+    /// Which text fields have focus, refreshed each render, for focus rings.
+    pub(crate) field_focus: FieldFocus,
     theme_choice: ThemeChoice,
     palette: Option<(Entity<Palette>, Subscription)>,
     connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
@@ -405,7 +423,15 @@ impl Workspace {
             drag: None,
             pending_error_jump: None,
             first_frame_traced: false,
+            bench_pending_sql: None,
+            bench_frame_requested: false,
+            bench: crate::bench::sql().map(|sql| crate::bench::Bench {
+                sql,
+                phase: crate::bench::Phase::Loading,
+            }),
             editor_height: EDITOR_HEIGHT,
+            side_panel_width: SIDE_PANEL_WIDTH,
+            field_focus: FieldFocus::default(),
             theme_choice,
             palette: None,
             connect_dialog: None,
@@ -480,7 +506,10 @@ impl Workspace {
                     }),
                 )
             }
-            None => (SharedString::from(format!("Query {id}")), None),
+            None => (
+                SharedString::from(format!("Query {}", self.free_query_number())),
+                None,
+            ),
         };
         self.tabs.push(Tab {
             id,
@@ -497,6 +526,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The lowest n with no open "Query n" tab.
+    fn free_query_number(&self) -> usize {
+        (1..)
+            .find(|n| {
+                self.tabs
+                    .iter()
+                    .all(|tab| tab.title.as_ref() != format!("Query {n}"))
+            })
+            .expect("unbounded range")
+    }
+
     fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
             self.active = index;
@@ -511,6 +551,7 @@ impl Workspace {
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
+            // There's always one tab; closing the last gives a clean "Query 1".
             self.add_tab(None, window, cx);
         } else if self.active >= self.tabs.len() || index < self.active {
             self.active = self.active.saturating_sub(1).min(self.tabs.len() - 1);
@@ -647,6 +688,7 @@ impl Workspace {
                         this.connect_dialog = None;
                         this.reload_saved();
                         this.reload_history(cx);
+                        this.bench_start(cx);
                     }
                     Err(err) => {
                         let message: SharedString = format!("{err:#}").into();
@@ -1014,6 +1056,12 @@ impl Workspace {
                     tab.grid = None;
                 }
                 tab.query = Query::Done(Arc::new(result));
+                if let Some(bench) = &mut self.bench
+                    && matches!(bench.phase, crate::bench::Phase::Loading)
+                {
+                    bench.phase = crate::bench::Phase::Idle(crate::bench::Mark::now());
+                    self.bench_schedule(cx);
+                }
             }
             Err(err) => {
                 tab.grid = None;
@@ -1024,6 +1072,84 @@ impl Workspace {
                 }
             }
         }
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------- bench
+
+    fn bench_start(&mut self, cx: &mut Context<Self>) {
+        let Some(bench) = &self.bench else { return };
+        let sql = bench.sql.clone();
+        // Setting the editor's text needs a window; render does it.
+        self.bench_pending_sql = Some(sql.clone());
+        self.execute(self.active_tab().id, sql, None, cx);
+    }
+
+    fn bench_schedule(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(crate::bench::PHASE).await;
+            this.update(cx, |this, cx| {
+                if let Some(bench) = &mut this.bench
+                    && let crate::bench::Phase::Idle(mark) = bench.phase
+                {
+                    bench.phase = crate::bench::Phase::Scrolling {
+                        mark: crate::bench::Mark::now(),
+                        frames: 0,
+                        row: 0,
+                        idle_cpu: mark.cpu_percent(),
+                    };
+                    this.bench_frame_requested = true;
+                    this.notify_grid(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// One frame of the scrolling phase: move the grid and ask for another frame.
+    fn bench_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(bench) = &mut self.bench else { return };
+        let crate::bench::Phase::Scrolling {
+            mark,
+            frames,
+            row,
+            idle_cpu,
+        } = &mut bench.phase
+        else {
+            return;
+        };
+        *frames += 1;
+        *row += crate::bench::ROWS_PER_FRAME;
+        if mark.elapsed() >= crate::bench::PHASE {
+            let seconds = mark.elapsed().as_secs_f64();
+            eprintln!(
+                "xenon bench: idle {:.1}% cpu | scrolling {:.1}% cpu, {:.0} fps",
+                idle_cpu,
+                mark.cpu_percent(),
+                *frames as f64 / seconds
+            );
+            bench.phase = crate::bench::Phase::Done;
+            cx.quit();
+            return;
+        }
+        let row = *row;
+        if let Some(grid) = &self.active_tab().grid
+            && grid.row_count() > 0
+        {
+            grid.scroll
+                .scroll_to_item(row % grid.row_count(), ScrollStrategy::Top);
+        }
+        self.notify_grid(cx);
+        let this = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            this.update(cx, |this, cx| this.bench_tick(window, cx)).ok();
+        });
+    }
+
+    /// Ask for the results grid to be drawn again.
+    fn notify_grid(&mut self, cx: &mut Context<Self>) {
         cx.notify();
     }
 
@@ -1225,6 +1351,14 @@ impl Workspace {
                     tab.column_widths.insert(column, width.round());
                 }
             }
+            Drag::SidePanel {
+                start_x,
+                start_width,
+            } => {
+                self.side_panel_width = (start_width + f32::from(event.position.x - *start_x))
+                    .clamp(MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH)
+                    .round();
+            }
             Drag::Split {
                 start_y,
                 start_height,
@@ -1392,6 +1526,28 @@ impl Render for Workspace {
         if self.pending_error_jump.is_some() {
             self.jump_to_error(window, cx);
         }
+        if let Some(sql) = self.bench_pending_sql.take() {
+            let editor = self.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));
+        }
+        if std::mem::take(&mut self.bench_frame_requested) {
+            let this = cx.entity().downgrade();
+            window.on_next_frame(move |window, cx| {
+                this.update(cx, |this, cx| this.bench_tick(window, cx)).ok();
+            });
+        }
+        let focused = |input: &Entity<InputState>, cx: &App| {
+            gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
+        };
+        self.field_focus = FieldFocus {
+            explorer: focused(&self.explorer_filter, cx),
+            history: focused(&self.history_filter, cx),
+            browse: self
+                .active_tab()
+                .browse
+                .as_ref()
+                .is_some_and(|b| focused(&b.filter, cx)),
+        };
         let theme = cx.theme().clone();
 
         let body = div()
@@ -1555,7 +1711,7 @@ impl Workspace {
                             .left_0()
                             .right_0()
                             .bottom_0()
-                            .h(px(1.))
+                            .h(px(2.))
                             .bg(underline),
                     )
                 })
@@ -1577,13 +1733,33 @@ impl Workspace {
                     window.titlebar_double_click();
                 }
             })
+            .child(div().w(px(TRAFFIC_LIGHT_INSET)).flex_none().h_full())
             .child(
                 div()
-                    .w(px(TRAFFIC_LIGHT_INSET))
-                    .flex_none()
+                    .id("toggle-side-panel")
                     .h_full()
+                    .px(px(10.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
                     .border_r_1()
-                    .border_color(theme.line),
+                    .border_color(theme.line)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.s3))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_explorer(&ToggleExplorer, window, cx);
+                    }))
+                    .child(
+                        svg()
+                            .path(assets::icon(if self.show_side_panel {
+                                "panel-left-close"
+                            } else {
+                                "panel-left-open"
+                            }))
+                            .size(px(16.))
+                            .text_color(theme.t2),
+                    ),
             )
             .child(
                 div()
@@ -1622,41 +1798,54 @@ impl Workspace {
                         this.open_palette(&OpenPalette, window, cx);
                     }))
                     .mr(px(8.))
+                    .w(px(260.))
+                    .h(px(26.))
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(10.))
-                    .pl(px(10.))
-                    .pr(px(5.))
-                    .py(px(3.))
-                    .bg(theme.s1)
+                    .gap(px(7.))
+                    .pl(px(9.))
+                    .pr(px(4.))
+                    .rounded(px(6.))
+                    .bg(theme.s2)
                     .border_1()
                     .border_color(theme.line)
                     .text_color(theme.t3)
-                    .text_size(px(11.5))
-                    .child("Go to anything")
+                    .text_size(px(12.))
+                    .child(
+                        svg()
+                            .path(assets::icon("search"))
+                            .size(px(13.))
+                            .flex_none()
+                            .text_color(theme.t3),
+                    )
+                    .child(div().flex_1().child("Go to anything"))
                     .child(kbd(theme, "⌘K")),
             )
     }
 
     fn render_rail(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let item = |id: &'static str, glyph: &'static str, panel: SidePanel| {
+        let item = |id: &'static str, icon: &'static str, panel: SidePanel| {
             let active = self.show_side_panel && self.side_panel == panel;
             div()
                 .id(id)
-                .size(px(30.))
+                .size(px(36.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(13.))
                 .cursor_pointer()
-                .text_color(if active { theme.text } else { theme.t3 })
-                .when(active, |el| el.border_l_2().border_color(theme.acc))
-                .when(!active, |el| el.hover(|s| s.text_color(theme.t2)))
+                .rounded(px(6.))
+                .when(active, |el| el.bg(theme.acc_wash))
+                .when(!active, |el| el.hover(|s| s.bg(theme.s3)))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.show_panel(panel, window, cx)),
                 )
-                .child(glyph)
+                .child(
+                    svg()
+                        .path(assets::icon(icon))
+                        .size(px(18.))
+                        .text_color(if active { theme.acc } else { theme.t2 }),
+                )
         };
 
         div()
@@ -1666,12 +1855,12 @@ impl Workspace {
             .flex_col()
             .items_center()
             .pt(px(8.))
-            .gap(px(2.))
+            .gap(px(4.))
             .bg(theme.bg)
             .border_r_1()
             .border_color(theme.line)
-            .child(item("rail-explorer", "▤", SidePanel::Explorer))
-            .child(item("rail-history", "◷", SidePanel::History))
+            .child(item("rail-explorer", "database", SidePanel::Explorer))
+            .child(item("rail-history", "clock", SidePanel::History))
     }
 
     fn render_side_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1680,14 +1869,40 @@ impl Workspace {
             SidePanel::History => ("History", self.render_history(theme, cx)),
         };
         div()
-            .w(px(SIDE_PANEL_WIDTH))
+            .w(px(self.side_panel_width))
             .flex_none()
+            .relative()
             .flex()
             .flex_col()
             .border_r_1()
             .border_color(theme.line)
             .child(panel_label(theme, label))
             .child(content)
+            .child(
+                // Drag the edge to resize; double-click to reset.
+                div()
+                    .id("side-panel-edge")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(-3.))
+                    .w(px(6.))
+                    .cursor_col_resize()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                            if event.click_count >= 2 {
+                                this.side_panel_width = SIDE_PANEL_WIDTH;
+                                cx.notify();
+                            } else {
+                                this.drag = Some(Drag::SidePanel {
+                                    start_x: event.position.x,
+                                    start_width: this.side_panel_width,
+                                });
+                            }
+                        }),
+                    ),
+            )
     }
 
     fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1763,8 +1978,8 @@ impl Workspace {
                     .text_size(px(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .when(primary, |el| {
-                        el.bg(theme.text)
-                            .border_color(theme.text)
+                        el.bg(theme.acc)
+                            .border_color(theme.acc)
                             .text_color(theme.bg)
                     })
                     .when(!primary, |el| {
@@ -1775,13 +1990,11 @@ impl Workspace {
                     })
                     .child(label)
                     .when_some(keys, |el, keys| {
-                        el.child(
-                            div()
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.))
-                                .opacity(0.7)
-                                .child(keys),
-                        )
+                        el.child(if primary {
+                            kbd_on_accent(theme, keys)
+                        } else {
+                            kbd(theme, keys)
+                        })
                     })
             };
 
@@ -1831,7 +2044,7 @@ impl Workspace {
         let active = sorted.is_some() || !browse.filter.read(cx).value().trim().is_empty();
 
         div()
-            .h(px(36.))
+            .h(px(42.))
             .flex_none()
             .flex()
             .items_center()
@@ -1840,13 +2053,23 @@ impl Workspace {
             .border_b_1()
             .border_color(theme.line)
             .child(
-                div()
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.5))
-                    .text_color(theme.t3)
-                    .child("WHERE"),
+                field(
+                    theme,
+                    div()
+                        .font_family(MONO_FONT)
+                        .text_size(px(10.5))
+                        .text_color(if self.field_focus.browse {
+                            theme.acc
+                        } else {
+                            theme.t3
+                        })
+                        .child("WHERE")
+                        .into_any_element(),
+                    &browse.filter,
+                    self.field_focus.browse,
+                )
+                .flex_1(),
             )
-            .child(div().flex_1().child(Input::new(&browse.filter)))
             .when_some(sorted, |el, sorted| {
                 el.child(
                     div()

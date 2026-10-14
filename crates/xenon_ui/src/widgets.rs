@@ -38,16 +38,115 @@ pub fn centered_hint(theme: &Theme, text: &'static str) -> AnyElement {
         .into_any_element()
 }
 
-pub fn kbd(theme: &Theme, keys: &'static str) -> impl IntoElement {
+/// The system font draws ⌘ ⇧ ⌥ ⌃ ↵ crisply and centred; the UI and mono
+/// fonts don't have those glyphs, so they'd fall back unevenly.
+const KEY_FONT: &str = ".SystemUIFont";
+
+/// A shortcut as keycaps: "⇧⌘↵" draws three caps.
+pub fn kbd(theme: &Theme, keys: &str) -> gpui::Div {
+    keycaps(keys, theme.t2, theme.s3, theme.line)
+}
+
+/// Keycaps drawn on an accent-filled button.
+pub fn kbd_on_accent(theme: &Theme, keys: &str) -> gpui::Div {
+    keycaps(
+        keys,
+        theme.bg,
+        gpui::rgba(0x00000026),
+        gpui::rgba(0x00000033),
+    )
+}
+
+fn keycaps(keys: &str, color: Rgba, background: Rgba, border: Rgba) -> gpui::Div {
     div()
-        .px(px(5.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(2.))
+        .children(split_keys(keys).into_iter().map(move |key| {
+            div()
+                .h(px(18.))
+                .min_w(px(18.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .bg(background)
+                .border_1()
+                .border_color(border)
+                .font_family(KEY_FONT)
+                .text_size(px(11.))
+                .line_height(px(14.))
+                .text_color(color)
+                .child(key)
+        }))
+}
+
+/// "⇧⌘↵" → ["⇧", "⌘", "↵"]; "⌘Tab" → ["⌘", "Tab"]. Modifiers get a cap each,
+/// whatever follows them is one key.
+fn split_keys(keys: &str) -> Vec<String> {
+    let mut caps = Vec::new();
+    let mut rest = String::new();
+    for c in keys.chars() {
+        if "⌃⌥⇧⌘".contains(c) && rest.is_empty() {
+            caps.push(c.to_string());
+        } else if !c.is_whitespace() {
+            rest.push(c);
+        }
+    }
+    if !rest.is_empty() {
+        caps.push(rest);
+    }
+    caps
+}
+
+/// A search field: icon, the input (with a clear button) and an accent ring
+/// while focused.
+pub fn search_field(
+    theme: &Theme,
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    focused: bool,
+) -> gpui::Div {
+    field(
+        theme,
+        gpui::svg()
+            .path(crate::assets::icon("search"))
+            .size(px(14.))
+            .flex_none()
+            .text_color(if focused { theme.acc } else { theme.t3 })
+            .into_any_element(),
+        input,
+        focused,
+    )
+}
+
+/// A text field with something leading it (an icon, a label).
+pub fn field(
+    theme: &Theme,
+    leading: AnyElement,
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    focused: bool,
+) -> gpui::Div {
+    div()
+        .h(px(30.))
+        .pl(px(9.))
+        .pr(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .rounded(px(6.))
         .bg(theme.s2)
         .border_1()
-        .border_color(theme.line)
-        .font_family(MONO_FONT)
-        .text_size(px(10.))
-        .text_color(theme.t2)
-        .child(keys)
+        .border_color(if focused { theme.acc } else { theme.line })
+        .child(leading)
+        .child(
+            div().flex_1().min_w(px(0.)).child(
+                gpui_component::input::Input::new(input)
+                    .appearance(false)
+                    .cleanable(true),
+            ),
+        )
 }
 
 pub fn tree_row(depth: usize) -> gpui::Div {
@@ -220,6 +319,15 @@ mod tests {
         assert_eq!(pretty_json("hello"), None);
         assert_eq!(pretty_json("{unbalanced"), None);
         assert_eq!(pretty_json("{\"a\": 1}}"), None);
+    }
+
+    #[test]
+    fn splits_shortcuts_into_keycaps() {
+        assert_eq!(split_keys("⇧⌘↵"), ["⇧", "⌘", "↵"]);
+        assert_eq!(split_keys("⌘K"), ["⌘", "K"]);
+        assert_eq!(split_keys("⌃⇧Tab"), ["⌃", "⇧", "Tab"]);
+        assert_eq!(split_keys("Esc"), ["Esc"]);
+        assert_eq!(split_keys("⌘."), ["⌘", "."]);
     }
 
     #[test]

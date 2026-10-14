@@ -3,14 +3,15 @@
 //! sorting. Columns keep their own width; stripes and borders run on to the
 //! pane's edge, so resizing one column never moves the others' widths.
 
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels,
-    SharedString, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    AnyElement, App, FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, SharedString,
+    UniformListScrollHandle, Window, canvas, div, prelude::*, px, uniform_list,
 };
 use xenon_driver::sql::SortDirection;
 use xenon_driver::{Column, ResultSet, Value};
@@ -39,6 +40,9 @@ pub struct Grid {
     order: Arc<Vec<usize>>,
     pub sort: Option<(usize, SortDirection)>,
     pub scroll: UniformListScrollHandle,
+    /// Window x of the header's left edge (after horizontal scrolling), so a
+    /// click on a row can be mapped to a column without a handler per cell.
+    origin_x: Rc<Cell<Pixels>>,
 }
 
 impl Grid {
@@ -72,6 +76,7 @@ impl Grid {
             order: Arc::new(order),
             sort: None,
             scroll: UniformListScrollHandle::new(),
+            origin_x: Rc::new(Cell::new(px(0.))),
         }
     }
 
@@ -210,6 +215,7 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
     let columns = &view.grid.data.columns;
 
     let header = div()
+        .relative()
         .h(px(HEADER_HEIGHT))
         .w_full()
         .flex_none()
@@ -236,9 +242,19 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
                     header_cell(ix, column, *width, direction, theme, &callbacks)
                 }),
         )
-        .child(div().flex_1());
+        .child(div().flex_1())
+        .child({
+            let origin_x = view.grid.origin_x.clone();
+            canvas(
+                move |bounds, _, _| origin_x.set(bounds.origin.x),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        });
 
     let data = view.grid.data.clone();
+    let origin_x = view.grid.origin_x.clone();
     let order = view.grid.order.clone();
     let widths = Arc::new(view.widths);
     let selection = view.selection;
@@ -254,6 +270,7 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
                     selection,
                     &theme,
                     &row_callbacks,
+                    &origin_x,
                 )
             })
             .collect()
@@ -267,6 +284,11 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
         .id("result-grid")
         .size_full()
         .overflow_x_scroll()
+        // Without this a vertical swipe also scrolls sideways (GPUI turns the
+        // vertical delta into horizontal scroll for x-only containers), and a
+        // trackpad's slight sideways drift moves the grid. With it, each
+        // gesture follows its main direction.
+        .restrict_scroll_to_axis()
         .child(
             div()
                 .w_full()
@@ -366,13 +388,16 @@ fn header_cell(
 fn render_row(
     ix: usize,
     row: &[Value],
-    widths: &[f32],
+    widths: &Arc<Vec<f32>>,
     selection: Option<Selection>,
     theme: &Theme,
     callbacks: &Rc<Callbacks>,
+    origin_x: &Rc<Cell<Pixels>>,
 ) -> AnyElement {
     let row_selected = selection.is_some_and(|s| s.rows().contains(&ix));
     let background = if ix % 2 == 1 { Some(theme.s2) } else { None };
+    let select = callbacks.select.clone();
+    let (origin_x, column_widths) = (origin_x.clone(), widths.clone());
 
     div()
         .id(ix)
@@ -385,6 +410,16 @@ fn render_row(
         .border_color(theme.line_2)
         .when_some(background, |el, bg| el.bg(bg))
         .hover(|style| style.bg(theme.s3))
+        // One handler per row: the column comes from where the click landed.
+        .on_mouse_down(
+            MouseButton::Left,
+            move |event: &MouseDownEvent, window, cx| {
+                let x = f32::from(event.position.x - origin_x.get()) - INDEX_WIDTH;
+                if let Some(column) = column_at(&column_widths, x) {
+                    select(ix, column, event.modifiers.shift, window, cx);
+                }
+            },
+        )
         .child(
             div()
                 .w(px(INDEX_WIDTH))
@@ -401,38 +436,47 @@ fn render_row(
         )
         .children(
             row.iter()
-                .zip(widths)
+                .zip(widths.iter())
                 .enumerate()
                 .map(|(column, (value, width))| {
                     let selected = selection.is_some_and(|s| s.contains(ix, column));
                     let focused = selection.is_some_and(|s| s.head == (ix, column));
-                    let select = callbacks.select.clone();
-                    div()
-                        .id(("cell", column))
-                        .w(px(*width))
-                        .h_full()
-                        .flex_none()
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .when(value.is_numeric(), |el| el.justify_end())
-                        .border_r_1()
-                        .border_color(theme.line_2)
-                        .overflow_hidden()
+                    cell(value, *width, theme)
                         .when(selected, |el| el.bg(theme.acc_wash))
                         .when(focused, |el| el.border_1().border_color(theme.acc))
-                        .on_click(move |event: &ClickEvent, window, cx| {
-                            select(ix, column, event.modifiers().shift, window, cx)
-                        })
-                        .child(cell(value, theme))
                 }),
         )
         .child(div().flex_1())
         .into_any_element()
 }
 
-fn cell(value: &Value, theme: &Theme) -> impl IntoElement {
-    let el = div().truncate();
+/// The column under `x` (pixels from the first data column's left edge).
+fn column_at(widths: &[f32], x: f32) -> Option<usize> {
+    if x < 0. {
+        return None;
+    }
+    let mut right = 0.;
+    widths.iter().position(|w| {
+        right += w;
+        x < right
+    })
+}
+
+/// One element per cell. Text is cut to what fits the column up front, so the
+/// grid never measures text for an ellipsis while it draws.
+fn cell(value: &Value, width: f32, theme: &Theme) -> gpui::Div {
+    let el = div()
+        .w(px(width))
+        .h_full()
+        .flex_none()
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .when(value.is_numeric(), |el| el.justify_end())
+        .border_r_1()
+        .border_color(theme.line_2)
+        .overflow_hidden()
+        .whitespace_nowrap();
     if value.is_null() {
         return el
             .text_color(theme.t3)
@@ -446,18 +490,48 @@ fn cell(value: &Value, theme: &Theme) -> impl IntoElement {
             (display.chars().next(), display.chars().last()),
             (Some('{'), Some('}')) | (Some('['), Some(']'))
         );
-    let text: String = display
-        .chars()
-        .take(CELL_CHARS)
-        .map(|c| if c == '\n' { '⏎' } else { c })
-        .collect();
     el.when(structured, |el| el.text_color(theme.t2))
-        .child(SharedString::from(text))
+        .child(SharedString::from(fit(&display, width)))
+}
+
+/// Shorten `text` to the characters that fit a column `width` wide, ending
+/// with "…" when cut. Line breaks are shown as ⏎.
+fn fit(text: &str, width: f32) -> String {
+    let budget = (((width - 20.) / MONO_ADVANCE).floor() as usize).clamp(1, CELL_CHARS);
+    let mut out = String::with_capacity(budget.min(text.len()) + 3);
+    for (count, c) in text.chars().enumerate() {
+        if count == budget {
+            out.pop();
+            out.push('…');
+            break;
+        }
+        out.push(if c == '\n' { '⏎' } else { c });
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_cuts_to_the_column_with_an_ellipsis() {
+        // 20px of padding, 6.9px per character.
+        let width = 20. + 6.9 * 5.;
+        assert_eq!(fit("short", width), "short");
+        assert_eq!(fit("longer text", width), "long…");
+        assert_eq!(fit("a\nb", width), "a⏎b");
+    }
+
+    #[test]
+    fn column_at_maps_x_to_columns() {
+        let widths = [100., 50., 80.];
+        assert_eq!(column_at(&widths, -1.), None);
+        assert_eq!(column_at(&widths, 0.), Some(0));
+        assert_eq!(column_at(&widths, 149.), Some(1));
+        assert_eq!(column_at(&widths, 229.), Some(2));
+        assert_eq!(column_at(&widths, 400.), None);
+    }
 
     #[test]
     fn layout_uses_manual_widths_over_natural() {

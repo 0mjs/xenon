@@ -1,3 +1,5 @@
+pub mod assets;
+mod bench;
 mod confirm;
 mod connect;
 mod explorer;

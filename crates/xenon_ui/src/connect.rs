@@ -580,8 +580,8 @@ fn button(
         .text_size(px(12.))
         .font_weight(FontWeight::MEDIUM)
         .when(primary, |el| {
-            el.bg(theme.text)
-                .border_color(theme.text)
+            el.bg(theme.acc)
+                .border_color(theme.acc)
                 .text_color(theme.bg)
         })
         .when(!primary, |el| {

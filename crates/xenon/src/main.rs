@@ -16,45 +16,47 @@ fn main() {
     // `xenon path/to/file.db` or `xenon postgres://…` opens that database on launch.
     let launch = std::env::args().nth(1).map(Launch::from_arg);
 
-    application().run(|cx: &mut App| {
-        if let Err(err) = xenon_ui::fonts::load(cx) {
-            eprintln!("xenon: failed to load bundled fonts: {err:#}");
-        }
-        xenon_ui::init(cx);
-        set_menus(cx);
-
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
+    application()
+        .with_assets(xenon_ui::assets::Assets)
+        .run(|cx: &mut App| {
+            if let Err(err) = xenon_ui::fonts::load(cx) {
+                eprintln!("xenon: failed to load bundled fonts: {err:#}");
             }
-        })
-        .detach();
+            xenon_ui::init(cx);
+            set_menus(cx);
 
-        let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Xenon".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.), px(11.))),
-                }),
-                window_min_size: Some(size(px(720.), px(480.))),
-                ..Default::default()
-            },
-            |window, cx| {
-                window.set_rem_size(px(16.));
-                // Decoding the icon takes tens of milliseconds; do it after the first frame.
-                #[cfg(target_os = "macos")]
-                window.on_next_frame(|_, _| set_dock_icon());
-                let workspace = cx.new(|cx| Workspace::new(launch, window, cx));
-                cx.new(|cx| Root::new(workspace, window, cx))
-            },
-        )
-        .expect("failed to open the main window");
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
-        cx.activate(true);
-    });
+            let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Xenon".into()),
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(12.), px(11.))),
+                    }),
+                    window_min_size: Some(size(px(720.), px(480.))),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    window.set_rem_size(px(16.));
+                    // Decoding the icon takes tens of milliseconds; do it after the first frame.
+                    #[cfg(target_os = "macos")]
+                    window.on_next_frame(|_, _| set_dock_icon());
+                    let workspace = cx.new(|cx| Workspace::new(launch, window, cx));
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                },
+            )
+            .expect("failed to open the main window");
+
+            cx.activate(true);
+        });
 }
 
 fn set_menus(cx: &mut App) {

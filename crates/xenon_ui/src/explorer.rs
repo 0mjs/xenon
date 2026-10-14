@@ -1,13 +1,15 @@
 //! The explorer panel: connection, schemas, tables and their columns.
 
-use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px};
-use gpui_component::input::Input;
+use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, svg};
 use xenon_driver::{ObjectKind, SchemaObject};
 use xenon_store::{SavedConnection, Target};
 
+use crate::assets;
 use crate::palette::fuzzy_score;
 use crate::theme::{MONO_FONT, Theme};
-use crate::widgets::{connection_tags, empty_hint, env_tag, panel_button, panel_label, tree_row};
+use crate::widgets::{
+    connection_tags, empty_hint, env_tag, panel_button, panel_label, search_field, tree_row,
+};
 use crate::workspace::Workspace;
 use crate::{NewConnection, OpenFile};
 
@@ -145,12 +147,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .when(self.session.is_some(), |el| {
-                el.child(
-                    div()
-                        .px(px(10.))
-                        .pb(px(6.))
-                        .child(Input::new(&self.explorer_filter)),
-                )
+                el.child(div().px(px(10.)).pb(px(8.)).child(search_field(
+                    theme,
+                    &self.explorer_filter,
+                    self.field_focus.explorer,
+                )))
             })
             .child(list)
             .into_any_element()
@@ -243,8 +244,8 @@ impl Workspace {
         let browse_schema = schema.to_string();
         let browse_name = object.name.clone();
         let icon = match object.kind {
-            ObjectKind::Table => "▦",
-            ObjectKind::View => "◇",
+            ObjectKind::Table => "table-2",
+            ObjectKind::View => "eye",
         };
 
         let mut rows = vec![
@@ -268,7 +269,13 @@ impl Workspace {
                         }))
                         .child(if expanded { "▾" } else { "▸" }),
                 )
-                .child(div().text_color(theme.t3).child(icon))
+                .child(
+                    svg()
+                        .path(assets::icon(icon))
+                        .size(px(13.))
+                        .flex_none()
+                        .text_color(theme.acc),
+                )
                 .child(div().flex_1().truncate().child(object.name.clone()))
                 .child(count(theme, object.columns.len()))
                 .into_any_element(),

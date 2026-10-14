@@ -2,12 +2,13 @@
 
 use gpui::{
     Action, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, ScrollStrategy,
-    SharedString, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, rgba,
+    SharedString, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, rgba, svg,
     uniform_list,
 };
 use gpui_component::input::{Escape, Input, InputEvent, InputState};
 
 use crate::theme::{ActiveTheme, MONO_FONT, Mode};
+use crate::widgets::kbd;
 use crate::{PaletteDown, PaletteUp};
 
 const ROW_HEIGHT: f32 = 34.;
@@ -183,16 +184,7 @@ impl Render for Palette {
                             )
                         })
                         .child(div().flex_1())
-                        .when_some(keys, |el, keys| {
-                            el.child(
-                                div()
-                                    .flex_none()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(10.5))
-                                    .text_color(list_theme.t3)
-                                    .child(keys),
-                            )
-                        })
+                        .when_some(keys, |el, keys| el.child(kbd(&list_theme, &keys)))
                 })
                 .collect()
         })
@@ -211,10 +203,26 @@ impl Render for Palette {
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)))
             .child(
                 div()
-                    .p(px(10.))
+                    .h(px(48.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
                     .border_b_1()
                     .border_color(theme.line)
-                    .child(Input::new(&self.input)),
+                    .child(
+                        svg()
+                            .path(crate::assets::icon("search"))
+                            .size(px(16.))
+                            .flex_none()
+                            .text_color(theme.acc),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(15.))
+                            .child(Input::new(&self.input).appearance(false)),
+                    ),
             )
             .child(div().py(px(4.)).when(row_count == 0, |el| {
                 el.child(

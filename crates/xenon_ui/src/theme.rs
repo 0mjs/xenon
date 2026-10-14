@@ -57,43 +57,45 @@ impl Theme {
         }
     }
 
+    /// Darker chrome, brighter text and a clearer steel-blue accent than the
+    /// first cut, so panels separate and focus reads at a glance.
     pub fn dark() -> Self {
         Self {
             mode: Mode::Dark,
-            bg: rgb(0x0f1012),
-            s1: rgb(0x141518),
-            s2: rgb(0x18191d),
-            s3: rgb(0x1e2024),
-            line: rgb(0x2a2c31),
-            line_2: rgb(0x202226),
-            text: rgb(0xe4e5e8),
-            t2: rgb(0x9b9ea6),
-            t3: rgb(0x646770),
-            acc: rgb(0x8fa3bd),
-            acc_wash: rgba(0x8fa3bd1c),
-            ok: rgb(0x94b39d),
-            warn: rgb(0xc9a96e),
-            err: rgb(0xd0817a),
+            bg: rgb(0x0b0c0e),
+            s1: rgb(0x121317),
+            s2: rgb(0x17191d),
+            s3: rgb(0x20232a),
+            line: rgb(0x2b2e36),
+            line_2: rgb(0x1d1f24),
+            text: rgb(0xeceef2),
+            t2: rgb(0xa4a9b3),
+            t3: rgb(0x6c717c),
+            acc: rgb(0x7ba7e8),
+            acc_wash: rgba(0x7ba7e826),
+            ok: rgb(0x8cc49c),
+            warn: rgb(0xd8b06a),
+            err: rgb(0xe0837a),
         }
     }
 
     pub fn light() -> Self {
         Self {
             mode: Mode::Light,
-            bg: rgb(0xeeeff1),
-            s1: rgb(0xf6f6f7),
-            s2: rgb(0xfbfbfc),
-            s3: rgb(0xe9eaec),
-            line: rgb(0xd6d8dc),
-            line_2: rgb(0xe4e5e8),
-            text: rgb(0x17181b),
-            t2: rgb(0x5a5e66),
-            t3: rgb(0x93969d),
-            acc: rgb(0x4b6481),
-            acc_wash: rgba(0x4b64811a),
-            ok: rgb(0x4d7a5a),
-            warn: rgb(0x8a6822),
-            err: rgb(0xa8473f),
+            bg: rgb(0xe6e8ec),
+            s1: rgb(0xf4f5f7),
+            s2: rgb(0xffffff),
+            s3: rgb(0xe3e6eb),
+            line: rgb(0xcfd3da),
+            line_2: rgb(0xe4e7eb),
+            text: rgb(0x111318),
+            t2: rgb(0x535a66),
+            t3: rgb(0x8c929d),
+            acc: rgb(0x2f64c0),
+            acc_wash: rgba(0x2f64c01f),
+            ok: rgb(0x3f7d50),
+            warn: rgb(0x8f6516),
+            err: rgb(0xb2402f),
         }
     }
 }

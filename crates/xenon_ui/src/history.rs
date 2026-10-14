@@ -3,11 +3,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{AnyElement, Context, IntoElement, SharedString, Window, div, prelude::*, px};
-use gpui_component::input::Input;
 use xenon_store::HistoryEntry;
 
 use crate::theme::{MONO_FONT, Theme};
-use crate::widgets::{empty_hint, group_digits};
+use crate::widgets::{empty_hint, group_digits, search_field};
 use crate::workspace::{RunScope, Workspace};
 
 /// Entries shown in the panel; the store keeps more.
@@ -55,10 +54,11 @@ impl Workspace {
 
     pub(crate) fn render_history(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let mut panel = div().flex_1().flex().flex_col().min_h(px(0.)).child(
-            div()
-                .px(px(10.))
-                .pb(px(6.))
-                .child(Input::new(&self.history_filter).appearance(true)),
+            div().px(px(10.)).pb(px(8.)).child(search_field(
+                theme,
+                &self.history_filter,
+                self.field_focus.history,
+            )),
         );
 
         if self.session.is_none() {
