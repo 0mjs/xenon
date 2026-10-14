@@ -22,7 +22,13 @@ pub fn detect(text: &str) -> Detected {
     if is_libpq(&text.to_ascii_lowercase()) {
         return Detected::Server(ServerEngine::Postgres, text.to_string());
     }
+    if is_ado(text) {
+        return Detected::Server(ServerEngine::SqlServer, text.to_string());
+    }
     let value = env_value(text);
+    if is_ado(value) {
+        return Detected::Server(ServerEngine::SqlServer, value.to_string());
+    }
     let lower = value.to_ascii_lowercase();
 
     let scheme = lower.split("://").next().unwrap_or("");
@@ -36,7 +42,9 @@ pub fn detect(text: &str) -> Detected {
             }
             "mysql" | "mariadb" => Detected::Server(ServerEngine::Mysql, value.to_string()),
             "mysqlx" => Detected::NotYet("MySQL X Protocol"),
-            "sqlserver" | "mssql" | "jdbc:sqlserver" => Detected::NotYet("SQL Server"),
+            "sqlserver" | "mssql" | "jdbc:sqlserver" => {
+                Detected::Server(ServerEngine::SqlServer, value.to_string())
+            }
             "duckdb" => Detected::NotYet("DuckDB"),
             "mongodb" | "mongodb+srv" => Detected::NotYet("MongoDB"),
             "redis" | "rediss" => Detected::NotYet("Redis"),
@@ -74,6 +82,17 @@ fn env_value(text: &str) -> &str {
         _ => line,
     };
     value.trim().trim_matches(|c| c == '"' || c == '\'').trim()
+}
+
+/// An ADO.NET connection string: `Server=tcp:host,1433;Database=…;User Id=…`.
+fn is_ado(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains(';')
+        && !lower.contains("://")
+        && (lower.starts_with("server=")
+            || lower.starts_with("data source=")
+            || lower.contains(";server=")
+            || lower.contains(";data source="))
 }
 
 fn is_libpq(lower: &str) -> bool {
@@ -135,7 +154,19 @@ mod tests {
         );
         assert_eq!(
             detect("sqlserver://host;database=x"),
-            Detected::NotYet("SQL Server")
+            Detected::Server(
+                ServerEngine::SqlServer,
+                "sqlserver://host;database=x".into()
+            )
+        );
+        let ado = "Server=tcp:db,1433;Database=shop;User Id=sa;Password=pw";
+        assert_eq!(
+            detect(ado),
+            Detected::Server(ServerEngine::SqlServer, ado.into())
+        );
+        assert_eq!(
+            detect(&format!("ConnectionStrings__Default=\"{ado}\"")),
+            Detected::Server(ServerEngine::SqlServer, ado.into())
         );
         assert_eq!(
             detect("mongodb+srv://cluster/db"),

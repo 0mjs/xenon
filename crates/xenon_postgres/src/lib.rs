@@ -55,6 +55,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         ssl: ssl.unwrap_or_default(),
         read_only: false,
         ssh: None,
+        address: None,
     })
 }
 
@@ -119,7 +120,12 @@ impl PostgresConnection {
             } else {
                 &options.host
             })
-            .port(options.port.unwrap_or(5432))
+            // Through a tunnel, its local port; the host stays for TLS (hostaddr below).
+            .port(
+                options
+                    .address
+                    .map_or(options.port.unwrap_or(5432), |a| a.port()),
+            )
             .user(if options.user.is_empty() {
                 "postgres"
             } else {
@@ -134,6 +140,10 @@ impl PostgresConnection {
         }
         if options.read_only {
             config.options("-c default_transaction_read_only=on");
+        }
+        if let Some(address) = options.address {
+            // Connect to the tunnel; `host` still names the server for TLS.
+            config.hostaddr(address.ip());
         }
         Self::connect(config, options.ssl)
     }
@@ -544,6 +554,7 @@ mod tests {
                 ssl: SslMode::VerifyFull,
                 read_only: false,
                 ssh: None,
+                address: None,
             }
         );
         let minimal = parse_url("postgres://localhost").unwrap();

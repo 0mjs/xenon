@@ -204,13 +204,18 @@ impl Workspace {
                 })),
             )
             .child(tile("tile-duckdb", "DuckDB", Engine::DuckDb, "File", false))
-            .child(tile(
-                "tile-sqlserver",
-                "SQL Server",
-                Engine::SqlServer,
-                "Server",
-                false,
-            ))
+            .child(
+                tile(
+                    "tile-sqlserver",
+                    "SQL Server",
+                    Engine::SqlServer,
+                    "And Azure SQL",
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_server_connection(ServerEngine::SqlServer, window, cx)
+                })),
+            )
             .into_any_element()
     }
 

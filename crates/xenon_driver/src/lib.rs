@@ -175,6 +175,9 @@ pub struct ConnectOptions {
     /// Reach the server through an SSH tunnel; `host` and `port` are then as
     /// seen from the SSH server.
     pub ssh: Option<SshOptions>,
+    /// Open the TCP connection here instead (an SSH tunnel's local end) while
+    /// still using `host` to verify the server's TLS certificate.
+    pub address: Option<std::net::SocketAddr>,
 }
 
 /// An SSH server to tunnel through. Anything left empty comes from
@@ -239,6 +242,12 @@ pub trait Connection: Send + Sync {
         } else {
             self.quote_ident(ident)
         }
+    }
+
+    /// True for engines that limit rows with `select top (n)` (SQL Server)
+    /// rather than `limit n`.
+    fn uses_top(&self) -> bool {
+        false
     }
 
     /// The SSH server this connection tunnels through, if any.

@@ -1,6 +1,6 @@
 # Xenon
 
-A fast, minimal database client for Postgres, MySQL, MariaDB and SQLite. Native, written in Rust with
+A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server and SQLite. Native, written in Rust with
 [GPUI](https://gpui.rs). By Carbon Software.
 
 ![Browsing a table in Xenon](docs/screenshots/browse.png)
@@ -11,7 +11,8 @@ A fast, minimal database client for Postgres, MySQL, MariaDB and SQLite. Native,
 - **Safe by default.** Saved connections carry a development / production label and an optional
   read-only mode the database enforces. Risky statements ask first; on production you type the
   connection's name to go ahead. Passwords live in the macOS Keychain.
-- **Postgres, MySQL, MariaDB and SQLite**, with TLS (from `disable` to `verify-full`), cancel,
+- **Postgres, MySQL, MariaDB, SQL Server (and Azure SQL) and SQLite**, with TLS (from `disable`
+  to `verify-full`), cancel,
   exact numbers, query plans.
 - **Several connections at once**, side by side: every tab says which database it runs on.
 - **SSH tunnels** through a bastion, using your own `ssh`: `~/.ssh/config` aliases, `ProxyJump`, the
@@ -29,7 +30,8 @@ Requires macOS 12 or later.
 
 ## Use
 
-With nothing open, Xenon shows **Connect**: paste a `postgres://` or `mysql://` URL, a
+With nothing open, Xenon shows **Connect**: paste a `postgres://`, `mysql://` or `mssql://` URL,
+an ADO.NET `Server=…;Database=…` string, a
 `DATABASE_URL=` line or a database file path and press Enter; pick a database type; reopen a saved
 connection; or use one **found on this Mac** (Docker containers, servers on the usual ports,
 `~/.pgpass`, `~/.pg_service.conf`, or a project's `.env` files). `⌘O` opens a SQLite file, `⌘N`
@@ -42,7 +44,7 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 |---|---|
 | `⌘K` / `⌘P` | Command palette: jump to a table or run any command |
 | `⌘O` | Open SQLite file |
-| `⌘N` | New server connection (Postgres, MySQL / MariaDB) |
+| `⌘N` | New server connection (Postgres, MySQL / MariaDB, SQL Server) |
 | `⇧⌘N` | Connections: open another database alongside |
 | `⇧⌘W` | Disconnect the current tab's database (or the plug button next to it in the explorer) |
 | `⌘↵` | Run the statement under the cursor (or the selection) |
@@ -96,6 +98,7 @@ the same shop data plus a table of every type and a table that needs quoting (`d
 
 ```sh
 dev/fleet/up.sh postgres mysql mariadb     # first start pulls images and seeds (~20k rows each)
+dev/fleet/up.sh mssql bastion              # SQL Server (about 1 GB, Rosetta on Apple Silicon), SSH bastion
 XENON_TEST_PG_URL="postgres://xenon:xenon@127.0.0.1:55432/shop" \
   cargo test --workspace -- --include-ignored
 dev/fleet/down.sh                          # stop; add -v to delete the data

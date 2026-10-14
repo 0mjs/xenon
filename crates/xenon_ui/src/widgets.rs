@@ -412,6 +412,7 @@ impl Engine {
         match engine {
             xenon_store::ServerEngine::Postgres => Engine::Postgres,
             xenon_store::ServerEngine::Mysql => Engine::MySql,
+            xenon_store::ServerEngine::SqlServer => Engine::SqlServer,
         }
     }
 

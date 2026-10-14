@@ -11,6 +11,7 @@ authors = ["Carbon Software Ltd"]
 repository = "https://github.com/0mjs/xenon"
 
 [workspace.dependencies]
+xenon_mssql = { path = "crates/xenon_mssql" }
 xenon_mysql = { path = "crates/xenon_mysql" }
 xenon_ssh = { path = "crates/xenon_ssh" }
 xenon_driver = { path = "crates/xenon_driver" }
@@ -27,6 +28,9 @@ postgres-native-tls = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 tokio-postgres = "0.7"
 security-framework = "3"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls", "chrono"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "native-tls"] }
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 

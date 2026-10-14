@@ -17,7 +17,7 @@ use crate::widgets::{self, ButtonKind, Engine, RADIUS_CONTROL};
 fn database_hint(engine: ServerEngine) -> &'static str {
     match engine {
         ServerEngine::Postgres => "postgres",
-        ServerEngine::Mysql => "optional",
+        ServerEngine::Mysql | ServerEngine::SqlServer => "optional",
     }
 }
 
@@ -49,6 +49,8 @@ pub struct Request {
 }
 
 #[derive(Clone)]
+// Only a handful exist at a time; boxing the options would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum RequestTarget {
     Server(ServerEngine, ConnectOptions),
     Sqlite(String),
@@ -160,6 +162,7 @@ impl ConnectDialog {
                             password: password.clone(),
                             ssl: SslMode::parse(ssl).unwrap_or_default(),
                             read_only: saved.read_only,
+                            address: None,
                             ssh: ssh.as_ref().map(|tunnel| xenon_driver::SshOptions {
                                 password: ssh_password.clone(),
                                 ..servers::ssh_options(tunnel)
@@ -353,6 +356,7 @@ impl ConnectDialog {
                     ssl: self.ssl,
                     read_only: false,
                     ssh: None,
+                    address: None,
                 }
             };
             options.read_only = self.read_only;
@@ -514,6 +518,7 @@ impl Render for ConnectDialog {
                     let label = match e {
                         ServerEngine::Postgres => "Postgres",
                         ServerEngine::Mysql => "MySQL / MariaDB",
+                        ServerEngine::SqlServer => "SQL Server",
                     };
                     (label, e == self.engine)
                 })

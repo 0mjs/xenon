@@ -65,6 +65,26 @@ services:
       interval: 2s
       retries: 60
 
+  # x86 only: runs under Rosetta on Apple Silicon. Heavier than the rest (about 1 GB);
+  # user `sa`, password `Xenon-fleet-1` (SQL Server insists on a complex one).
+  # Seeded by up.sh with sqlcmd, since the image has no init-script folder.
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    ports: ["51433:1433"]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Xenon-fleet-1
+      MSSQL_PID: Developer
+      MSSQL_MEMORY_LIMIT_MB: "1024"
+    volumes:
+      - mssql:/var/opt/mssql
+      - ../seed/out/mssql.sql:/seed/mssql.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Xenon-fleet-1 -C -b -Q 'select 1' -o /dev/null"]
+      interval: 3s
+      retries: 60
+
   # An SSH bastion for tunnel tests. Databases are reachable from it by service name
   # (postgres:5432, mysql:3306, mariadb:3306), as a real bastion reaches private hosts.
   # Log in as xenon with password `xenon`, or with dev/fleet/ssh/id_ed25519 (made by up.sh).
@@ -90,3 +110,4 @@ volumes:
   postgres:
   mysql:
   mariadb:
+  mssql:

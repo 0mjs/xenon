@@ -365,6 +365,28 @@ fn snapshots() {
                 w.browse(id, "public", "orders", window, cx)
             });
             shot.save(&format!("13-postgres-over-ssh-{suffix}"));
+
+            // SQL Server 2022 from the fleet (dev/fleet/up.sh mssql).
+            shot.act(|w, window, cx| {
+                w.connect_server(
+                    xenon_store::ServerEngine::SqlServer,
+                    xenon_driver::ConnectOptions {
+                        host: "127.0.0.1".into(),
+                        port: Some(51433),
+                        database: "shop".into(),
+                        user: "sa".into(),
+                        password: "Xenon-fleet-1".into(),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            });
+            shot.act(|w, window, cx| {
+                let id = w.sessions.last().expect("connected to SQL Server").id;
+                w.browse(id, "dbo", "type_zoo", window, cx)
+            });
+            shot.save(&format!("14-sqlserver-type-zoo-{suffix}"));
         }
 
         // Closing a connection closes only its tabs; the other stays open.

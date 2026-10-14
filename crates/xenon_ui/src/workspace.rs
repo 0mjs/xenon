@@ -135,6 +135,7 @@ impl Profile {
                     password: String::new(),
                     ssl: SslMode::parse(ssl).unwrap_or_default(),
                     read_only: saved.read_only,
+                    address: None,
                     ssh: ssh.as_ref().map(servers::ssh_options),
                 },
             ),
@@ -1630,6 +1631,7 @@ impl Workspace {
                 .as_ref()
                 .map(|(column, dir)| (column.as_str(), *dir)),
             BROWSE_LIMIT,
+            conn.uses_top(),
         );
         let editor = self.active_tab().editor.clone();
         editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));

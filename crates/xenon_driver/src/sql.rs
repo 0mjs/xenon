@@ -465,12 +465,17 @@ pub fn browse_table(
     filter: &str,
     order: Option<(&str, SortDirection)>,
     limit: usize,
+    top: bool,
 ) -> String {
     let name = match schema {
         Some(schema) => format!("{}.{}", quote(schema), quote(table)),
         None => quote(table),
     };
-    let mut sql = format!("select * from {name}");
+    let mut sql = if top {
+        format!("select top ({limit}) * from {name}")
+    } else {
+        format!("select * from {name}")
+    };
     let filter = filter.trim().trim_end_matches(';').trim();
     if !filter.is_empty() {
         sql.push_str(&format!("\nwhere {filter}"));
@@ -482,7 +487,11 @@ pub fn browse_table(
         };
         sql.push_str(&format!("\norder by {} {direction}", quote(column)));
     }
-    sql.push_str(&format!("\nlimit {limit};"));
+    if top {
+        sql.push(';');
+    } else {
+        sql.push_str(&format!("\nlimit {limit};"));
+    }
     sql
 }
 
@@ -520,6 +529,22 @@ mod tests {
     }
 
     #[test]
+    fn sql_server_browses_with_top() {
+        assert_eq!(
+            browse_table(
+                |i: &str| format!("[{i}]"),
+                None,
+                "orders",
+                "id > 5",
+                None,
+                1000,
+                true
+            ),
+            "select top (1000) * from [orders]\nwhere id > 5;"
+        );
+    }
+
+    #[test]
     fn browse_queries_read_like_hand_written_sql() {
         let quote = |i: &str| {
             if is_plain_ident(i) {
@@ -529,7 +554,7 @@ mod tests {
             }
         };
         assert_eq!(
-            browse_table(quote, None, "orders", "", None, 1000),
+            browse_table(quote, None, "orders", "", None, 1000, false),
             "select * from orders\nlimit 1000;"
         );
         assert_eq!(
@@ -539,7 +564,8 @@ mod tests {
                 "order",
                 "total > 5",
                 Some(("created_at", SortDirection::Descending)),
-                50
+                50,
+                false
             ),
             "select * from \"Analytics\".\"order\"\nwhere total > 5\norder by created_at desc\nlimit 50;"
         );
@@ -642,7 +668,7 @@ mod tests {
     fn browse_table_builds_filter_and_order() {
         let quote = |s: &str| format!("\"{s}\"");
         assert_eq!(
-            browse_table(quote, Some("public"), "orders", "", None, 1000),
+            browse_table(quote, Some("public"), "orders", "", None, 1000, false),
             "select * from \"public\".\"orders\"\nlimit 1000;"
         );
         assert_eq!(
@@ -652,7 +678,8 @@ mod tests {
                 "orders",
                 "  status = 'paid';  ",
                 Some(("total", SortDirection::Descending)),
-                50
+                50,
+                false
             ),
             "select * from \"public\".\"orders\"\nwhere status = 'paid'\norder by \"total\" desc\nlimit 50;"
         );

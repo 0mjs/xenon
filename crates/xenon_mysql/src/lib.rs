@@ -80,6 +80,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         ssl,
         read_only: false,
         ssh: None,
+        address: None,
     })
 }
 
@@ -149,6 +150,12 @@ impl MysqlConnection {
             &options.host
         };
         let port = options.port.unwrap_or(DEFAULT_PORT);
+        // Through a tunnel, connect to its local end. (The mysql crate checks
+        // TLS names against what it connects to, so verify-full can't pass here.)
+        let (connect_host, connect_port) = match options.address {
+            Some(address) => (address.ip().to_string(), address.port()),
+            None => (host.to_string(), port),
+        };
         let user = if options.user.is_empty() {
             "root"
         } else {
@@ -159,8 +166,8 @@ impl MysqlConnection {
             init.push("SET SESSION TRANSACTION READ ONLY".to_string());
         }
         let builder = OptsBuilder::new()
-            .ip_or_hostname(Some(host))
-            .tcp_port(port)
+            .ip_or_hostname(Some(connect_host))
+            .tcp_port(connect_port)
             .user(Some(user))
             .pass((!options.password.is_empty()).then(|| options.password.clone()))
             .db_name((!options.database.is_empty()).then(|| options.database.clone()))

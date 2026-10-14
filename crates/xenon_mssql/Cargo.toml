@@ -1,0 +1,15 @@
+[package]
+name = "xenon_mssql"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+tiberius.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util.workspace = true
+xenon_driver.workspace = true

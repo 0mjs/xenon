@@ -12,6 +12,7 @@ pub fn parse_url(engine: ServerEngine, url: &str) -> anyhow::Result<ConnectOptio
     match engine {
         ServerEngine::Postgres => xenon_postgres::parse_url(url),
         ServerEngine::Mysql => xenon_mysql::parse_url(url),
+        ServerEngine::SqlServer => xenon_mssql::parse_url(url),
     }
 }
 
@@ -27,9 +28,13 @@ pub fn connect(
     let port = options.port.unwrap_or(engine.default_port());
     let tunnel = xenon_ssh::Tunnel::open(ssh, &host, port, &known_hosts())?;
     let local = ConnectOptions {
-        host: "127.0.0.1".into(),
-        port: Some(tunnel.local_port()),
+        host: host.clone(),
+        port: Some(port),
         ssh: None,
+        address: Some(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            tunnel.local_port(),
+        ))),
         ..options.clone()
     };
     let inner = connect_direct(engine, &local).map_err(|err| {
@@ -107,6 +112,9 @@ impl Connection for Tunneled {
     fn default_schema(&self) -> Option<String> {
         self.inner.default_schema()
     }
+    fn uses_top(&self) -> bool {
+        self.inner.uses_top()
+    }
     fn tunnel(&self) -> Option<String> {
         Some(self.via.clone())
     }
@@ -121,6 +129,9 @@ fn connect_direct(
             options,
         )?),
         ServerEngine::Mysql => Arc::new(xenon_mysql::MysqlConnection::connect_options(options)?),
+        ServerEngine::SqlServer => {
+            Arc::new(xenon_mssql::MssqlConnection::connect_options(options)?)
+        }
     })
 }
 
@@ -148,7 +159,7 @@ pub fn describe(
     let user = or(user, engine.default_user());
     let port = port.unwrap_or(engine.default_port());
     match (engine, database) {
-        (ServerEngine::Mysql, "") => format!("{user}@{host}:{port}"),
+        (ServerEngine::Mysql | ServerEngine::SqlServer, "") => format!("{user}@{host}:{port}"),
         _ => format!("{user}@{host}:{port}/{}", or(database, "postgres")),
     }
 }
@@ -167,7 +178,9 @@ pub fn describe_options(engine: ServerEngine, options: &ConnectOptions) -> Strin
 pub fn default_name(engine: ServerEngine, options: &ConnectOptions) -> String {
     let host = or(&options.host, "localhost");
     match (engine, options.database.as_str()) {
-        (ServerEngine::Mysql, "") => format!("{}@{host}", or(&options.user, "root")),
+        (ServerEngine::Mysql | ServerEngine::SqlServer, "") => {
+            format!("{}@{host}", or(&options.user, engine.default_user()))
+        }
         (_, database) => format!("{}@{host}", or(database, "postgres")),
     }
 }
@@ -197,6 +210,9 @@ pub fn url_example(engine: ServerEngine) -> &'static str {
     match engine {
         ServerEngine::Postgres => "postgres://user:password@host:5432/database",
         ServerEngine::Mysql => "mysql://user:password@host:3306/database",
+        ServerEngine::SqlServer => {
+            "mssql://user:password@host:1433/database, or Server=…;Database=…"
+        }
     }
 }
 

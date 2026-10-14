@@ -13,6 +13,7 @@ xenon_sqlite.workspace = true
 anyhow.workspace = true
 xenon_postgres.workspace = true
 xenon_mysql.workspace = true
+xenon_mssql.workspace = true
 xenon_ssh.workspace = true
 xenon_store.workspace = true
 libc = "0.2"

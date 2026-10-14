@@ -74,16 +74,23 @@ pub enum ServerEngine {
     Postgres,
     /// MySQL and MariaDB (and wire-compatible servers such as TiDB).
     Mysql,
+    /// SQL Server and Azure SQL.
+    SqlServer,
 }
 
 impl ServerEngine {
-    pub const ALL: [ServerEngine; 2] = [ServerEngine::Postgres, ServerEngine::Mysql];
+    pub const ALL: [ServerEngine; 3] = [
+        ServerEngine::Postgres,
+        ServerEngine::Mysql,
+        ServerEngine::SqlServer,
+    ];
 
     /// The value stored in the `kind` column.
     pub fn as_str(self) -> &'static str {
         match self {
             ServerEngine::Postgres => "postgres",
             ServerEngine::Mysql => "mysql",
+            ServerEngine::SqlServer => "mssql",
         }
     }
 
@@ -97,6 +104,7 @@ impl ServerEngine {
         match self {
             ServerEngine::Postgres => "Postgres",
             ServerEngine::Mysql => "MySQL",
+            ServerEngine::SqlServer => "SQL Server",
         }
     }
 
@@ -104,6 +112,7 @@ impl ServerEngine {
         match self {
             ServerEngine::Postgres => 5432,
             ServerEngine::Mysql => 3306,
+            ServerEngine::SqlServer => 1433,
         }
     }
 
@@ -111,6 +120,7 @@ impl ServerEngine {
         match self {
             ServerEngine::Postgres => "postgres",
             ServerEngine::Mysql => "root",
+            ServerEngine::SqlServer => "sa",
         }
     }
 }

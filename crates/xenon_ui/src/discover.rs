@@ -15,6 +15,8 @@ use crate::detect::{Detected, detect};
 use crate::servers;
 
 #[derive(Clone, Debug, PartialEq)]
+// Only a handful exist at a time; boxing the options would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum FoundTarget {
     Server(ServerEngine, ConnectOptions),
     /// An engine Xenon can't open yet.
@@ -231,6 +233,12 @@ fn options_from_env(engine: ServerEngine, env: &str, port: u16) -> ConnectOption
                 ),
             }
         }
+        // The official image only has the sa login.
+        ServerEngine::SqlServer => (
+            "sa".into(),
+            var("MSSQL_SA_PASSWORD").or_else(|| var("SA_PASSWORD")),
+            String::new(),
+        ),
     };
     ConnectOptions {
         host: "localhost".into(),
@@ -241,6 +249,7 @@ fn options_from_env(engine: ServerEngine, env: &str, port: u16) -> ConnectOption
         ssl: SslMode::Prefer,
         read_only: false,
         ssh: None,
+        address: None,
     }
 }
 
@@ -327,6 +336,7 @@ fn parse_pgpass(text: &str, source: &str) -> Vec<Found> {
                         ssl: SslMode::Prefer,
                         read_only: false,
                         ssh: None,
+                        address: None,
                     },
                 ),
             })
@@ -543,6 +553,23 @@ mod tests {
                 root.database.as_str()
             ),
             ("root", "r00t", "")
+        );
+    }
+
+    #[test]
+    fn sql_server_container_env() {
+        let options = options_from_env(
+            ServerEngine::SqlServer,
+            "ACCEPT_EULA=Y\nMSSQL_SA_PASSWORD=Str0ng!\n",
+            51433,
+        );
+        assert_eq!(
+            (
+                options.user.as_str(),
+                options.password.as_str(),
+                options.port
+            ),
+            ("sa", "Str0ng!", Some(51433))
         );
     }
 

@@ -3,7 +3,8 @@
 
     python3 dev/seed/generate.py [--size small|large]
 
-Writes out/postgres.sql, out/mysql.sql (MySQL and MariaDB) and out/shop.db (SQLite).
+Writes out/postgres.sql, out/mysql.sql (MySQL and MariaDB), out/mssql.sql (SQL Server)
+and out/shop.db (SQLite).
 Deterministic: the same size always gives the same rows.
 
 Besides an ordinary shop (customers, products, orders, order items, events with JSON),
@@ -100,11 +101,11 @@ def build(size):
 
 # ---------------------------------------------------------------- dialects
 
-def lit(value, mysql):
+def lit(value, mysql, mssql=False):
     if value is None:
         return "NULL"
     if isinstance(value, bool):
-        return ("1" if value else "0") if mysql else ("true" if value else "false")
+        return ("1" if value else "0") if (mysql or mssql) else ("true" if value else "false")
     if isinstance(value, (int, float)):
         return repr(value)
     if isinstance(value, datetime):
@@ -112,10 +113,11 @@ def lit(value, mysql):
     text = str(value).replace("'", "''")
     if mysql:
         text = text.replace("\\", "\\\\")
-    return f"'{text}'"
+    # N'…' keeps non-Latin text intact in SQL Server's nvarchar columns.
+    return f"N'{text}'" if mssql else f"'{text}'"
 
 
-def inserts(table, rows, mysql, quote, batch=500):
+def inserts(table, rows, mysql, quote, batch=500, mssql=False):
     if not rows:
         return ""
     cols = list(rows[0])
@@ -123,8 +125,9 @@ def inserts(table, rows, mysql, quote, batch=500):
     out = []
     for start in range(0, len(rows), batch):
         chunk = rows[start:start + batch]
-        values = ",\n".join("(" + ", ".join(lit(r[c], mysql) for c in cols) + ")" for r in chunk)
-        out.append(head + values + ";\n")
+        values = ",\n".join("(" + ", ".join(lit(r[c], mysql, mssql) for c in cols) + ")" for r in chunk)
+        # sqlcmd runs each GO-separated batch on its own.
+        out.append(head + values + (";\nGO\n" if mssql else ";\n"))
     return "".join(out)
 
 
@@ -216,6 +219,58 @@ create table `Order Items (archive)` (`order` int, `select` text, `Mixed Case` t
 insert into `Order Items (archive)` values (1, 'reserved words', 'Mixed', 'ünïcödé', '🦀🐘🐬'), (2, null, '', 'tab\\there', 'line\\nbreak');
 """
 
+MSSQL_SCHEMA = """
+create database shop;
+GO
+use shop;
+GO
+create table customers (
+  id int primary key, email nvarchar(255) not null unique, name nvarchar(255), city nvarchar(100), [plan] nvarchar(20) not null,
+  active bit not null default 1, created_at datetime2(0) not null);
+create table products (
+  id int primary key, sku varchar(20) not null unique, name nvarchar(255) not null, price decimal(10,2) not null, stock int not null);
+create table orders (
+  id int primary key, customer_id int not null references customers(id), status varchar(10) not null
+    check (status in ('pending','paid','shipped','refunded','cancelled')),
+  total decimal(12,2) not null, note nvarchar(max), created_at datetime2(0) not null);
+create index orders_by_customer on orders (customer_id);
+create table order_items (
+  id int primary key, order_id int not null references orders(id), product_id int not null references products(id),
+  quantity int not null, unit_price decimal(10,2) not null);
+create table events (
+  id bigint primary key, customer_id int, name varchar(40) not null, props nvarchar(max) not null check (isjson(props) = 1),
+  at datetime2(0) not null);
+GO
+create view paid_orders as select * from orders where status = 'paid';
+GO
+create schema analytics;
+GO
+create view analytics.daily_revenue as
+  select cast(created_at as date) as day, count(*) as orders, sum(total) as revenue from dbo.orders group by cast(created_at as date);
+GO
+create table type_zoo (
+  id int identity primary key, tiny tinyint, small smallint, big bigint, exact decimal(38,10), cash money, little_cash smallmoney,
+  flt real, dbl float, flag bit, fixed char(5), label varchar(40), body nvarchar(max), born date, at_time time(7),
+  at_dt datetime, at_dt2 datetime2(7), at_small smalldatetime, at_tz datetimeoffset(7), uid uniqueidentifier,
+  bytes varbinary(max), doc xml);
+insert into type_zoo (tiny, small, big, exact, cash, little_cash, flt, dbl, flag, fixed, label, body, born, at_time, at_dt,
+  at_dt2, at_small, at_tz, uid, bytes, doc) values
+  (255, 32767, 9223372036854775807, 1234567890123456789012345678.0123456789, 922337203685477.5807, 214748.3647, 3.14159,
+   2.718281828459045, 1, 'abc', 'max values', N'A long body. ' + replicate(N'Lorem ipsum dolor sit amet. ', 40),
+   '2024-02-29', '23:59:59.9999999', '2024-12-31 23:59:59.997', '9999-12-31 23:59:59.9999999', '2079-06-06 23:59:00',
+   '2024-12-31 23:59:59.9999999 +05:30', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 0xDEADBEEF,
+   N'<a href="x">xml 🦀</a>'),
+  (0, -32768, -9223372036854775808, -0.0000000001, -922337203685477.5808, -214748.3648, -1e-30, -1.79e308, 0, '', '', N'',
+   '0001-01-01', '00:00:00', '1753-01-01 00:00:00', '0001-01-01 00:00:00', '1900-01-01 00:00:00',
+   '0001-01-01 00:00:00 +00:00', '00000000-0000-0000-0000-000000000000', 0x, N'<e/>'),
+  (null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+create table [Order Items (archive)] ([order] int, [select] nvarchar(50), [Mixed Case] nvarchar(50), [naïve ✓] nvarchar(50),
+  [emoji 🦀] nvarchar(50));
+insert into [Order Items (archive)] values (1, N'reserved words', N'Mixed', N'ünïcödé', N'🦀🐘🐬'), (2, null, N'', N'tab	here', N'line
+break');
+GO
+"""
+
 SQLITE_SCHEMA = """
 create table customers (id integer primary key, email text not null unique, name text, city text, plan text not null,
   active integer not null default 1, created_at text not null);
@@ -250,6 +305,16 @@ def write_sql(path, schema, data, mysql):
             f.write("commit;\nrefresh materialized view analytics.daily_revenue;\nanalyze;\n")
 
 
+def write_mssql(path, data):
+    quote = lambda n: f"[{n}]"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("-- Generated by dev/seed/generate.py. Do not edit.\n")
+        f.write(MSSQL_SCHEMA)
+        for table in ["customers", "products", "orders", "order_items", "events"]:
+            # SQL Server allows at most 1000 rows per VALUES list.
+            f.write(inserts(table, data[table], False, quote, batch=1000, mssql=True))
+
+
 def write_sqlite(path, data):
     path.unlink(missing_ok=True)
     db = sqlite3.connect(path)
@@ -277,6 +342,7 @@ def main():
     data = build(args.size)
     write_sql(out / "postgres.sql", POSTGRES_SCHEMA, data, mysql=False)
     write_sql(out / "mysql.sql", MYSQL_SCHEMA, data, mysql=True)
+    write_mssql(out / "mssql.sql", data)
     write_sqlite(out / "shop.db", data)
     stamp.write_text(args.size)
     rows = sum(len(v) for v in data.values())
