@@ -270,10 +270,18 @@ impl Workspace {
                 port,
                 database,
                 user,
+                ssh,
                 ..
             } => (
                 Engine::from_server(*engine),
-                servers::describe(*engine, host, *port, database, user),
+                match ssh {
+                    Some(tunnel) => format!(
+                        "{} via {}",
+                        servers::describe(*engine, host, *port, database, user),
+                        tunnel.host
+                    ),
+                    None => servers::describe(*engine, host, *port, database, user),
+                },
                 matches!(host.as_str(), "" | "localhost" | "127.0.0.1" | "::1"),
             ),
         };
@@ -350,6 +358,10 @@ impl Workspace {
                                     .into_iter()
                                     .filter(|(label, _)| *label != "LOCAL")
                                     .map(|(label, color)| env_tag(label, color)),
+                            )
+                            .when(
+                                matches!(&saved.target, Target::Server { ssh: Some(_), .. }),
+                                |el| el.child(env_tag("SSH", theme.t2)),
                             )
                             .when(open, |el| el.child(env_tag("OPEN", theme.ok))),
                     )

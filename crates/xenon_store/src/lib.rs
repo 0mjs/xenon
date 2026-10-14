@@ -115,6 +115,16 @@ impl ServerEngine {
     }
 }
 
+/// An SSH server a saved connection tunnels through. The password or key
+/// passphrase, if any, is in the Keychain under [`SavedConnection::ssh_secret_key`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SshTunnel {
+    pub host: String,
+    pub port: Option<u16>,
+    pub user: String,
+    pub key_file: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
     Sqlite {
@@ -127,6 +137,7 @@ pub enum Target {
         database: String,
         user: String,
         ssl: String,
+        ssh: Option<SshTunnel>,
     },
 }
 
@@ -144,6 +155,10 @@ pub struct SavedConnection {
 impl SavedConnection {
     pub fn secret_key(id: i64) -> String {
         format!("connection-{id}")
+    }
+
+    pub fn ssh_secret_key(id: i64) -> String {
+        format!("connection-{id}-ssh")
     }
 }
 
@@ -207,6 +222,23 @@ impl Store {
                  last_used integer not null default 0
              );",
         )?;
+        // Columns added after the table first shipped.
+        let columns: Vec<String> = conn
+            .prepare("select name from pragma_table_info('connections')")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (column, definition) in [
+            ("ssh_host", "text not null default ''"),
+            ("ssh_port", "integer"),
+            ("ssh_user", "text not null default ''"),
+            ("ssh_key", "text not null default ''"),
+        ] {
+            if !columns.iter().any(|c| c == column) {
+                conn.execute_batch(&format!(
+                    "alter table connections add column {column} {definition}"
+                ))?;
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -260,7 +292,8 @@ impl Store {
     pub fn connections(&self) -> Result<Vec<SavedConnection>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "select id, name, kind, host, port, database, user, ssl, path, environment, read_only
+            "select id, name, kind, host, port, database, user, ssl, path, environment, read_only,
+                    ssh_host, ssh_port, ssh_user, ssh_key
              from connections order by last_used desc, id desc",
         )?;
         let rows = stmt
@@ -277,6 +310,19 @@ impl Store {
                         database: row.get(5)?,
                         user: row.get(6)?,
                         ssl: row.get(7)?,
+                        ssh: {
+                            let host: String = row.get(11)?;
+                            (!host.is_empty())
+                                .then(|| -> rusqlite::Result<SshTunnel> {
+                                    Ok(SshTunnel {
+                                        host,
+                                        port: row.get::<_, Option<i64>>(12)?.map(|p| p as u16),
+                                        user: row.get(13)?,
+                                        key_file: row.get(14)?,
+                                    })
+                                })
+                                .transpose()?
+                        },
                     }
                 };
                 Ok(SavedConnection {
@@ -295,8 +341,18 @@ impl Store {
     /// SQLite file that is already saved updates that entry instead of adding one.
     pub fn save_connection(&self, saved: &SavedConnection) -> Result<i64> {
         let conn = self.lock();
-        let (kind, host, port, database, user, ssl, path) = match &saved.target {
-            Target::Sqlite { path } => ("sqlite", "", None, "", "", "prefer", path.as_str()),
+        let no_tunnel = SshTunnel::default();
+        let (kind, host, port, database, user, ssl, path, ssh) = match &saved.target {
+            Target::Sqlite { path } => (
+                "sqlite",
+                "",
+                None,
+                "",
+                "",
+                "prefer",
+                path.as_str(),
+                &no_tunnel,
+            ),
             Target::Server {
                 engine,
                 host,
@@ -304,6 +360,7 @@ impl Store {
                 database,
                 user,
                 ssl,
+                ssh,
             } => (
                 engine.as_str(),
                 host.as_str(),
@@ -312,8 +369,10 @@ impl Store {
                 user.as_str(),
                 ssl.as_str(),
                 "",
+                ssh.as_ref().unwrap_or(&no_tunnel),
             ),
         };
+        let ssh_port = ssh.port.map(i64::from);
         let mut id = saved.id;
         if id == 0 && kind == "sqlite" {
             id = conn
@@ -329,17 +388,21 @@ impl Store {
         if id == 0 {
             conn.execute(
                 "insert into connections
-                     (name, kind, host, port, database, user, ssl, path, environment, read_only, last_used)
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?],
+                     (name, kind, host, port, database, user, ssl, path, environment, read_only, last_used,
+                      ssh_host, ssh_port, ssh_user, ssh_key)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?,
+                        ssh.host, ssh_port, ssh.user, ssh.key_file],
             )?;
             Ok(conn.last_insert_rowid())
         } else {
             conn.execute(
                 "update connections set name = ?1, kind = ?2, host = ?3, port = ?4, database = ?5,
-                     user = ?6, ssl = ?7, path = ?8, environment = ?9, read_only = ?10, last_used = ?11
-                 where id = ?12",
-                params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?, id],
+                     user = ?6, ssl = ?7, path = ?8, environment = ?9, read_only = ?10, last_used = ?11,
+                     ssh_host = ?12, ssh_port = ?13, ssh_user = ?14, ssh_key = ?15
+                 where id = ?16",
+                params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?,
+                        ssh.host, ssh_port, ssh.user, ssh.key_file, id],
             )?;
             Ok(id)
         }
@@ -498,6 +561,7 @@ mod tests {
             id: 0,
             name: "acme prod".into(),
             target: Target::Server {
+                ssh: None,
                 engine: ServerEngine::Postgres,
                 host: "db.acme.dev".into(),
                 port: Some(5432),
@@ -568,5 +632,60 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ssh_tunnels_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        let tunnel = SshTunnel {
+            host: "bastion.example.com".into(),
+            port: Some(2222),
+            user: "ops".into(),
+            key_file: "~/.ssh/id_ed25519".into(),
+        };
+        let id = store
+            .save_connection(&SavedConnection {
+                id: 0,
+                name: "Through the bastion".into(),
+                target: Target::Server {
+                    engine: ServerEngine::Mysql,
+                    host: "10.0.0.5".into(),
+                    port: None,
+                    database: "shop".into(),
+                    user: "app".into(),
+                    ssl: "require".into(),
+                    ssh: Some(tunnel.clone()),
+                },
+                environment: Environment::Production,
+                read_only: true,
+            })
+            .unwrap();
+        let saved = &store.connections().unwrap()[0];
+        assert_eq!(saved.id, id);
+        assert!(
+            matches!(&saved.target, Target::Server { ssh: Some(t), engine: ServerEngine::Mysql, .. } if *t == tunnel)
+        );
+    }
+
+    #[test]
+    fn older_databases_gain_the_ssh_columns() {
+        let dir = std::env::temp_dir().join(format!("xenon-store-migrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.db");
+        let _ = std::fs::remove_file(&path);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "create table connections (id integer primary key, name text not null, kind text not null,
+                   host text not null default '', port integer, database text not null default '',
+                   user text not null default '', ssl text not null default 'prefer', path text not null default '',
+                   environment text not null default 'none', read_only integer not null default 0,
+                   last_used integer not null default 0);
+                 insert into connections (name, kind, host) values ('old', 'postgres', 'db');",
+            )
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        let saved = store.connections().unwrap();
+        assert!(matches!(&saved[0].target, Target::Server { ssh: None, .. }));
     }
 }

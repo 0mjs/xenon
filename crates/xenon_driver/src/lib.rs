@@ -172,6 +172,22 @@ pub struct ConnectOptions {
     pub ssl: SslMode,
     /// Have the server refuse writes.
     pub read_only: bool,
+    /// Reach the server through an SSH tunnel; `host` and `port` are then as
+    /// seen from the SSH server.
+    pub ssh: Option<SshOptions>,
+}
+
+/// An SSH server to tunnel through. Anything left empty comes from
+/// `~/.ssh/config` (so `host` can be an alias there) or ssh's own defaults;
+/// keys come from the agent or the config unless `key_file` is set.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SshOptions {
+    pub host: String,
+    pub port: Option<u16>,
+    pub user: String,
+    pub key_file: String,
+    /// The SSH password, or the key's passphrase. Kept in the Keychain.
+    pub password: String,
 }
 
 pub trait CancelHandle: Send + Sync {
@@ -223,6 +239,11 @@ pub trait Connection: Send + Sync {
         } else {
             self.quote_ident(ident)
         }
+    }
+
+    /// The SSH server this connection tunnels through, if any.
+    fn tunnel(&self) -> Option<String> {
+        None
     }
 
     /// The schema that unqualified names resolve to (Postgres's `current_schema()`,

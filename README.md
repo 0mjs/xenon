@@ -14,6 +14,8 @@ A fast, minimal database client for Postgres, MySQL, MariaDB and SQLite. Native,
 - **Postgres, MySQL, MariaDB and SQLite**, with TLS (from `disable` to `verify-full`), cancel,
   exact numbers, query plans.
 - **Several connections at once**, side by side: every tab says which database it runs on.
+- **SSH tunnels** through a bastion, using your own `ssh`: `~/.ssh/config` aliases, `ProxyJump`, the
+  agent (1Password, Secretive) and `known_hosts` all just work.
 
 Version 0.1, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
 

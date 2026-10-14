@@ -54,6 +54,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
             .unwrap_or_default(),
         ssl: ssl.unwrap_or_default(),
         read_only: false,
+        ssh: None,
     })
 }
 
@@ -542,6 +543,7 @@ mod tests {
                 password: "p@ss".into(),
                 ssl: SslMode::VerifyFull,
                 read_only: false,
+                ssh: None,
             }
         );
         let minimal = parse_url("postgres://localhost").unwrap();

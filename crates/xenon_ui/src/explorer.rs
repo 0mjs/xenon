@@ -126,6 +126,9 @@ impl Workspace {
                     .into_iter()
                     .map(|(label, color)| env_tag(label, color)),
                 )
+                .when(session.conn.tunnel().is_some(), |el| {
+                    el.child(env_tag("SSH", theme.t2))
+                })
                 .child(
                     div()
                         .id(("close-session", id))

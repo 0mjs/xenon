@@ -184,6 +184,10 @@ fn seed_saved(store: &Store, shop: &Path) {
             database: db.into(),
             user: "app".into(),
             ssl: "require".into(),
+            ssh: (name == "Billing").then(|| xenon_store::SshTunnel {
+                host: "bastion.billing.internal".into(),
+                ..Default::default()
+            }),
         },
         environment,
         read_only: false,
@@ -307,6 +311,12 @@ fn snapshots() {
         });
         shot.save(&format!("10-connect-mysql-{suffix}"));
         shot.act(|w, _, cx| {
+            if let Some((dialog, _)) = &w.connect_dialog {
+                dialog.update(cx, |dialog, cx| dialog.show_ssh(cx));
+            }
+        });
+        shot.save(&format!("12-connect-ssh-{suffix}"));
+        shot.act(|w, _, cx| {
             w.connect_dialog = None;
             cx.notify();
         });
@@ -326,6 +336,35 @@ fn snapshots() {
                 w.browse(id, "shop", "type_zoo", window, cx)
             });
             shot.save(&format!("11-mariadb-type-zoo-{suffix}"));
+
+            // And Postgres through the fleet's SSH bastion.
+            shot.act(|w, window, cx| {
+                w.connect_server(
+                    xenon_store::ServerEngine::Postgres,
+                    xenon_driver::ConnectOptions {
+                        host: "postgres".into(),
+                        port: Some(5432),
+                        database: "shop".into(),
+                        user: "xenon".into(),
+                        password: "xenon".into(),
+                        ssh: Some(xenon_driver::SshOptions {
+                            host: "127.0.0.1".into(),
+                            port: Some(52222),
+                            user: "xenon".into(),
+                            password: "xenon".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            });
+            shot.act(|w, window, cx| {
+                let id = w.sessions.last().expect("tunnelled to the fleet").id;
+                w.browse(id, "public", "orders", window, cx)
+            });
+            shot.save(&format!("13-postgres-over-ssh-{suffix}"));
         }
 
         // Closing a connection closes only its tabs; the other stays open.

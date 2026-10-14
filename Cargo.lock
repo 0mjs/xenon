@@ -8272,6 +8272,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenon_ssh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "xenon_driver",
+]
+
+[[package]]
 name = "xenon_store"
 version = "0.1.0"
 dependencies = [
@@ -8298,6 +8306,7 @@ dependencies = [
  "xenon_mysql",
  "xenon_postgres",
  "xenon_sqlite",
+ "xenon_ssh",
  "xenon_store",
 ]
 

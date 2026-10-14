@@ -240,6 +240,7 @@ fn options_from_env(engine: ServerEngine, env: &str, port: u16) -> ConnectOption
         user,
         ssl: SslMode::Prefer,
         read_only: false,
+        ssh: None,
     }
 }
 
@@ -325,6 +326,7 @@ fn parse_pgpass(text: &str, source: &str) -> Vec<Found> {
                         password: password.clone(),
                         ssl: SslMode::Prefer,
                         read_only: false,
+                        ssh: None,
                     },
                 ),
             })

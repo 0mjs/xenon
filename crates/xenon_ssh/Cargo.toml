@@ -1,0 +1,10 @@
+[package]
+name = "xenon_ssh"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+xenon_driver.workspace = true

@@ -65,6 +65,27 @@ services:
       interval: 2s
       retries: 60
 
+  # An SSH bastion for tunnel tests. Databases are reachable from it by service name
+  # (postgres:5432, mysql:3306, mariadb:3306), as a real bastion reaches private hosts.
+  # Log in as xenon with password `xenon`, or with dev/fleet/ssh/id_ed25519 (made by up.sh).
+  bastion:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache openssh \
+         && ssh-keygen -A \
+         && adduser -D -s /bin/sh xenon \
+         && echo 'xenon:xenon' | chpasswd \
+         && { printf '%s\n' 'AllowTcpForwarding yes' 'PasswordAuthentication yes' \
+                'AuthorizedKeysFile /etc/ssh/keys/%u.pub' 'StrictModes no'; \
+              cat /etc/ssh/sshd_config; } > /tmp/sshd_config \
+         && mv /tmp/sshd_config /etc/ssh/sshd_config
+        CMD ["/usr/sbin/sshd", "-D", "-e"]
+    ports: ["52222:22"]
+    volumes:
+      - ./ssh/id_ed25519.pub:/etc/ssh/keys/xenon.pub:ro
+
 volumes:
   postgres:
   mysql:

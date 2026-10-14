@@ -26,8 +26,8 @@ fn database_hint(engine: ServerEngine) -> &'static str {
 pub enum Subject {
     /// A new server connection, starting on this engine.
     New(ServerEngine),
-    /// A saved connection, with its password from the Keychain.
-    Saved(SavedConnection, String),
+    /// A saved connection, with its database and SSH passwords from the Keychain.
+    Saved(SavedConnection, String, String),
     /// A new connection with fields filled in (from discovery or a paste).
     Prefill {
         engine: ServerEngine,
@@ -81,6 +81,13 @@ pub struct ConnectDialog {
     user: Entity<InputState>,
     password: Entity<InputState>,
     ssl: SslMode,
+    /// Tunnel through SSH, with these settings.
+    ssh: bool,
+    ssh_host: Entity<InputState>,
+    ssh_port: Entity<InputState>,
+    ssh_user: Entity<InputState>,
+    ssh_key: Entity<InputState>,
+    ssh_password: Entity<InputState>,
     environment: Environment,
     read_only: bool,
     save: bool,
@@ -127,7 +134,7 @@ impl ConnectDialog {
                 Environment::None,
                 false,
             ),
-            Subject::Saved(saved, password) => {
+            Subject::Saved(saved, password, ssh_password) => {
                 let (path, engine, options) = match &saved.target {
                     Target::Sqlite { path } => (
                         Some(path.clone()),
@@ -141,6 +148,7 @@ impl ConnectDialog {
                         database,
                         user,
                         ssl,
+                        ssh,
                     } => (
                         None,
                         *engine,
@@ -152,6 +160,10 @@ impl ConnectDialog {
                             password: password.clone(),
                             ssl: SslMode::parse(ssl).unwrap_or_default(),
                             read_only: saved.read_only,
+                            ssh: ssh.as_ref().map(|tunnel| xenon_driver::SshOptions {
+                                password: ssh_password.clone(),
+                                ..servers::ssh_options(tunnel)
+                            }),
                         },
                     ),
                 };
@@ -183,16 +195,51 @@ impl ConnectDialog {
                 .default_value(options.password.clone())
         });
 
-        let subscriptions = [&name, &url, &host, &port, &database, &user, &password]
-            .into_iter()
-            .map(|input| {
-                cx.subscribe_in(input, window, |this, _, event: &InputEvent, _, cx| {
-                    if let InputEvent::PressEnter { .. } = event {
-                        this.submit(cx);
-                    }
-                })
+        let tunnel = options.ssh.clone().unwrap_or_default();
+        let ssh_host = field(
+            "bastion.example.com, or a Host from ~/.ssh/config",
+            tunnel.host,
+            window,
+            cx,
+        );
+        let ssh_port = field(
+            "22",
+            tunnel.port.map(|p| p.to_string()).unwrap_or_default(),
+            window,
+            cx,
+        );
+        let ssh_user = field("from ~/.ssh/config", tunnel.user, window, cx);
+        let ssh_key = field("agent or ~/.ssh/config", tunnel.key_file, window, cx);
+        let ssh_password = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("only if needed")
+                .default_value(tunnel.password)
+        });
+
+        let subscriptions = [
+            &name,
+            &url,
+            &host,
+            &port,
+            &database,
+            &user,
+            &password,
+            &ssh_host,
+            &ssh_port,
+            &ssh_user,
+            &ssh_key,
+            &ssh_password,
+        ]
+        .into_iter()
+        .map(|input| {
+            cx.subscribe_in(input, window, |this, _, event: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.submit(cx);
+                }
             })
-            .collect();
+        })
+        .collect();
 
         // Start where typing is needed: the password when a pre-filled form
         // lacks one, the name when editing, otherwise the URL.
@@ -221,8 +268,20 @@ impl ConnectDialog {
             read_only,
             save: true,
             status: Status::Idle,
+            ssh: options.ssh.is_some(),
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            ssh_key,
+            ssh_password,
             _subscriptions: subscriptions,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn show_ssh(&mut self, cx: &mut Context<Self>) {
+        self.ssh = true;
+        cx.notify();
     }
 
     /// Switch the form to another engine: its URL format and defaults.
@@ -293,9 +352,35 @@ impl ConnectDialog {
                     password: self.password.read(cx).value().to_string(),
                     ssl: self.ssl,
                     read_only: false,
+                    ssh: None,
                 }
             };
             options.read_only = self.read_only;
+            options.ssh = if self.ssh {
+                let host = value(&self.ssh_host, cx);
+                if host.is_empty() {
+                    self.set_error("Enter the SSH server to tunnel through.".into(), cx);
+                    return None;
+                }
+                let port = value(&self.ssh_port, cx);
+                let port = if port.is_empty() {
+                    None
+                } else if let Ok(port) = port.parse() {
+                    Some(port)
+                } else {
+                    self.set_error(format!("\"{port}\" is not a valid SSH port.").into(), cx);
+                    return None;
+                };
+                Some(xenon_driver::SshOptions {
+                    host,
+                    port,
+                    user: value(&self.ssh_user, cx),
+                    key_file: value(&self.ssh_key, cx),
+                    password: self.ssh_password.read(cx).value().to_string(),
+                })
+            } else {
+                None
+            };
             if name.is_empty() {
                 name = servers::default_name(self.engine, &options);
             }
@@ -359,6 +444,13 @@ impl Render for ConnectDialog {
         let database_focused = focused(&self.database);
         let user_focused = focused(&self.user);
         let password_focused = focused(&self.password);
+        let ssh_focus = [
+            focused(&self.ssh_host),
+            focused(&self.ssh_port),
+            focused(&self.ssh_user),
+            focused(&self.ssh_key),
+            focused(&self.ssh_password),
+        ];
 
         let ssl_picker = widgets::segmented(
             &theme,
@@ -526,7 +618,75 @@ impl Render for ConnectDialog {
                         .child(labelled("User", &self.user, user_focused))
                         .child(labelled("Password", &self.password, password_focused)),
                 )
-                .child(section(&theme, "SSL mode", ssl_picker));
+                .child(section(&theme, "SSL mode", ssl_picker))
+                .child(
+                    div()
+                        .id("ssh-toggle")
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .cursor_pointer()
+                        .text_color(if self.ssh { theme.text } else { theme.t2 })
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ssh = !this.ssh;
+                            cx.notify();
+                        }))
+                        .child(widgets::checkbox(&theme, self.ssh))
+                        .child("Connect through an SSH tunnel")
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(theme.t3)
+                                .child("for databases behind a bastion"),
+                        ),
+                );
+            if self.ssh {
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.))
+                        .p(px(14.))
+                        .rounded(px(widgets::RADIUS_CARD))
+                        .bg(theme.s1)
+                        .border_1()
+                        .border_color(theme.line_2)
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.))
+                                .child(labelled("SSH host", &self.ssh_host, ssh_focus[0]))
+                                .child(
+                                    labelled("Port", &self.ssh_port, ssh_focus[1])
+                                        .w(px(92.))
+                                        .flex_none(),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.))
+                                .child(labelled("User", &self.ssh_user, ssh_focus[2]))
+                                .child(labelled("Key file", &self.ssh_key, ssh_focus[3])),
+                        )
+                        .child(labelled(
+                            "Password or key passphrase",
+                            &self.ssh_password,
+                            ssh_focus[4],
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .line_height(px(17.))
+                                .text_color(theme.t3)
+                                .child(
+                                    "Anything left empty comes from ~/.ssh/config and your SSH agent. \
+                                     The database host and port above are as seen from the SSH server.",
+                                ),
+                        ),
+                );
+            }
         }
 
         // How Xenon treats the connection, set apart from where it points.
@@ -607,6 +767,12 @@ impl Render for ConnectDialog {
                 .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
             );
 
+        // Scroll the fields when the window is too short for them all.
+        let room = f32::from(window.viewport_size().height) - 160.;
+        let body = body
+            .id("connect-body")
+            .overflow_y_scroll()
+            .max_h(px(room.max(240.)));
         let panel = widgets::overlay_panel(&theme)
             .id("connect-panel")
             .w(px(520.))

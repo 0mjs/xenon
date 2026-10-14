@@ -123,6 +123,7 @@ impl Profile {
                 database,
                 user,
                 ssl,
+                ssh,
             } => RequestTarget::Server(
                 *engine,
                 ConnectOptions {
@@ -130,10 +131,11 @@ impl Profile {
                     port: *port,
                     database: database.clone(),
                     user: user.clone(),
-                    // Filled from the Keychain when connecting.
+                    // Passwords are filled from the Keychain when connecting.
                     password: String::new(),
                     ssl: SslMode::parse(ssl).unwrap_or_default(),
                     read_only: saved.read_only,
+                    ssh: ssh.as_ref().map(servers::ssh_options),
                 },
             ),
         };
@@ -167,11 +169,17 @@ impl Profile {
             RequestTarget::Server(engine, options) => {
                 let mut options = options.clone();
                 options.read_only = self.read_only;
-                if options.password.is_empty()
-                    && let Some(id) = self.saved_id
-                {
-                    options.password =
-                        secrets::get(&SavedConnection::secret_key(id))?.unwrap_or_default();
+                if let Some(id) = self.saved_id {
+                    if options.password.is_empty() {
+                        options.password =
+                            secrets::get(&SavedConnection::secret_key(id))?.unwrap_or_default();
+                    }
+                    if let Some(ssh) = &mut options.ssh
+                        && ssh.password.is_empty()
+                    {
+                        ssh.password =
+                            secrets::get(&SavedConnection::ssh_secret_key(id))?.unwrap_or_default();
+                    }
                 }
                 servers::connect(*engine, &options)?
             }
@@ -192,6 +200,7 @@ impl Profile {
                 database: options.database.clone(),
                 user: options.user.clone(),
                 ssl: options.ssl.as_str().to_string(),
+                ssh: options.ssh.as_ref().map(servers::ssh_tunnel),
             },
         };
         let id = store.save_connection(&SavedConnection {
@@ -201,10 +210,15 @@ impl Profile {
             environment: self.environment,
             read_only: self.read_only,
         })?;
-        if let RequestTarget::Server(_, options) = &self.target
-            && !options.password.is_empty()
-        {
-            secrets::set(&SavedConnection::secret_key(id), &options.password)?;
+        if let RequestTarget::Server(_, options) = &self.target {
+            if !options.password.is_empty() {
+                secrets::set(&SavedConnection::secret_key(id), &options.password)?;
+            }
+            if let Some(ssh) = &options.ssh
+                && !ssh.password.is_empty()
+            {
+                secrets::set(&SavedConnection::ssh_secret_key(id), &ssh.password)?;
+            }
         }
         Ok(Some(id))
     }
@@ -1068,6 +1082,30 @@ impl Workspace {
         self.open_connection_dialog(Subject::New(ServerEngine::Postgres), window, cx);
     }
 
+    /// Connect to a server with settings in hand (no form), without saving it.
+    #[cfg(test)]
+    pub(crate) fn connect_server(
+        &mut self,
+        engine: ServerEngine,
+        options: ConnectOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = servers::default_name(engine, &options);
+        self.open_profile(
+            Profile {
+                saved_id: None,
+                save: false,
+                name,
+                environment: Environment::None,
+                read_only: false,
+                target: RequestTarget::Server(engine, options),
+            },
+            window,
+            cx,
+        );
+    }
+
     /// The connection form, set up for `engine`.
     pub(crate) fn new_server_connection(
         &mut self,
@@ -1084,14 +1122,23 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let password = match &saved.target {
-            Target::Server { .. } => secrets::get(&SavedConnection::secret_key(saved.id))
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
-            Target::Sqlite { .. } => String::new(),
+        let secret = |key: String| secrets::get(&key).ok().flatten().unwrap_or_default();
+        let (password, ssh_password) = match &saved.target {
+            Target::Server { ssh, .. } => (
+                secret(SavedConnection::secret_key(saved.id)),
+                if ssh.is_some() {
+                    secret(SavedConnection::ssh_secret_key(saved.id))
+                } else {
+                    String::new()
+                },
+            ),
+            Target::Sqlite { .. } => (String::new(), String::new()),
         };
-        self.open_connection_dialog(Subject::Saved(saved.clone(), password), window, cx);
+        self.open_connection_dialog(
+            Subject::Saved(saved.clone(), password, ssh_password),
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn forget_saved(
@@ -1172,8 +1219,13 @@ impl Workspace {
                         {
                             this.notice = Some(format!("{err:#}").into());
                         }
-                        if let Err(err) = secrets::delete(&SavedConnection::secret_key(id)) {
-                            eprintln!("xenon: {err:#}");
+                        for key in [
+                            SavedConnection::secret_key(id),
+                            SavedConnection::ssh_secret_key(id),
+                        ] {
+                            if let Err(err) = secrets::delete(&key) {
+                                eprintln!("xenon: {err:#}");
+                            }
                         }
                         this.reload_saved();
                     }
@@ -2937,6 +2989,9 @@ impl Workspace {
                         ),
                 )
                 .child(cell(session.version.clone().into(), theme.t3))
+                .when_some(session.conn.tunnel(), |bar, via| {
+                    bar.child(cell(format!("ssh via {via}").into(), theme.t3))
+                })
                 .child(cell(
                     if session.read_only {
                         "read-only"

@@ -79,6 +79,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         password,
         ssl,
         read_only: false,
+        ssh: None,
     })
 }
 
