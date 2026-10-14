@@ -1,15 +1,16 @@
 //! The connections home: what the main area shows when nothing is connected.
 
 use gpui::{AnyElement, Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, svg};
-use xenon_store::{Environment, SavedConnection, Target};
+use xenon_store::{Environment, SavedConnection, ServerEngine, Target};
 
 use crate::assets;
 use crate::detect::tilde;
 use crate::discover::{Found, FoundTarget};
+use crate::servers;
 use crate::theme::{MONO_FONT, Theme};
 use crate::widgets::{
-    ButtonKind, Engine, RADIUS_CARD, RADIUS_CONTROL, button, connection_tags, engine_badge, env_tag,
-    field_sized,
+    ButtonKind, Engine, RADIUS_CARD, RADIUS_CONTROL, button, connection_tags, engine_badge,
+    env_tag, field_sized,
 };
 use crate::workspace::Workspace;
 use crate::{NewConnection, OpenFile};
@@ -173,17 +174,43 @@ impl Workspace {
         div()
             .flex()
             .gap(px(GAP))
-            .child(tile("tile-postgres", "Postgres", Engine::Postgres, "Server", true).on_click(
-                cx.listener(|this, _, window, cx| this.new_connection(&NewConnection, window, cx)),
-            ))
+            .child(
+                tile(
+                    "tile-postgres",
+                    "Postgres",
+                    Engine::Postgres,
+                    "Server",
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_connection(&NewConnection, window, cx)
+                })),
+            )
             .child(
                 tile("tile-sqlite", "SQLite", Engine::Sqlite, "Open a file", true).on_click(
                     cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx)),
                 ),
             )
-            .child(tile("tile-mysql", "MySQL", Engine::MySql, "Server", false))
+            .child(
+                tile(
+                    "tile-mysql",
+                    "MySQL",
+                    Engine::MySql,
+                    "MySQL and MariaDB",
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_server_connection(ServerEngine::Mysql, window, cx)
+                })),
+            )
             .child(tile("tile-duckdb", "DuckDB", Engine::DuckDb, "File", false))
-            .child(tile("tile-sqlserver", "SQL Server", Engine::SqlServer, "Server", false))
+            .child(tile(
+                "tile-sqlserver",
+                "SQL Server",
+                Engine::SqlServer,
+                "Server",
+                false,
+            ))
             .into_any_element()
     }
 
@@ -237,18 +264,24 @@ impl Workspace {
     ) -> impl IntoElement {
         let (engine, detail, local) = match &saved.target {
             Target::Sqlite { path } => (Engine::Sqlite, tilde(path), true),
-            Target::Postgres {
+            Target::Server {
+                engine,
                 host,
                 port,
                 database,
                 user,
                 ..
             } => (
-                Engine::Postgres,
-                format!("{user}@{host}:{}/{database}", port.unwrap_or(5432)),
+                Engine::from_server(*engine),
+                servers::describe(*engine, host, *port, database, user),
                 matches!(host.as_str(), "" | "localhost" | "127.0.0.1" | "::1"),
             ),
         };
+        let engine = self
+            .sessions
+            .iter()
+            .find(|s| s.saved_id == Some(saved.id))
+            .map_or(engine, |s| s.engine);
         let group = SharedString::from(format!("card-{}", saved.id));
         let open = self.sessions.iter().any(|s| s.saved_id == Some(saved.id));
         let (connect, edit, forget) = (saved.clone(), saved.clone(), saved.clone());
@@ -289,9 +322,9 @@ impl Workspace {
             .border_color(theme.line)
             .cursor_pointer()
             .hover(|s| s.border_color(theme.acc).bg(theme.s3))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.connect_to_saved(&connect, window, cx)
-            }))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.connect_to_saved(&connect, window, cx)),
+            )
             .child(engine_badge(theme, engine, true))
             .child(
                 div()
@@ -369,7 +402,12 @@ impl Workspace {
                 .text_color(theme.t2)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.s3).text_color(theme.text))
-                .child(svg().path(assets::icon(icon)).size(px(13.)).text_color(theme.t3))
+                .child(
+                    svg()
+                        .path(assets::icon(icon))
+                        .size(px(13.))
+                        .text_color(theme.t3),
+                )
                 .child(label)
         };
         div()
@@ -383,7 +421,11 @@ impl Workspace {
                 action(
                     "rediscover",
                     "refresh-cw",
-                    if self.discovering { "Looking…" } else { "Refresh" },
+                    if self.discovering {
+                        "Looking…"
+                    } else {
+                        "Refresh"
+                    },
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.rediscover(cx))),
             )
@@ -442,7 +484,11 @@ impl Workspace {
                                 this.connect_found(&target, window, cx)
                             }))
                     })
-                    .child(engine_badge(theme, Engine::from_name(found.engine()), available))
+                    .child(engine_badge(
+                        theme,
+                        Engine::from_name(found.engine()),
+                        available,
+                    ))
                     .child(
                         div()
                             .flex_1()

@@ -2,12 +2,14 @@
 
 use std::path::PathBuf;
 
+use xenon_store::ServerEngine;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Detected {
-    /// A `postgres://` URL or libpq `key=value` string, ready to connect with.
-    Postgres(String),
+    /// A server URL (or a libpq `key=value` string for Postgres), ready to connect with.
+    Server(ServerEngine, String),
     Sqlite(PathBuf),
-    /// Recognised, but Xenon can't open it yet (e.g. "MySQL").
+    /// Recognised, but Xenon can't open it yet (e.g. "SQL Server").
     NotYet(&'static str),
     Unknown,
 }
@@ -18,7 +20,7 @@ pub enum Detected {
 pub fn detect(text: &str) -> Detected {
     let text = text.trim();
     if is_libpq(&text.to_ascii_lowercase()) {
-        return Detected::Postgres(text.to_string());
+        return Detected::Server(ServerEngine::Postgres, text.to_string());
     }
     let value = env_value(text);
     let lower = value.to_ascii_lowercase();
@@ -26,11 +28,14 @@ pub fn detect(text: &str) -> Detected {
     let scheme = lower.split("://").next().unwrap_or("");
     if lower.contains("://") {
         return match scheme {
-            "postgres" | "postgresql" => Detected::Postgres(value.to_string()),
+            "postgres" | "postgresql" => {
+                Detected::Server(ServerEngine::Postgres, value.to_string())
+            }
             "sqlite" | "sqlite3" => {
                 Detected::Sqlite(expand_home(value.split_once("://").map_or("", |(_, p)| p)))
             }
-            "mysql" | "mariadb" | "mysqlx" => Detected::NotYet("MySQL"),
+            "mysql" | "mariadb" => Detected::Server(ServerEngine::Mysql, value.to_string()),
+            "mysqlx" => Detected::NotYet("MySQL X Protocol"),
             "sqlserver" | "mssql" | "jdbc:sqlserver" => Detected::NotYet("SQL Server"),
             "duckdb" => Detected::NotYet("DuckDB"),
             "mongodb" | "mongodb+srv" => Detected::NotYet("MongoDB"),
@@ -106,21 +111,28 @@ pub fn tilde(path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn pg(url: &str) -> Detected {
+        Detected::Server(ServerEngine::Postgres, url.into())
+    }
+
     #[test]
     fn urls() {
         assert_eq!(
             detect("postgres://u:p@db:5432/app"),
-            Detected::Postgres("postgres://u:p@db:5432/app".into())
+            pg("postgres://u:p@db:5432/app")
         );
         assert_eq!(
             detect("  postgresql://localhost/app?sslmode=require "),
-            Detected::Postgres("postgresql://localhost/app?sslmode=require".into())
+            pg("postgresql://localhost/app?sslmode=require")
         );
         assert_eq!(
             detect("mysql://root@localhost/shop"),
-            Detected::NotYet("MySQL")
+            Detected::Server(ServerEngine::Mysql, "mysql://root@localhost/shop".into())
         );
-        assert_eq!(detect("mariadb://x/y"), Detected::NotYet("MySQL"));
+        assert_eq!(
+            detect("mariadb://x/y"),
+            Detected::Server(ServerEngine::Mysql, "mariadb://x/y".into())
+        );
         assert_eq!(
             detect("sqlserver://host;database=x"),
             Detected::NotYet("SQL Server")
@@ -134,13 +146,13 @@ mod tests {
 
     #[test]
     fn env_lines() {
-        let want = Detected::Postgres("postgres://u:p@db/app".into());
+        let want = pg("postgres://u:p@db/app");
         assert_eq!(detect("DATABASE_URL=postgres://u:p@db/app"), want);
         assert_eq!(detect("DATABASE_URL=\"postgres://u:p@db/app\""), want);
         assert_eq!(detect("export PG_URL='postgres://u:p@db/app'"), want);
         assert_eq!(
             detect("DB_URL=mysql://root@db/shop"),
-            Detected::NotYet("MySQL")
+            Detected::Server(ServerEngine::Mysql, "mysql://root@db/shop".into())
         );
     }
 
@@ -148,7 +160,7 @@ mod tests {
     fn urls_with_equals_in_the_query_are_not_env_lines() {
         assert_eq!(
             detect("postgres://db/app?sslmode=require"),
-            Detected::Postgres("postgres://db/app?sslmode=require".into())
+            pg("postgres://db/app?sslmode=require")
         );
     }
 
@@ -156,7 +168,7 @@ mod tests {
     fn libpq_strings() {
         assert_eq!(
             detect("host=localhost dbname=app user=me"),
-            Detected::Postgres("host=localhost dbname=app user=me".into())
+            pg("host=localhost dbname=app user=me")
         );
         assert_eq!(detect("host=localhost"), Detected::Unknown);
     }

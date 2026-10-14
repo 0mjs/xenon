@@ -98,8 +98,16 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.s3))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_session(id, cx)))
-                .child(div().w(px(12.)).text_color(theme.t3).child(if folded { "▸" } else { "▾" }))
-                .child(engine_logo(session.engine, 13., if active { theme.acc } else { theme.t3 }))
+                .child(div().w(px(12.)).text_color(theme.t3).child(if folded {
+                    "▸"
+                } else {
+                    "▾"
+                }))
+                .child(engine_logo(
+                    session.engine,
+                    13.,
+                    if active { theme.acc } else { theme.t3 },
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -168,7 +176,9 @@ impl Workspace {
                         .cursor_pointer()
                         .text_color(theme.t2)
                         .hover(|s| s.bg(theme.s3))
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_schema(id, &name, cx)))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.toggle_schema(id, &name, cx)),
+                        )
                         .child(div().w(px(12.)).text_color(theme.t3).child(if collapsed {
                             "▸"
                         } else {
@@ -204,11 +214,17 @@ impl Workspace {
     ) -> impl IntoElement {
         let (engine, local) = match &saved.target {
             Target::Sqlite { .. } => (Engine::Sqlite, true),
-            Target::Postgres { host, .. } => (
-                Engine::Postgres,
+            Target::Server { engine, host, .. } => (
+                Engine::from_server(*engine),
                 matches!(host.as_str(), "" | "localhost" | "127.0.0.1" | "::1"),
             ),
         };
+        // Once open, the logo can say MariaDB rather than MySQL.
+        let engine = self
+            .sessions
+            .iter()
+            .find(|s| s.saved_id == Some(saved.id))
+            .map_or(engine, |s| s.engine);
         let group = SharedString::from(format!("saved-{}", saved.id));
         let (connect, edit, forget) = (saved.clone(), saved.clone(), saved.clone());
 
@@ -221,16 +237,14 @@ impl Workspace {
             .when(!active, |el| {
                 el.hover(|s| s.bg(theme.s3).text_color(theme.text))
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.connect_to_saved(&connect, window, cx)
-            }))
-            .child(
-                div()
-                    .w(px(18.))
-                    .flex()
-                    .flex_none()
-                    .child(engine_logo(engine, 13., if open { theme.acc } else { theme.t3 })),
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.connect_to_saved(&connect, window, cx)),
             )
+            .child(div().w(px(18.)).flex().flex_none().child(engine_logo(
+                engine,
+                13.,
+                if open { theme.acc } else { theme.t3 },
+            )))
             .child(div().flex_1().truncate().child(saved.name.clone()))
             .children(
                 connection_tags(theme, saved.environment, saved.read_only, local)

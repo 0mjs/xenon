@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use xenon_postgres::{ConnectOptions, SslMode};
+use xenon_driver::{ConnectOptions, SslMode};
+use xenon_store::ServerEngine;
 
 use crate::detect::{Detected, detect};
+use crate::servers;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FoundTarget {
-    Postgres(ConnectOptions),
+    Server(ServerEngine, ConnectOptions),
     /// An engine Xenon can't open yet.
     NotYet(&'static str),
 }
@@ -30,7 +32,7 @@ pub struct Found {
 impl Found {
     pub fn engine(&self) -> &'static str {
         match &self.target {
-            FoundTarget::Postgres(_) => "Postgres",
+            FoundTarget::Server(engine, _) => engine.label(),
             FoundTarget::NotYet(engine) => engine,
         }
     }
@@ -38,24 +40,7 @@ impl Found {
     /// `user@host:port/db`, without the password.
     pub fn detail(&self) -> String {
         match &self.target {
-            FoundTarget::Postgres(o) => {
-                let host = if o.host.is_empty() {
-                    "localhost"
-                } else {
-                    &o.host
-                };
-                let user = if o.user.is_empty() {
-                    "postgres"
-                } else {
-                    &o.user
-                };
-                let db = if o.database.is_empty() {
-                    "postgres"
-                } else {
-                    &o.database
-                };
-                format!("{user}@{host}:{}/{db}", o.port.unwrap_or(5432))
-            }
+            FoundTarget::Server(engine, o) => servers::describe_options(*engine, o),
             FoundTarget::NotYet(_) => self.name.clone(),
         }
     }
@@ -63,7 +48,7 @@ impl Found {
     /// True when it has everything needed to connect; otherwise the
     /// connection form opens pre-filled.
     pub fn ready(&self) -> bool {
-        matches!(&self.target, FoundTarget::Postgres(o) if !o.password.is_empty())
+        matches!(&self.target, FoundTarget::Server(_, o) if !o.password.is_empty())
     }
 
     fn key(&self) -> String {
@@ -80,7 +65,7 @@ pub fn discover() -> Vec<Found> {
     let taken: HashSet<u16> = found
         .iter()
         .filter_map(|f| match &f.target {
-            FoundTarget::Postgres(o) if is_local(&o.host) => o.port,
+            FoundTarget::Server(_, o) if is_local(&o.host) => o.port,
             _ => None,
         })
         .collect();
@@ -149,7 +134,7 @@ fn docker() -> Vec<Found> {
             continue;
         };
         let source = format!("Docker · {name}");
-        if engine == "Postgres" {
+        if let Some(server) = ServerEngine::ALL.into_iter().find(|e| e.label() == engine) {
             let env = run(
                 "docker",
                 &[
@@ -164,7 +149,7 @@ fn docker() -> Vec<Found> {
             found.push(Found {
                 source,
                 name: name.to_string(),
-                target: FoundTarget::Postgres(postgres_from_env(&env, port)),
+                target: FoundTarget::Server(server, options_from_env(server, &env, port)),
             });
         } else {
             found.push(Found {
@@ -219,18 +204,39 @@ fn published_port(ports: &str, container_port: u16) -> Option<u16> {
     })
 }
 
-fn postgres_from_env(env: &str, port: u16) -> ConnectOptions {
+/// Credentials from the official images' environment variables.
+fn options_from_env(engine: ServerEngine, env: &str, port: u16) -> ConnectOptions {
     let var = |key: &str| {
         env.lines()
             .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .filter(|value| !value.is_empty())
             .map(str::to_string)
     };
-    let user = var("POSTGRES_USER").unwrap_or_else(|| "postgres".into());
+    let (user, password, database) = match engine {
+        ServerEngine::Postgres => {
+            let user = var("POSTGRES_USER").unwrap_or_else(|| "postgres".into());
+            let database = var("POSTGRES_DB").unwrap_or_else(|| user.clone());
+            (user, var("POSTGRES_PASSWORD"), database)
+        }
+        // MySQL and MariaDB images: an app user if one was made, else root.
+        ServerEngine::Mysql => {
+            let pick = |mysql: &str, mariadb: &str| var(mysql).or_else(|| var(mariadb));
+            let database = pick("MYSQL_DATABASE", "MARIADB_DATABASE").unwrap_or_default();
+            match pick("MYSQL_USER", "MARIADB_USER") {
+                Some(user) => (user, pick("MYSQL_PASSWORD", "MARIADB_PASSWORD"), database),
+                None => (
+                    "root".into(),
+                    pick("MYSQL_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD"),
+                    database,
+                ),
+            }
+        }
+    };
     ConnectOptions {
         host: "localhost".into(),
         port: Some(port),
-        database: var("POSTGRES_DB").unwrap_or_else(|| user.clone()),
-        password: var("POSTGRES_PASSWORD").unwrap_or_default(),
+        database,
+        password: password.unwrap_or_default(),
         user,
         ssl: SslMode::Prefer,
         read_only: false,
@@ -261,14 +267,16 @@ fn listening_ports(taken: &HashSet<u16>) -> Vec<Found> {
         .map(|(port, engine)| Found {
             source: format!("Listening on localhost:{port}"),
             name: format!("localhost:{port}"),
-            target: if *engine == "Postgres" {
-                FoundTarget::Postgres(ConnectOptions {
-                    host: "localhost".into(),
-                    port: Some(*port),
-                    ..Default::default()
-                })
-            } else {
-                FoundTarget::NotYet(engine)
+            target: match ServerEngine::ALL.into_iter().find(|e| e.label() == *engine) {
+                Some(server) => FoundTarget::Server(
+                    server,
+                    ConnectOptions {
+                        host: "localhost".into(),
+                        port: Some(*port),
+                        ..Default::default()
+                    },
+                ),
+                None => FoundTarget::NotYet(engine),
             },
         })
         .collect()
@@ -303,19 +311,22 @@ fn parse_pgpass(text: &str, source: &str) -> Vec<Found> {
             Some(Found {
                 source: source.to_string(),
                 name: format!("{database}@{host}"),
-                target: FoundTarget::Postgres(ConnectOptions {
-                    host: host.clone(),
-                    port: port.parse().ok(),
-                    database,
-                    user: if user == "*" {
-                        String::new()
-                    } else {
-                        user.clone()
+                target: FoundTarget::Server(
+                    ServerEngine::Postgres,
+                    ConnectOptions {
+                        host: host.clone(),
+                        port: port.parse().ok(),
+                        database,
+                        user: if user == "*" {
+                            String::new()
+                        } else {
+                            user.clone()
+                        },
+                        password: password.clone(),
+                        ssl: SslMode::Prefer,
+                        read_only: false,
                     },
-                    password: password.clone(),
-                    ssl: SslMode::Prefer,
-                    read_only: false,
-                }),
+                ),
             })
         })
         .collect()
@@ -355,7 +366,7 @@ fn parse_pg_services(text: &str, source: &str) -> Vec<Found> {
             found.push(Found {
                 source: format!("{source} [{name}]"),
                 name,
-                target: FoundTarget::Postgres(options),
+                target: FoundTarget::Server(ServerEngine::Postgres, options),
             });
         }
     };
@@ -444,8 +455,8 @@ fn parse_env_file(text: &str, source: &str) -> Vec<Found> {
                 .trim()
                 .to_string();
             let target = match detect(line) {
-                Detected::Postgres(url) => {
-                    FoundTarget::Postgres(ConnectOptions::from_url(&url).ok()?)
+                Detected::Server(engine, url) => {
+                    FoundTarget::Server(engine, servers::parse_url(engine, &url).ok()?)
                 }
                 // Caches and document stores aren't what a SQL client is looking for.
                 Detected::NotYet("Redis" | "MongoDB") => return None,
@@ -490,7 +501,7 @@ mod tests {
     fn postgres_container_env() {
         let env =
             "PATH=/usr/bin\nPOSTGRES_USER=app\nPOSTGRES_PASSWORD=secret\nPOSTGRES_DB=billing\n";
-        let options = postgres_from_env(env, 5433);
+        let options = options_from_env(ServerEngine::Postgres, env, 5433);
         assert_eq!(
             (
                 options.user.as_str(),
@@ -500,10 +511,36 @@ mod tests {
             ),
             ("app", "secret", "billing", Some(5433))
         );
-        let defaults = postgres_from_env("POSTGRES_PASSWORD=pw", 5432);
+        let defaults = options_from_env(ServerEngine::Postgres, "POSTGRES_PASSWORD=pw", 5432);
         assert_eq!(
             (defaults.user.as_str(), defaults.database.as_str()),
             ("postgres", "postgres")
+        );
+    }
+
+    #[test]
+    fn mysql_container_env() {
+        let app = options_from_env(
+            ServerEngine::Mysql,
+            "MYSQL_ROOT_PASSWORD=root\nMYSQL_USER=app\nMYSQL_PASSWORD=pw\nMYSQL_DATABASE=shop\n",
+            53306,
+        );
+        assert_eq!(
+            (
+                app.user.as_str(),
+                app.password.as_str(),
+                app.database.as_str()
+            ),
+            ("app", "pw", "shop")
+        );
+        let root = options_from_env(ServerEngine::Mysql, "MARIADB_ROOT_PASSWORD=r00t\n", 3306);
+        assert_eq!(
+            (
+                root.user.as_str(),
+                root.password.as_str(),
+                root.database.as_str()
+            ),
+            ("root", "r00t", "")
         );
     }
 
@@ -514,7 +551,7 @@ mod tests {
             "~/.pgpass",
         );
         assert_eq!(found.len(), 2);
-        let FoundTarget::Postgres(first) = &found[0].target else {
+        let FoundTarget::Server(_, first) = &found[0].target else {
             panic!()
         };
         assert_eq!(
@@ -545,7 +582,11 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].name, "DATABASE_URL");
         assert!(found[0].ready());
-        assert_eq!(found[1].target, FoundTarget::NotYet("MySQL"));
+        assert!(matches!(
+            &found[1].target,
+            FoundTarget::Server(ServerEngine::Mysql, _)
+        ));
+        assert_eq!(found[1].detail(), "root@db:3306/stats");
     }
 
     #[test]

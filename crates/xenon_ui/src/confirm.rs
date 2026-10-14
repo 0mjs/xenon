@@ -98,7 +98,10 @@ impl Render for ConfirmDialog {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(gpui::Rgba { a: 0.14, ..theme.err })
+                    .bg(gpui::Rgba {
+                        a: 0.14,
+                        ..theme.err
+                    })
                     .child(
                         gpui::svg()
                             .path(crate::assets::icon("triangle-alert"))
@@ -197,8 +200,14 @@ impl Render for ConfirmDialog {
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(ConfirmEvent::Cancel))),
             )
             .child(
-                widgets::button(&theme, "confirm-run", "Run anyway", ButtonKind::Danger, unlocked)
-                    .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
+                widgets::button(
+                    &theme,
+                    "confirm-run",
+                    "Run anyway",
+                    ButtonKind::Danger,
+                    unlocked,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
             );
 
         let panel = widgets::overlay_panel(&theme)

@@ -120,6 +120,60 @@ pub struct Schema {
     pub objects: Vec<SchemaObject>,
 }
 
+/// How a server connection uses TLS. The names follow libpq's `sslmode`; other
+/// engines map them onto their own settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SslMode {
+    Disable,
+    /// Use TLS when the server offers it; don't verify the certificate.
+    #[default]
+    Prefer,
+    /// Always use TLS; don't verify the certificate.
+    Require,
+    /// Always use TLS; verify the certificate chain but not the host name.
+    VerifyCa,
+    /// Always use TLS; verify the certificate chain and the host name.
+    VerifyFull,
+}
+
+impl SslMode {
+    pub const ALL: [SslMode; 5] = [
+        SslMode::Disable,
+        SslMode::Prefer,
+        SslMode::Require,
+        SslMode::VerifyCa,
+        SslMode::VerifyFull,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SslMode::Disable => "disable",
+            SslMode::Prefer => "prefer",
+            SslMode::Require => "require",
+            SslMode::VerifyCa => "verify-ca",
+            SslMode::VerifyFull => "verify-full",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        SslMode::ALL.into_iter().find(|mode| mode.as_str() == value)
+    }
+}
+
+/// Settings for a server connection, as entered in a form or parsed from a URL.
+/// Empty fields mean the engine's default (e.g. `localhost`, its usual port).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConnectOptions {
+    pub host: String,
+    pub port: Option<u16>,
+    pub database: String,
+    pub user: String,
+    pub password: String,
+    pub ssl: SslMode,
+    /// Have the server refuse writes.
+    pub read_only: bool,
+}
+
 pub trait CancelHandle: Send + Sync {
     /// Ask the running query to stop. Harmless when nothing is running.
     fn cancel(&self);

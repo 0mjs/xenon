@@ -165,7 +165,9 @@ impl Render for Palette {
                         .gap(px(10.))
                         .rounded(px(RADIUS_CONTROL))
                         .cursor_pointer()
-                        .when(active, |el| el.bg(list_theme.acc_wash).text_color(list_theme.text))
+                        .when(active, |el| {
+                            el.bg(list_theme.acc_wash).text_color(list_theme.text)
+                        })
                         .when(!active, |el| {
                             el.text_color(list_theme.t2).hover(|s| s.bg(list_theme.s3))
                         })
@@ -177,7 +179,11 @@ impl Render for Palette {
                                 .path(crate::assets::icon(icon))
                                 .size(px(15.))
                                 .flex_none()
-                                .text_color(if active { list_theme.acc } else { list_theme.t3 }),
+                                .text_color(if active {
+                                    list_theme.acc
+                                } else {
+                                    list_theme.t3
+                                }),
                         )
                         .child(div().flex_none().text_size(px(13.)).child(label))
                         .when_some(detail, |el, detail| {

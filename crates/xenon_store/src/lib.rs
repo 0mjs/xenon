@@ -68,12 +68,60 @@ impl Environment {
     }
 }
 
+/// Database servers Xenon can connect to over the network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ServerEngine {
+    Postgres,
+    /// MySQL and MariaDB (and wire-compatible servers such as TiDB).
+    Mysql,
+}
+
+impl ServerEngine {
+    pub const ALL: [ServerEngine; 2] = [ServerEngine::Postgres, ServerEngine::Mysql];
+
+    /// The value stored in the `kind` column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServerEngine::Postgres => "postgres",
+            ServerEngine::Mysql => "mysql",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        ServerEngine::ALL
+            .into_iter()
+            .find(|engine| engine.as_str() == value)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ServerEngine::Postgres => "Postgres",
+            ServerEngine::Mysql => "MySQL",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            ServerEngine::Postgres => 5432,
+            ServerEngine::Mysql => 3306,
+        }
+    }
+
+    pub fn default_user(self) -> &'static str {
+        match self {
+            ServerEngine::Postgres => "postgres",
+            ServerEngine::Mysql => "root",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
     Sqlite {
         path: String,
     },
-    Postgres {
+    Server {
+        engine: ServerEngine,
         host: String,
         port: Option<u16>,
         database: String,
@@ -221,7 +269,9 @@ impl Store {
                 let target = if kind == "sqlite" {
                     Target::Sqlite { path: row.get(8)? }
                 } else {
-                    Target::Postgres {
+                    Target::Server {
+                        // Unknown kinds come from a newer Xenon; Postgres was the first.
+                        engine: ServerEngine::parse(&kind).unwrap_or(ServerEngine::Postgres),
                         host: row.get(3)?,
                         port: row.get::<_, Option<i64>>(4)?.map(|p| p as u16),
                         database: row.get(5)?,
@@ -247,14 +297,15 @@ impl Store {
         let conn = self.lock();
         let (kind, host, port, database, user, ssl, path) = match &saved.target {
             Target::Sqlite { path } => ("sqlite", "", None, "", "", "prefer", path.as_str()),
-            Target::Postgres {
+            Target::Server {
+                engine,
                 host,
                 port,
                 database,
                 user,
                 ssl,
             } => (
-                "postgres",
+                engine.as_str(),
                 host.as_str(),
                 port.map(i64::from),
                 database.as_str(),
@@ -446,7 +497,8 @@ mod tests {
         let pg = SavedConnection {
             id: 0,
             name: "acme prod".into(),
-            target: Target::Postgres {
+            target: Target::Server {
+                engine: ServerEngine::Postgres,
                 host: "db.acme.dev".into(),
                 port: Some(5432),
                 database: "acme".into(),

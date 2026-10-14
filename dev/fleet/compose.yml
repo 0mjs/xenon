@@ -1,0 +1,71 @@
+# Xenon's test fleet: one of every engine Xenon supports, on ports that won't clash with
+# databases you already run. Start only what you need:
+#
+#   dev/fleet/up.sh postgres mysql mariadb
+#   dev/fleet/down.sh            # stop everything (data is kept in named volumes)
+#
+# Every server is seeded from dev/seed on first start. Credentials are throwaway:
+# user `xenon`, password `xenon`, database `shop`.
+name: xenon-fleet
+
+services:
+  postgres:
+    # Debian-based for its self-signed "snakeoil" certificate: TLS on, like a real server.
+    image: postgres:17
+    ports: ["55432:5432"]
+    command:
+      - "-c"
+      - "ssl=on"
+      - "-c"
+      - "ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem"
+      - "-c"
+      - "ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key"
+    environment:
+      POSTGRES_USER: xenon
+      POSTGRES_PASSWORD: xenon
+      POSTGRES_DB: shop
+    volumes:
+      - postgres:/var/lib/postgresql/data
+      - ../seed/out/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "xenon", "-d", "shop"]
+      interval: 2s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    ports: ["53306:3306"]
+    environment:
+      MYSQL_ROOT_PASSWORD: xenon
+      MYSQL_USER: xenon
+      MYSQL_PASSWORD: xenon
+      MYSQL_DATABASE: shop
+    command: ["--max-connections=50", "--performance-schema=OFF"]
+    volumes:
+      - mysql:/var/lib/mysql
+      - ../seed/out/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uxenon", "-pxenon"]
+      interval: 2s
+      retries: 60
+
+  mariadb:
+    image: mariadb:11.4
+    ports: ["53307:3306"]
+    environment:
+      MARIADB_ROOT_PASSWORD: xenon
+      MARIADB_USER: xenon
+      MARIADB_PASSWORD: xenon
+      MARIADB_DATABASE: shop
+    volumes:
+      - mariadb:/var/lib/mysql
+      - ../seed/out/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      retries: 60
+
+volumes:
+  postgres:
+  mysql:
+  mariadb:

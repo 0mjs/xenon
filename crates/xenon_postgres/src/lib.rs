@@ -19,96 +19,42 @@ use xenon_driver::{
     CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
     QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
+pub use xenon_driver::{ConnectOptions, SslMode};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SslMode {
-    Disable,
-    /// Use TLS when the server offers it; don't verify the certificate.
-    #[default]
-    Prefer,
-    /// Always use TLS; don't verify the certificate.
-    Require,
-    /// Always use TLS; verify the certificate chain but not the host name.
-    VerifyCa,
-    /// Always use TLS; verify the certificate chain and the host name.
-    VerifyFull,
-}
-
-impl SslMode {
-    pub const ALL: [SslMode; 5] = [
-        SslMode::Disable,
-        SslMode::Prefer,
-        SslMode::Require,
-        SslMode::VerifyCa,
-        SslMode::VerifyFull,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SslMode::Disable => "disable",
-            SslMode::Prefer => "prefer",
-            SslMode::Require => "require",
-            SslMode::VerifyCa => "verify-ca",
-            SslMode::VerifyFull => "verify-full",
-        }
-    }
-
-    fn wire_mode(self) -> tokio_postgres::config::SslMode {
-        use tokio_postgres::config::SslMode as Wire;
-        match self {
-            SslMode::Disable => Wire::Disable,
-            SslMode::Prefer => Wire::Prefer,
-            SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => Wire::Require,
-        }
+fn wire_mode(ssl: SslMode) -> tokio_postgres::config::SslMode {
+    use tokio_postgres::config::SslMode as Wire;
+    match ssl {
+        SslMode::Disable => Wire::Disable,
+        SslMode::Prefer => Wire::Prefer,
+        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => Wire::Require,
     }
 }
 
-/// Connection settings entered in a form.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ConnectOptions {
-    pub host: String,
-    pub port: Option<u16>,
-    pub database: String,
-    pub user: String,
-    pub password: String,
-    pub ssl: SslMode,
-    /// Start every transaction read-only, so the server refuses writes.
-    pub read_only: bool,
-}
-
-impl ConnectOptions {
-    /// Split a `postgres://` URL or libpq `key=value` string into fields, so it
-    /// can be saved (with the password kept apart, in the Keychain).
-    pub fn from_url(url: &str) -> Result<Self> {
-        let (url, ssl) = extract_sslmode(url);
-        let config: Config = url.parse().context("invalid connection string")?;
-        let host = match config.get_hosts().first() {
-            Some(tokio_postgres::config::Host::Tcp(host)) => host.clone(),
-            #[cfg(unix)]
-            Some(tokio_postgres::config::Host::Unix(path)) => path.display().to_string(),
-            None => String::new(),
-        };
-        Ok(Self {
-            host,
-            port: config.get_ports().first().copied(),
-            database: config.get_dbname().unwrap_or_default().to_string(),
-            user: config.get_user().unwrap_or_default().to_string(),
-            password: config
-                .get_password()
-                .map(|p| String::from_utf8_lossy(p).into_owned())
-                .unwrap_or_default(),
-            ssl: ssl.unwrap_or_default(),
-            read_only: false,
-        })
-    }
-}
-
-impl SslMode {
-    pub fn parse(value: &str) -> Option<Self> {
-        SslMode::ALL.into_iter().find(|mode| mode.as_str() == value)
-    }
+/// Split a `postgres://` URL or libpq `key=value` string into fields, so it
+/// can be saved (with the password kept apart, in the Keychain).
+pub fn parse_url(url: &str) -> Result<ConnectOptions> {
+    let (url, ssl) = extract_sslmode(url);
+    let config: Config = url.parse().context("invalid connection string")?;
+    let host = match config.get_hosts().first() {
+        Some(tokio_postgres::config::Host::Tcp(host)) => host.clone(),
+        #[cfg(unix)]
+        Some(tokio_postgres::config::Host::Unix(path)) => path.display().to_string(),
+        None => String::new(),
+    };
+    Ok(ConnectOptions {
+        host,
+        port: config.get_ports().first().copied(),
+        database: config.get_dbname().unwrap_or_default().to_string(),
+        user: config.get_user().unwrap_or_default().to_string(),
+        password: config
+            .get_password()
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .unwrap_or_default(),
+        ssl: ssl.unwrap_or_default(),
+        read_only: false,
+    })
 }
 
 pub struct PostgresConnection {
@@ -156,7 +102,7 @@ impl PostgresConnection {
         let (url, ssl) = extract_sslmode(url);
         let mut config: Config = url.parse().context("invalid connection string")?;
         if let Some(ssl) = ssl {
-            config.ssl_mode(ssl.wire_mode());
+            config.ssl_mode(wire_mode(ssl));
         }
         let ssl = ssl.unwrap_or(SslMode::Prefer);
         Self::connect(config, ssl)
@@ -176,7 +122,7 @@ impl PostgresConnection {
             } else {
                 &options.user
             })
-            .ssl_mode(options.ssl.wire_mode());
+            .ssl_mode(wire_mode(options.ssl));
         if !options.database.is_empty() {
             config.dbname(&options.database);
         }
@@ -567,10 +513,8 @@ mod tests {
 
     #[test]
     fn options_from_url() {
-        let options = ConnectOptions::from_url(
-            "postgres://me:p%40ss@db.example.com:6543/shop?sslmode=verify-full",
-        )
-        .unwrap();
+        let options =
+            parse_url("postgres://me:p%40ss@db.example.com:6543/shop?sslmode=verify-full").unwrap();
         assert_eq!(
             options,
             ConnectOptions {
@@ -583,12 +527,12 @@ mod tests {
                 read_only: false,
             }
         );
-        let minimal = ConnectOptions::from_url("postgres://localhost").unwrap();
+        let minimal = parse_url("postgres://localhost").unwrap();
         assert_eq!(
             (minimal.host.as_str(), minimal.port, minimal.ssl),
             ("localhost", Some(5432), SslMode::Prefer)
         );
-        assert!(ConnectOptions::from_url("not a url ::").is_err());
+        assert!(parse_url("not a url ::").is_err());
     }
 
     #[test]
@@ -598,7 +542,7 @@ mod tests {
         };
         let options = ConnectOptions {
             read_only: true,
-            ..ConnectOptions::from_url(&url).unwrap()
+            ..parse_url(&url).unwrap()
         };
         let db = PostgresConnection::connect_options(&options).unwrap();
         assert!(db.execute("select 1", 10).is_ok());

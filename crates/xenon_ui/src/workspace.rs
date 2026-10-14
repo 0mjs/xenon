@@ -18,10 +18,11 @@ use xenon_driver::sql::{Risk, SortDirection, assess, browse_table, statement_at}
 use xenon_driver::{
     CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema,
 };
-use xenon_postgres::{ConnectOptions, PostgresConnection, SslMode};
+use xenon_driver::{ConnectOptions, SslMode};
 use xenon_sqlite::SqliteConnection;
 use xenon_store::{
-    Environment, HistoryEntry, NewHistoryEntry, SavedConnection, Store, Target, secrets,
+    Environment, HistoryEntry, NewHistoryEntry, SavedConnection, ServerEngine, Store, Target,
+    secrets,
 };
 
 use crate::assets;
@@ -31,17 +32,19 @@ use crate::detect::{Detected, detect};
 use crate::discover::{Found, FoundTarget};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
+use crate::servers;
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
-    centered_hint, connection_tags, empty_hint, env_tag, field, format_duration, group_digits, kbd,
-    kbd_on_accent, panel_label, pretty_json, ButtonKind, Engine, RADIUS_CONTROL, self as widgets,
+    self as widgets, ButtonKind, Engine, RADIUS_CONTROL, centered_hint, connection_tags,
+    empty_hint, env_tag, field, format_duration, group_digits, kbd, kbd_on_accent, panel_label,
+    pretty_json,
 };
 use crate::{
     CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown,
     ExtendLeft, ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp,
     NewConnection, NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery,
-    SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme,
-    UseLightTheme, UseSystemTheme,
+    SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector,
+    UseDarkTheme, UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -66,15 +69,15 @@ const BROWSE_LIMIT: usize = 1_000;
 /// What to open on launch, from the command line.
 pub enum Launch {
     Sqlite(PathBuf),
-    Postgres(String),
+    /// A server URL, e.g. `postgres://…` or `mysql://…`.
+    Url(ServerEngine, String),
 }
 
 impl Launch {
     pub fn from_arg(arg: String) -> Self {
-        if arg.starts_with("postgres://") || arg.starts_with("postgresql://") {
-            Launch::Postgres(arg)
-        } else {
-            Launch::Sqlite(arg.into())
+        match detect(&arg) {
+            Detected::Server(engine, url) => Launch::Url(engine, url),
+            _ => Launch::Sqlite(arg.into()),
         }
     }
 }
@@ -113,22 +116,26 @@ impl Profile {
     fn from_saved(saved: &SavedConnection) -> Self {
         let target = match &saved.target {
             Target::Sqlite { path } => RequestTarget::Sqlite(path.clone()),
-            Target::Postgres {
+            Target::Server {
+                engine,
                 host,
                 port,
                 database,
                 user,
                 ssl,
-            } => RequestTarget::Postgres(ConnectOptions {
-                host: host.clone(),
-                port: *port,
-                database: database.clone(),
-                user: user.clone(),
-                // Filled from the Keychain when connecting.
-                password: String::new(),
-                ssl: SslMode::parse(ssl).unwrap_or_default(),
-                read_only: saved.read_only,
-            }),
+            } => RequestTarget::Server(
+                *engine,
+                ConnectOptions {
+                    host: host.clone(),
+                    port: *port,
+                    database: database.clone(),
+                    user: user.clone(),
+                    // Filled from the Keychain when connecting.
+                    password: String::new(),
+                    ssl: SslMode::parse(ssl).unwrap_or_default(),
+                    read_only: saved.read_only,
+                },
+            ),
         };
         Self {
             saved_id: Some(saved.id),
@@ -157,7 +164,7 @@ impl Profile {
             RequestTarget::Sqlite(path) => {
                 Arc::new(SqliteConnection::open(Path::new(path), self.read_only)?)
             }
-            RequestTarget::Postgres(options) => {
+            RequestTarget::Server(engine, options) => {
                 let mut options = options.clone();
                 options.read_only = self.read_only;
                 if options.password.is_empty()
@@ -166,7 +173,7 @@ impl Profile {
                     options.password =
                         secrets::get(&SavedConnection::secret_key(id))?.unwrap_or_default();
                 }
-                Arc::new(PostgresConnection::connect_options(&options)?)
+                servers::connect(*engine, &options)?
             }
         })
     }
@@ -178,7 +185,8 @@ impl Profile {
         };
         let target = match &self.target {
             RequestTarget::Sqlite(path) => Target::Sqlite { path: path.clone() },
-            RequestTarget::Postgres(options) => Target::Postgres {
+            RequestTarget::Server(engine, options) => Target::Server {
+                engine: *engine,
                 host: options.host.clone(),
                 port: options.port,
                 database: options.database.clone(),
@@ -193,7 +201,7 @@ impl Profile {
             environment: self.environment,
             read_only: self.read_only,
         })?;
-        if let RequestTarget::Postgres(options) = &self.target
+        if let RequestTarget::Server(_, options) = &self.target
             && !options.password.is_empty()
         {
             secrets::set(&SavedConnection::secret_key(id), &options.password)?;
@@ -217,31 +225,17 @@ fn is_local_host(host: &str) -> bool {
 /// What the paste field shows under itself as you type.
 fn paste_note(text: &str) -> (SharedString, bool) {
     let note = match detect(text) {
-        Detected::Postgres(url) => match ConnectOptions::from_url(&url) {
+        Detected::Server(engine, url) => match servers::parse_url(engine, &url) {
             Ok(o) => format!(
-                "Postgres · {}@{}:{}/{} · press Enter",
-                if o.user.is_empty() {
-                    "postgres"
-                } else {
-                    &o.user
-                },
-                if o.host.is_empty() {
-                    "localhost"
-                } else {
-                    &o.host
-                },
-                o.port.unwrap_or(5432),
-                if o.database.is_empty() {
-                    "postgres"
-                } else {
-                    &o.database
-                },
+                "{} · {} · press Enter",
+                engine.label(),
+                servers::describe_options(engine, &o)
             ),
-            Err(_) => "Postgres · incomplete URL".into(),
+            Err(_) => format!("{} · incomplete URL", engine.label()),
         },
         Detected::Sqlite(path) => format!("SQLite file · {} · press Enter", path.display()),
         Detected::NotYet(engine) => {
-            return (format!("{engine} · coming in Xenon 0.2").into(), true);
+            return (format!("{engine} · coming soon").into(), true);
         }
         Detected::Unknown => String::new(),
     };
@@ -259,9 +253,10 @@ enum Pending {
 }
 
 impl Session {
-    /// SQLite has a single implicit schema; don't show a level for it.
+    /// One schema (SQLite's `main`, Postgres's `public`, the MySQL database you
+    /// connected to) isn't worth a level of its own in the tree.
     pub fn shows_schemas(&self) -> bool {
-        self.schemas.len() > 1 || self.schemas.iter().any(|s| s.name != "main")
+        self.schemas.len() > 1
     }
 }
 
@@ -418,7 +413,7 @@ pub struct Workspace {
     pub(crate) discovering: bool,
     theme_choice: ThemeChoice,
     pub(crate) palette: Option<(Entity<Palette>, Subscription)>,
-    connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
+    pub(crate) connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
     confirm: Option<(Entity<ConfirmDialog>, Subscription, Pending)>,
     pub(crate) saved: Vec<SavedConnection>,
     pub(crate) explorer_filter: Entity<InputState>,
@@ -440,7 +435,7 @@ impl Workspace {
         let explorer_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter tables"));
         let paste_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(
-                "Paste a postgres:// URL, a DATABASE_URL= line, or a database file path",
+                "Paste a postgres:// or mysql:// URL, a DATABASE_URL= line, or a database file path",
             )
         });
         let paste_events = cx.subscribe_in(
@@ -530,7 +525,7 @@ impl Workspace {
 
         match launch {
             Some(Launch::Sqlite(path)) => this.open_path(path, window, cx),
-            Some(Launch::Postgres(url)) => this.connect_url(url, window, cx),
+            Some(Launch::Url(engine, url)) => this.connect_url(engine, url, window, cx),
             None => {}
         }
         this
@@ -748,33 +743,26 @@ impl Workspace {
         self.open_profile(profile, window, cx);
     }
 
-    fn connect_url(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
-        match ConnectOptions::from_url(&url) {
-            Ok(options) => {
-                let host = if options.host.is_empty() {
-                    "localhost"
-                } else {
-                    &options.host
-                };
-                let database = if options.database.is_empty() {
-                    "postgres"
-                } else {
-                    &options.database
-                };
-                let name = format!("{database}@{host}");
-                self.open_profile(
-                    Profile {
-                        saved_id: None,
-                        save: false,
-                        name,
-                        environment: Environment::None,
-                        read_only: false,
-                        target: RequestTarget::Postgres(options),
-                    },
-                    window,
-                    cx,
-                )
-            }
+    pub(crate) fn connect_url(
+        &mut self,
+        engine: ServerEngine,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match servers::parse_url(engine, &url) {
+            Ok(options) => self.open_profile(
+                Profile {
+                    saved_id: None,
+                    save: false,
+                    name: servers::default_name(engine, &options),
+                    environment: Environment::None,
+                    read_only: false,
+                    target: RequestTarget::Server(engine, options),
+                },
+                window,
+                cx,
+            ),
             Err(err) => {
                 self.notice = Some(format!("{err:#}").into());
                 cx.notify();
@@ -822,8 +810,11 @@ impl Workspace {
                         this.reload_saved();
                         // The same database reached another way (a pasted URL for a
                         // saved connection, say): use the one already open.
-                        if let Some(id) =
-                            this.sessions.iter().find(|s| s.conn.id() == conn.id()).map(|s| s.id)
+                        if let Some(id) = this
+                            .sessions
+                            .iter()
+                            .find(|s| s.conn.id() == conn.id())
+                            .map(|s| s.id)
                         {
                             this.attach(id, true, window, cx);
                             return;
@@ -832,9 +823,11 @@ impl Workspace {
                         let id = this.next_session_id;
                         this.sessions.push(Session {
                             id,
-                            engine: match profile.target {
+                            engine: match &profile.target {
                                 RequestTarget::Sqlite(_) => Engine::Sqlite,
-                                RequestTarget::Postgres(_) => Engine::Postgres,
+                                RequestTarget::Server(engine, _) => {
+                                    servers::logo(*engine, conn.as_ref())
+                                }
                             },
                             version: conn.server_version(),
                             conn,
@@ -918,10 +911,11 @@ impl Workspace {
     fn connect_pasted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.paste_input.read(cx).value().to_string();
         match detect(&text) {
-            Detected::Postgres(url) => match ConnectOptions::from_url(&url) {
+            Detected::Server(engine, url) => match servers::parse_url(engine, &url) {
                 Ok(options) if options.password.is_empty() && !is_local_host(&options.host) => {
                     self.open_connection_dialog(
                         Subject::Prefill {
+                            engine,
                             name: String::new(),
                             options,
                         },
@@ -929,19 +923,19 @@ impl Workspace {
                         cx,
                     );
                 }
-                Ok(_) => self.connect_url(url, window, cx),
+                Ok(_) => self.connect_url(engine, url, window, cx),
                 Err(err) => self.paste_note = (format!("{err:#}").into(), true),
             },
             Detected::Sqlite(path) => self.open_path(path, window, cx),
             Detected::NotYet(engine) => {
                 self.paste_note = (
-                    format!("{engine} support is coming in Xenon 0.2.").into(),
+                    format!("{engine} support is coming soon.").into(),
                     true,
                 )
             }
             Detected::Unknown if text.trim().is_empty() => {}
             Detected::Unknown => self.paste_note = (
-                "Not recognised. Try a postgres:// URL, a DATABASE_URL= line or a .db file path."
+                "Not recognised. Try a postgres:// or mysql:// URL, a DATABASE_URL= line or a .db file path."
                     .into(),
                 true,
             ),
@@ -957,7 +951,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let FoundTarget::Postgres(options) = &found.target else {
+        let FoundTarget::Server(engine, options) = &found.target else {
             return;
         };
         if found.ready() {
@@ -968,7 +962,7 @@ impl Workspace {
                     name: found.detail(),
                     environment: Environment::None,
                     read_only: false,
-                    target: RequestTarget::Postgres(options.clone()),
+                    target: RequestTarget::Server(*engine, options.clone()),
                 },
                 window,
                 cx,
@@ -976,6 +970,7 @@ impl Workspace {
         } else {
             self.open_connection_dialog(
                 Subject::Prefill {
+                    engine: *engine,
                     name: found.name.clone(),
                     options: options.clone(),
                 },
@@ -1070,7 +1065,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_connection_dialog(Subject::New, window, cx);
+        self.open_connection_dialog(Subject::New(ServerEngine::Postgres), window, cx);
+    }
+
+    /// The connection form, set up for `engine`.
+    pub(crate) fn new_server_connection(
+        &mut self,
+        engine: ServerEngine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_connection_dialog(Subject::New(engine), window, cx);
     }
 
     pub(crate) fn edit_saved(
@@ -1080,7 +1085,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let password = match &saved.target {
-            Target::Postgres { .. } => secrets::get(&SavedConnection::secret_key(saved.id))
+            Target::Server { .. } => secrets::get(&SavedConnection::secret_key(saved.id))
                 .ok()
                 .flatten()
                 .unwrap_or_default(),
@@ -1098,13 +1103,14 @@ impl Workspace {
         let id = saved.id;
         let detail = match &saved.target {
             Target::Sqlite { path } => path.clone(),
-            Target::Postgres {
+            Target::Server {
+                engine,
                 host,
                 port,
                 database,
                 user,
                 ..
-            } => format!("{user}@{host}:{}/{database}", port.unwrap_or(5432)),
+            } => servers::describe(*engine, host, *port, database, user),
         };
         let body = format!(
             "\"{}\" and its saved password will be removed from Xenon.",
@@ -1298,11 +1304,17 @@ impl Workspace {
         origin: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.tabs.iter().find(|t| t.id == tab_id).and_then(|t| t.session)
+        let Some(session_id) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.session)
         else {
             return;
         };
-        let Some(session) = self.session(session_id) else { return };
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
         let conn = session.conn.clone();
         let store = self.store.clone();
         let cancel = conn.cancel_handle();
@@ -1548,7 +1560,8 @@ impl Workspace {
 
     /// Regenerate the active browse tab's query from its filter and sort, and run it.
     fn run_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(session), Some(browse)) = (self.active_session(), &self.active_tab().browse) else {
+        let (Some(session), Some(browse)) = (self.active_session(), &self.active_tab().browse)
+        else {
             return;
         };
         let conn = session.conn.clone();
@@ -1710,7 +1723,12 @@ impl Workspace {
 
     // ------------------------------------------------------------- palette
 
-    pub(crate) fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_palette(
+        &mut self,
+        _: &OpenPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.palette.is_some() {
             return;
         }
@@ -1761,7 +1779,7 @@ impl Workspace {
             ("Connections…", "⇧⌘N", Box::new(ShowConnections)),
             ("Close Connection", "⇧⌘W", Box::new(CloseConnection)),
             ("Open SQLite File…", "⌘O", Box::new(OpenFile)),
-            ("Connect to Postgres…", "⌘N", Box::new(NewConnection)),
+            ("New Connection…", "⌘N", Box::new(NewConnection)),
             ("Show Explorer", "⇧⌘E", Box::new(ShowExplorer)),
             ("Show History", "⌘Y", Box::new(ShowHistory)),
             ("Toggle Side Panel", "⌘B", Box::new(ToggleExplorer)),
@@ -1865,7 +1883,12 @@ impl Workspace {
         self.show_panel(SidePanel::Explorer, window, cx);
     }
 
-    pub(crate) fn show_history(&mut self, _: &ShowHistory, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_history(
+        &mut self,
+        _: &ShowHistory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.show_panel(SidePanel::History, window, cx);
     }
 
@@ -1926,9 +1949,10 @@ impl Render for Workspace {
                 el.child(self.render_side_panel(&theme, cx))
             })
             .child(self.render_center(&theme, cx))
-            .when(self.show_inspector && self.active_session().is_some(), |el| {
-                el.child(self.render_inspector(&theme))
-            });
+            .when(
+                self.show_inspector && self.active_session().is_some(),
+                |el| el.child(self.render_inspector(&theme)),
+            );
 
         div()
             .id("workspace")
@@ -2102,13 +2126,20 @@ impl Workspace {
                         .justify_center()
                         .rounded(px(4.))
                         // Hidden on inactive tabs until the tab is hovered.
-                        .when(!active, |el| el.opacity(0.).group_hover("tab", |s| s.opacity(1.)))
+                        .when(!active, |el| {
+                            el.opacity(0.).group_hover("tab", |s| s.opacity(1.))
+                        })
                         .hover(|s| s.bg(theme.s3))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_tab_at(index, window, cx);
                         }))
-                        .child(svg().path(assets::icon("x")).size(px(12.)).text_color(theme.t2)),
+                        .child(
+                            svg()
+                                .path(assets::icon("x"))
+                                .size(px(12.))
+                                .text_color(theme.t2),
+                        ),
                 )
                 .when(active, |el| {
                     el.child(
@@ -2167,34 +2198,42 @@ impl Workspace {
                             .text_color(theme.t2),
                     ),
             )
-            .when(!self.sessions.is_empty(), |el| el.child(
-                div()
-                    .id("tab-strip")
-                    .h_full()
-                    .flex()
-                    .flex_row()
-                    .min_w(px(0.))
-                    .overflow_x_scroll()
-                    .children(tabs),
-            ).child(
-                div()
-                    .id("new-tab")
-                    .ml(px(6.))
-                    .size(px(24.))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(RADIUS_CONTROL))
-                    .text_color(theme.t3)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.s3).text_color(theme.text))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.new_tab(&NewTab, window, cx);
-                    }))
-                    .child(svg().path(assets::icon("plus")).size(px(14.)).text_color(theme.t3)),
-            ))
+            .when(!self.sessions.is_empty(), |el| {
+                el.child(
+                    div()
+                        .id("tab-strip")
+                        .h_full()
+                        .flex()
+                        .flex_row()
+                        .min_w(px(0.))
+                        .overflow_x_scroll()
+                        .children(tabs),
+                )
+                .child(
+                    div()
+                        .id("new-tab")
+                        .ml(px(6.))
+                        .size(px(24.))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS_CONTROL))
+                        .text_color(theme.t3)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.s3).text_color(theme.text))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.new_tab(&NewTab, window, cx);
+                        }))
+                        .child(
+                            svg()
+                                .path(assets::icon("plus"))
+                                .size(px(14.))
+                                .text_color(theme.t3),
+                        ),
+                )
+            })
             .child(div().flex_1().h_full())
             .child(
                 div()
@@ -2437,7 +2476,12 @@ impl Workspace {
                             theme.t3
                         }),
                 )
-                .child(div().text_color(theme.t2).truncate().child(session.name.clone()))
+                .child(
+                    div()
+                        .text_color(theme.t2)
+                        .truncate()
+                        .child(session.name.clone()),
+                )
                 .child("/")
                 .child(div().truncate().child(tab.title.clone()))
         });
@@ -2457,27 +2501,49 @@ impl Workspace {
             .child(div().flex_1());
         if running {
             bar = bar.child(
-                small(widgets::button(theme, "cancel", "Cancel", ButtonKind::Secondary, true))
-                    .child(kbd(theme, "⌘."))
-                    .on_click(cx.listener(|this, _, w, cx| this.cancel_query(&CancelQuery, w, cx))),
+                small(widgets::button(
+                    theme,
+                    "cancel",
+                    "Cancel",
+                    ButtonKind::Secondary,
+                    true,
+                ))
+                .child(kbd(theme, "⌘."))
+                .on_click(cx.listener(|this, _, w, cx| this.cancel_query(&CancelQuery, w, cx))),
             );
         } else {
             bar = bar
                 .child(
-                    small(widgets::button(theme, "explain", "Explain", ButtonKind::Ghost, true))
-                        .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::Explain, w, cx))),
+                    small(widgets::button(
+                        theme,
+                        "explain",
+                        "Explain",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::Explain, w, cx))),
                 )
                 .child(
-                    small(widgets::button(theme, "run-all", "Run all", ButtonKind::Ghost, true))
-                        .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::All, w, cx))),
+                    small(widgets::button(
+                        theme,
+                        "run-all",
+                        "Run all",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::All, w, cx))),
                 )
                 .child(
-                    small(widgets::button(theme, "run", "Run", ButtonKind::Primary, true))
-                        .pl(px(8.))
-                        .child(kbd_on_accent(theme, "⌘↵"))
-                        .on_click(
-                            cx.listener(|this, _, w, cx| this.run(RunScope::Statement, w, cx)),
-                        ),
+                    small(widgets::button(
+                        theme,
+                        "run",
+                        "Run",
+                        ButtonKind::Primary,
+                        true,
+                    ))
+                    .pl(px(8.))
+                    .child(kbd_on_accent(theme, "⌘↵"))
+                    .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::Statement, w, cx))),
                 );
         }
         bar
@@ -2556,7 +2622,11 @@ impl Workspace {
                 match (&result.outcome, &tab.grid) {
                     (QueryOutcome::Rows(_), Some(grid)) => {
                         let count = group_digits(grid.data.rows.len());
-                        let noun = if grid.data.rows.len() == 1 { "row" } else { "rows" };
+                        let noun = if grid.data.rows.len() == 1 {
+                            "row"
+                        } else {
+                            "rows"
+                        };
                         if grid.data.truncated {
                             format!("First {count} {noun}")
                         } else {
@@ -2708,9 +2778,15 @@ impl Workspace {
                 .flex()
                 .gap(px(10.))
                 .rounded(px(widgets::RADIUS_CARD))
-                .bg(Rgba { a: 0.08, ..theme.err })
+                .bg(Rgba {
+                    a: 0.08,
+                    ..theme.err
+                })
                 .border_1()
-                .border_color(Rgba { a: 0.3, ..theme.err })
+                .border_color(Rgba {
+                    a: 0.3,
+                    ..theme.err
+                })
                 .child(
                     svg()
                         .path(assets::icon("triangle-alert"))
@@ -2871,9 +2947,8 @@ impl Workspace {
         };
         let open = self.sessions.len();
         bar = bar.when(open > 1, |bar| {
-            bar.child(div().flex_1()).child(
-                cell(format!("{open} connections open").into(), theme.t3).border_l_1(),
-            )
+            bar.child(div().flex_1())
+                .child(cell(format!("{open} connections open").into(), theme.t3).border_l_1())
         });
 
         bar.when(open <= 1, |bar| bar.child(div().flex_1())).child(

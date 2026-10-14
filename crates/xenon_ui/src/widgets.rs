@@ -281,16 +281,21 @@ pub fn button(
             .border_color(theme.line)
             .text_color(theme.text)
             .when(enabled, |el| el.hover(|s| s.bg(theme.raised))),
-        ButtonKind::Ghost => base
-            .text_color(theme.t2)
-            .when(enabled, |el| el.hover(|s| s.bg(theme.s3).text_color(theme.text))),
+        ButtonKind::Ghost => base.text_color(theme.t2).when(enabled, |el| {
+            el.hover(|s| s.bg(theme.s3).text_color(theme.text))
+        }),
     }
 }
 
 /// `over` composited onto `base`.
 fn blend(base: Rgba, over: Rgba) -> Rgba {
     let mix = |b: f32, o: f32| b * (1. - over.a) + o * over.a;
-    Rgba { r: mix(base.r, over.r), g: mix(base.g, over.g), b: mix(base.b, over.b), a: base.a }
+    Rgba {
+        r: mix(base.r, over.r),
+        g: mix(base.g, over.g),
+        b: mix(base.b, over.b),
+        a: base.a,
+    }
 }
 
 /// A row of mutually exclusive options; `on_pick` receives the chosen index.
@@ -310,31 +315,38 @@ pub fn segmented(
         .bg(theme.field)
         .border_1()
         .border_color(theme.line)
-        .children(options.into_iter().enumerate().map(|(ix, (label, active))| {
-            let on_pick = on_pick.clone();
-            div()
-                .id((id, ix))
-                .flex_1()
-                .h(px(26.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(RADIUS_CONTROL - 1.))
-                .text_size(px(12.))
-                .cursor_pointer()
-                .when(active, |el| {
-                    el.bg(theme.raised)
-                        .text_color(theme.text)
-                        .font_weight(FontWeight::MEDIUM)
-                        .shadow(vec![
-                            gpui::BoxShadow::new(px(0.), px(1.), theme.shadow.into())
-                                .blur_radius(px(2.)),
-                        ])
-                })
-                .when(!active, |el| el.text_color(theme.t2).hover(|s| s.text_color(theme.text)))
-                .on_click(move |_, window, cx| on_pick(&ix, window, cx))
-                .child(label)
-        }))
+        .children(
+            options
+                .into_iter()
+                .enumerate()
+                .map(|(ix, (label, active))| {
+                    let on_pick = on_pick.clone();
+                    div()
+                        .id((id, ix))
+                        .flex_1()
+                        .h(px(26.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS_CONTROL - 1.))
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .when(active, |el| {
+                            el.bg(theme.raised)
+                                .text_color(theme.text)
+                                .font_weight(FontWeight::MEDIUM)
+                                .shadow(vec![
+                                    gpui::BoxShadow::new(px(0.), px(1.), theme.shadow.into())
+                                        .blur_radius(px(2.)),
+                                ])
+                        })
+                        .when(!active, |el| {
+                            el.text_color(theme.t2).hover(|s| s.text_color(theme.text))
+                        })
+                        .on_click(move |_, window, cx| on_pick(&ix, window, cx))
+                        .child(label)
+                }),
+        )
 }
 
 /// A 14px checkbox square.
@@ -396,6 +408,13 @@ impl Engine {
         }
     }
 
+    pub fn from_server(engine: xenon_store::ServerEngine) -> Self {
+        match engine {
+            xenon_store::ServerEngine::Postgres => Engine::Postgres,
+            xenon_store::ServerEngine::Mysql => Engine::MySql,
+        }
+    }
+
     fn icon(self) -> &'static str {
         match self {
             Engine::Postgres => "db-postgresql",
@@ -428,7 +447,11 @@ pub fn engine_badge(theme: &Theme, engine: Engine, available: bool) -> gpui::Div
         .justify_center()
         .rounded(px(RADIUS_CONTROL + 1.))
         .bg(if available { theme.acc_wash } else { theme.s3 })
-        .child(engine_logo(engine, 20., if available { theme.acc } else { theme.t3 }))
+        .child(engine_logo(
+            engine,
+            20.,
+            if available { theme.acc } else { theme.t3 },
+        ))
 }
 
 pub fn tree_row(depth: usize) -> gpui::Div {

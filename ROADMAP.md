@@ -40,7 +40,7 @@ products.
 |---|---|---|---|---|
 | **1** | PostgreSQL ✅ | `tokio-postgres` | Postgres 12+, Neon, Supabase, RDS/Aurora, Cloud SQL, Timescale | 0.1 |
 | **1** | SQLite ✅ | `rusqlite` | Any `.db` file | 0.1 |
-| **1** | MySQL / MariaDB | `mysql_async` | MySQL 5.7–9, MariaDB, TiDB, PlanetScale, Vitess | 0.2 |
+| **1** | MySQL / MariaDB ✅ | `mysql` | MySQL 5.7–9, MariaDB, TiDB, PlanetScale, Vitess | 0.2 |
 | **1** | SQL Server | `tiberius` | SQL Server 2017+, Azure SQL | 0.2 |
 | **2** | DuckDB | `duckdb` (bundled) | DuckDB files; CSV / Parquet / JSON opened as tables | 0.2 |
 | **2** | CockroachDB | Postgres driver | Cockroach, YugabyteDB | 0.6 |
@@ -207,7 +207,7 @@ Tier 4 engines and the **1.x** rows follow 1.0, in an order driven by demand.
 We don't need real production databases to test properly. We need **realistic data**,
 **every engine version**, and **realistic networks**, and each of those has a cheap source.
 
-### 1. Local fleet (every day, and in CI)
+### 1. Local fleet (every day, and in CI) — started: Postgres 17, MySQL 8.4, MariaDB 11.4
 
 - `dev/fleet/compose.yml`: one Docker Compose file running every engine we support, pinned to
   the versions we promise (e.g. Postgres 12 and 17, MySQL 5.7 and 8.4, MariaDB 11, SQL Server

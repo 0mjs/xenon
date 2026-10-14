@@ -1,6 +1,6 @@
 # Xenon
 
-A fast, minimal database client for Postgres and SQLite. Native, written in Rust with
+A fast, minimal database client for Postgres, MySQL, MariaDB and SQLite. Native, written in Rust with
 [GPUI](https://gpui.rs). By Carbon Software.
 
 ![Browsing a table in Xenon](docs/screenshots/browse.png)
@@ -11,7 +11,9 @@ A fast, minimal database client for Postgres and SQLite. Native, written in Rust
 - **Safe by default.** Saved connections carry a development / production label and an optional
   read-only mode the database enforces. Risky statements ask first; on production you type the
   connection's name to go ahead. Passwords live in the macOS Keychain.
-- **Postgres and SQLite**, with TLS (every libpq `sslmode`), cancel, exact numbers, query plans.
+- **Postgres, MySQL, MariaDB and SQLite**, with TLS (from `disable` to `verify-full`), cancel,
+  exact numbers, query plans.
+- **Several connections at once**, side by side: every tab says which database it runs on.
 
 Version 0.1, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
 
@@ -25,11 +27,12 @@ Requires macOS 12 or later.
 
 ## Use
 
-With nothing open, Xenon shows **Connect**: paste a `postgres://` URL, a `DATABASE_URL=` line or a
-database file path and press Enter; pick a database type; reopen a saved connection; or use one
-**found on this Mac** (Docker containers, servers on the usual ports, `~/.pgpass`,
-`~/.pg_service.conf`, or a project's `.env` files). `⌘O` opens a SQLite file, `⌘N` connects to
-Postgres, `⇧⌘W` closes the connection and returns here.
+With nothing open, Xenon shows **Connect**: paste a `postgres://` or `mysql://` URL, a
+`DATABASE_URL=` line or a database file path and press Enter; pick a database type; reopen a saved
+connection; or use one **found on this Mac** (Docker containers, servers on the usual ports,
+`~/.pgpass`, `~/.pg_service.conf`, or a project's `.env` files). `⌘O` opens a SQLite file, `⌘N`
+connects to a server. Connections stay open side by side: `⇧⌘N` (or **+** in the explorer) brings
+back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 
 ![The command palette](docs/screenshots/palette.png)
 
@@ -37,7 +40,9 @@ Postgres, `⇧⌘W` closes the connection and returns here.
 |---|---|
 | `⌘K` / `⌘P` | Command palette: jump to a table or run any command |
 | `⌘O` | Open SQLite file |
-| `⌘N` | Connect to Postgres |
+| `⌘N` | New server connection (Postgres, MySQL / MariaDB) |
+| `⇧⌘N` | Connections: open another database alongside |
+| `⇧⌘W` | Close the current tab's connection |
 | `⌘↵` | Run the statement under the cursor (or the selection) |
 | `⇧⌘↵` | Run everything in the editor (or the selection) |
 | `⌘E` | Explain the statement under the cursor |
@@ -57,8 +62,8 @@ editor.
 **Browsing a table** (click it in the explorer) opens it in its own tab with a `WHERE` filter;
 sorting there runs on the server, so you see the true top rows.
 
-**Also:** drag the line under the editor to resize it (double-click to reset); when Postgres says
-where a query failed, the cursor jumps there; View → Theme picks System, Light or Dark; double-click
+**Also:** drag the line under the editor to resize it (double-click to reset); when the database
+says where a query failed, the cursor jumps there; View → Theme picks System, Light or Dark; double-click
 the title bar to zoom.
 
 ## Build from source
@@ -82,9 +87,21 @@ cloud-managed Developer ID certificate and notarize it, using the account signed
 
 ```sh
 cargo test --workspace
-# Postgres integration tests run when a server is given:
-XENON_TEST_PG_URL="postgres://postgres:secret@localhost:5432/postgres" cargo test -p xenon_postgres
 ```
+
+Integration tests run against a local **test fleet** in Docker: one of each engine, seeded with
+the same shop data plus a table of every type and a table that needs quoting (`dev/seed`).
+
+```sh
+dev/fleet/up.sh postgres mysql mariadb     # first start pulls images and seeds (~20k rows each)
+XENON_TEST_PG_URL="postgres://xenon:xenon@127.0.0.1:55432/shop" \
+  cargo test --workspace -- --include-ignored
+dev/fleet/down.sh                          # stop; add -v to delete the data
+```
+
+`XENON_SEED_SIZE=large dev/fleet/up.sh` seeds millions of rows instead. `cargo test -p xenon_ui
+snapshots -- --ignored` renders every screen to `target/snapshots/`; with
+`XENON_SNAPSHOT_LIVE=1` it also opens a live MariaDB from the fleet.
 
 ## License
 

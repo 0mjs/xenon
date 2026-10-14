@@ -1,0 +1,11 @@
+[package]
+name = "xenon_mysql"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mysql.workspace = true
+xenon_driver.workspace = true

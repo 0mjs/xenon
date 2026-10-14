@@ -10,6 +10,7 @@ mod history;
 mod launcher;
 mod palette;
 mod results;
+mod servers;
 pub mod theme;
 mod widgets;
 pub mod workspace;

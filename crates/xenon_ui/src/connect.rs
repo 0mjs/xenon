@@ -6,21 +6,31 @@ use gpui::{
     Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::input::{Escape, InputEvent, InputState};
-use xenon_postgres::{ConnectOptions, SslMode};
-use xenon_store::{Environment, SavedConnection, Target};
+use xenon_driver::{ConnectOptions, SslMode};
+use xenon_store::{Environment, SavedConnection, ServerEngine, Target};
 
+use crate::servers;
 use crate::theme::{ActiveTheme, MONO_FONT, Theme};
 use crate::widgets::{self, ButtonKind, Engine, RADIUS_CONTROL};
+
+/// What to show in an empty Database field.
+fn database_hint(engine: ServerEngine) -> &'static str {
+    match engine {
+        ServerEngine::Postgres => "postgres",
+        ServerEngine::Mysql => "optional",
+    }
+}
 
 /// What the dialog is for.
 #[derive(Clone)]
 pub enum Subject {
-    /// A new Postgres connection.
-    New,
+    /// A new server connection, starting on this engine.
+    New(ServerEngine),
     /// A saved connection, with its password from the Keychain.
     Saved(SavedConnection, String),
     /// A new connection with fields filled in (from discovery or a paste).
     Prefill {
+        engine: ServerEngine,
         name: String,
         options: ConnectOptions,
     },
@@ -40,7 +50,7 @@ pub struct Request {
 
 #[derive(Clone)]
 pub enum RequestTarget {
-    Postgres(ConnectOptions),
+    Server(ServerEngine, ConnectOptions),
     Sqlite(String),
 }
 
@@ -62,6 +72,7 @@ pub struct ConnectDialog {
     id: i64,
     /// Set when editing a saved SQLite file: no server fields.
     sqlite_path: Option<String>,
+    engine: ServerEngine,
     name: Entity<InputState>,
     url: Entity<InputState>,
     host: Entity<InputState>,
@@ -92,27 +103,39 @@ impl ConnectDialog {
             })
         };
 
-        let (id, saved_name, sqlite_path, options, environment, read_only) = match &subject {
-            Subject::New => (
+        let (id, saved_name, sqlite_path, engine, options, environment, read_only) = match &subject
+        {
+            Subject::New(engine) => (
                 0,
                 String::new(),
                 None,
+                *engine,
                 ConnectOptions::default(),
                 Environment::None,
                 false,
             ),
-            Subject::Prefill { name, options } => (
+            Subject::Prefill {
+                engine,
+                name,
+                options,
+            } => (
                 0,
                 name.clone(),
                 None,
+                *engine,
                 options.clone(),
                 Environment::None,
                 false,
             ),
             Subject::Saved(saved, password) => {
-                let (path, options) = match &saved.target {
-                    Target::Sqlite { path } => (Some(path.clone()), ConnectOptions::default()),
-                    Target::Postgres {
+                let (path, engine, options) = match &saved.target {
+                    Target::Sqlite { path } => (
+                        Some(path.clone()),
+                        ServerEngine::Postgres,
+                        ConnectOptions::default(),
+                    ),
+                    Target::Server {
+                        engine,
                         host,
                         port,
                         database,
@@ -120,6 +143,7 @@ impl ConnectDialog {
                         ssl,
                     } => (
                         None,
+                        *engine,
                         ConnectOptions {
                             host: host.clone(),
                             port: *port,
@@ -135,6 +159,7 @@ impl ConnectDialog {
                     saved.id,
                     saved.name.clone(),
                     path,
+                    engine,
                     options,
                     saved.environment,
                     saved.read_only,
@@ -143,21 +168,15 @@ impl ConnectDialog {
         };
 
         let name = field("e.g. acme production", saved_name, window, cx);
-        let url = field(
-            "postgres://user:password@host:5432/database",
-            String::new(),
-            window,
-            cx,
-        );
+        let url = field(servers::url_example(engine), String::new(), window, cx);
         let host = field("localhost", options.host.clone(), window, cx);
-        let port = field(
-            "5432",
-            options.port.map(|p| p.to_string()).unwrap_or_default(),
-            window,
-            cx,
-        );
-        let database = field("postgres", options.database.clone(), window, cx);
-        let user = field("postgres", options.user.clone(), window, cx);
+        let port = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(engine.default_port().to_string())
+                .default_value(options.port.map(|p| p.to_string()).unwrap_or_default())
+        });
+        let database = field(database_hint(engine), options.database.clone(), window, cx);
+        let user = field(engine.default_user(), options.user.clone(), window, cx);
         let password = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -189,6 +208,7 @@ impl ConnectDialog {
             focus_handle: cx.focus_handle(),
             id,
             sqlite_path,
+            engine,
             name,
             url,
             host,
@@ -203,6 +223,25 @@ impl ConnectDialog {
             status: Status::Idle,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Switch the form to another engine: its URL format and defaults.
+    fn set_engine(&mut self, engine: ServerEngine, window: &mut Window, cx: &mut Context<Self>) {
+        self.engine = engine;
+        self.url.update(cx, |input, cx| {
+            input.set_placeholder(servers::url_example(engine), window, cx)
+        });
+        self.port.update(cx, |input, cx| {
+            input.set_placeholder(engine.default_port().to_string(), window, cx)
+        });
+        self.user.update(cx, |input, cx| {
+            input.set_placeholder(engine.default_user(), window, cx)
+        });
+        self.database.update(cx, |input, cx| {
+            input.set_placeholder(database_hint(engine), window, cx)
+        });
+        self.status = Status::Idle;
+        cx.notify();
     }
 
     pub fn set_error(&mut self, error: SharedString, cx: &mut Context<Self>) {
@@ -224,8 +263,12 @@ impl ConnectDialog {
             RequestTarget::Sqlite(path.clone())
         } else {
             let url = value(&self.url, cx);
+            // A pasted URL says which engine it's for.
+            if let crate::detect::Detected::Server(engine, _) = crate::detect::detect(&url) {
+                self.engine = engine;
+            }
             let mut options = if !url.is_empty() {
-                match ConnectOptions::from_url(&url) {
+                match servers::parse_url(self.engine, &url) {
                     Ok(options) => options,
                     Err(err) => {
                         self.set_error(format!("{err:#}").into(), cx);
@@ -254,19 +297,9 @@ impl ConnectDialog {
             };
             options.read_only = self.read_only;
             if name.is_empty() {
-                let host = if options.host.is_empty() {
-                    "localhost"
-                } else {
-                    &options.host
-                };
-                let database = if options.database.is_empty() {
-                    "postgres"
-                } else {
-                    &options.database
-                };
-                name = format!("{database}@{host}");
+                name = servers::default_name(self.engine, &options);
             }
-            RequestTarget::Postgres(options)
+            RequestTarget::Server(self.engine, options)
         };
 
         Some(Request {
@@ -361,21 +394,42 @@ impl Render for ConnectDialog {
         let access_picker = widgets::segmented(
             &theme,
             "access",
-            vec![("Read & write", !self.read_only), ("Read-only", self.read_only)],
+            vec![
+                ("Read & write", !self.read_only),
+                ("Read-only", self.read_only),
+            ],
             cx.listener(|this, ix: &usize, _, cx| {
                 this.read_only = *ix == 1;
                 cx.notify();
             }),
         );
 
-        let (title, subtitle) = match (editing, is_sqlite) {
-            (_, true) => ("Edit connection", "How Xenon labels and opens this file."),
-            (true, false) => ("Edit connection", "Changes are saved when you connect."),
-            (false, false) => (
-                "Connect to Postgres",
-                "Paste a connection URL, or fill in the fields.",
-            ),
+        let title: SharedString = match (editing, is_sqlite) {
+            (true, _) | (_, true) => "Edit connection".into(),
+            (false, false) => format!("Connect to {}", self.engine.label()).into(),
         };
+        let subtitle = match (editing, is_sqlite) {
+            (_, true) => "How Xenon labels and opens this file.",
+            (true, false) => "Changes are saved when you connect.",
+            (false, false) => "Paste a connection URL, or fill in the fields.",
+        };
+        let engine_picker = widgets::segmented(
+            &theme,
+            "engine",
+            ServerEngine::ALL
+                .into_iter()
+                .map(|e| {
+                    let label = match e {
+                        ServerEngine::Postgres => "Postgres",
+                        ServerEngine::Mysql => "MySQL / MariaDB",
+                    };
+                    (label, e == self.engine)
+                })
+                .collect(),
+            cx.listener(|this, ix: &usize, window, cx| {
+                this.set_engine(ServerEngine::ALL[*ix], window, cx)
+            }),
+        );
 
         let header = div()
             .flex()
@@ -383,7 +437,11 @@ impl Render for ConnectDialog {
             .gap(px(12.))
             .child(widgets::engine_badge(
                 &theme,
-                if is_sqlite { Engine::Sqlite } else { Engine::Postgres },
+                if is_sqlite {
+                    Engine::Sqlite
+                } else {
+                    Engine::from_server(self.engine)
+                },
                 true,
             ))
             .child(
@@ -397,7 +455,12 @@ impl Render for ConnectDialog {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),
                     )
-                    .child(div().text_size(px(11.5)).text_color(theme.t3).child(subtitle)),
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(theme.t3)
+                            .child(subtitle),
+                    ),
             );
 
         let mut body = div()
@@ -428,17 +491,20 @@ impl Render for ConnectDialog {
             );
         } else {
             if !editing {
-                body = body.child(labelled("Connection URL", &self.url, url_focused)).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .text_color(theme.t3)
-                        .text_size(px(11.))
-                        .child(div().flex_1().h(px(1.)).bg(theme.line_2))
-                        .child("or")
-                        .child(div().flex_1().h(px(1.)).bg(theme.line_2)),
-                );
+                body = body
+                    .child(engine_picker)
+                    .child(labelled("Connection URL", &self.url, url_focused))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .text_color(theme.t3)
+                            .text_size(px(11.))
+                            .child(div().flex_1().h(px(1.)).bg(theme.line_2))
+                            .child("or")
+                            .child(div().flex_1().h(px(1.)).bg(theme.line_2)),
+                    );
             }
             body = body
                 .child(
@@ -464,23 +530,30 @@ impl Render for ConnectDialog {
         }
 
         // How Xenon treats the connection, set apart from where it points.
-        body = body.child(div().h(px(1.)).my(px(2.)).bg(theme.line_2)).child(
-            labelled("Name", &self.name, name_focused),
-        );
+        body = body
+            .child(div().h(px(1.)).my(px(2.)).bg(theme.line_2))
+            .child(labelled("Name", &self.name, name_focused));
         body = body.child(
             div()
                 .flex()
                 .gap(px(10.))
                 .child(section(&theme, "Environment", environment_picker).flex_1())
-                .child(section(&theme, "Access", access_picker).w(px(176.)).flex_none()),
+                .child(
+                    section(&theme, "Access", access_picker)
+                        .w(px(176.))
+                        .flex_none(),
+                ),
         );
 
         body = match &self.status {
             Status::Idle => body,
             Status::Busy(text) => body.child(note(&theme, (*text).into(), theme.t3, None)),
-            Status::Failed(error) => {
-                body.child(note(&theme, error.clone(), theme.err, Some("triangle-alert")))
-            }
+            Status::Failed(error) => body.child(note(
+                &theme,
+                error.clone(),
+                theme.err,
+                Some("triangle-alert"),
+            )),
             Status::Passed(message) => {
                 body.child(note(&theme, message.clone(), theme.ok, Some("check")))
             }

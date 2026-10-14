@@ -12,9 +12,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{
-    AnyWindowHandle, AppContext as _, Entity, HeadlessAppContext, Window, px, size,
-};
+use gpui::{AnyWindowHandle, AppContext as _, Entity, HeadlessAppContext, Window, px, size};
 use gpui_component::Root;
 use xenon_store::{Environment, SavedConnection, Store, Target};
 
@@ -35,7 +33,10 @@ impl Shot {
     fn new(mode: Mode, open: Option<&Path>, out: &Path) -> Self {
         let data = out.join("data/xenon.db");
         let value = if mode == Mode::Dark { "dark" } else { "light" };
-        Store::open(&data).unwrap().set_setting("theme", value).unwrap();
+        Store::open(&data)
+            .unwrap()
+            .set_setting("theme", value)
+            .unwrap();
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_apple::AppleTextSystem::new()),
             Arc::new(crate::assets::Assets),
@@ -59,7 +60,12 @@ impl Shot {
             .expect("open window");
         cx.run_until_parked();
         let workspace = slot.borrow().clone().expect("workspace");
-        Self { cx, window: window.into(), workspace, out: out.to_path_buf() }
+        Self {
+            cx,
+            window: window.into(),
+            workspace,
+            out: out.to_path_buf(),
+        }
     }
 
     fn act(&mut self, f: impl FnOnce(&mut Workspace, &mut Window, &mut gpui::Context<Workspace>)) {
@@ -110,7 +116,15 @@ fn fixture(dir: &Path) -> PathBuf {
          create view paid_orders as select * from orders where status = 'paid';",
     )
     .unwrap();
-    let names = ["Aoife Byrne", "Liam Walsh", "Priya Nair", "Tom Okafor", "Mei Chen", "Ana Silva", "Jonas Berg"];
+    let names = [
+        "Aoife Byrne",
+        "Liam Walsh",
+        "Priya Nair",
+        "Tom Okafor",
+        "Mei Chen",
+        "Ana Silva",
+        "Jonas Berg",
+    ];
     let plans = ["free", "pro", "team", "pro", "free"];
     for i in 1..=240 {
         let name = names[i % names.len()];
@@ -118,7 +132,11 @@ fn fixture(dir: &Path) -> PathBuf {
             "insert into customers values (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 i as i64,
-                format!("{}.{}@example.com", name.split(' ').next().unwrap().to_lowercase(), i),
+                format!(
+                    "{}.{}@example.com",
+                    name.split(' ').next().unwrap().to_lowercase(),
+                    i
+                ),
                 if i % 11 == 0 { None } else { Some(name) },
                 plans[i % plans.len()],
                 format!("2026-0{}-{:02} 09:{:02}:00", 1 + i % 9, 1 + i % 27, i % 60)
@@ -136,8 +154,18 @@ fn fixture(dir: &Path) -> PathBuf {
                 ((i * 3797) % 90_000) as f64 / 100. + 3.5,
                 statuses[i % statuses.len()],
                 (1 + i % 6) as i64,
-                if i % 17 == 0 { Some("{\"gift\": true, \"wrap\": \"blue\"}") } else { None },
-                format!("2026-{:02}-{:02} {:02}:{:02}:00", 1 + i % 10, 1 + i % 27, 8 + i % 10, i % 60)
+                if i % 17 == 0 {
+                    Some("{\"gift\": true, \"wrap\": \"blue\"}")
+                } else {
+                    None
+                },
+                format!(
+                    "2026-{:02}-{:02} {:02}:{:02}:00",
+                    1 + i % 10,
+                    1 + i % 27,
+                    8 + i % 10,
+                    i % 60
+                )
             ],
         )
         .unwrap();
@@ -149,7 +177,8 @@ fn seed_saved(store: &Store, shop: &Path) {
     let pg = |name: &str, host: &str, db: &str, environment| SavedConnection {
         id: 0,
         name: name.into(),
-        target: Target::Postgres {
+        target: Target::Server {
+            engine: xenon_store::ServerEngine::Postgres,
             host: host.into(),
             port: Some(5432),
             database: db.into(),
@@ -159,19 +188,40 @@ fn seed_saved(store: &Store, shop: &Path) {
         environment,
         read_only: false,
     };
-    store.save_connection(&pg("Billing", "db.billing.internal", "billing", Environment::Production)).unwrap();
+    store
+        .save_connection(&pg(
+            "Billing",
+            "db.billing.internal",
+            "billing",
+            Environment::Production,
+        ))
+        .unwrap();
     store
         .save_connection(&SavedConnection {
             read_only: true,
-            ..pg("Analytics replica", "replica.analytics.internal", "warehouse", Environment::Production)
+            ..pg(
+                "Analytics replica",
+                "replica.analytics.internal",
+                "warehouse",
+                Environment::Production,
+            )
         })
         .unwrap();
-    store.save_connection(&pg("Staging", "staging.internal", "app", Environment::Development)).unwrap();
+    store
+        .save_connection(&pg(
+            "Staging",
+            "staging.internal",
+            "app",
+            Environment::Development,
+        ))
+        .unwrap();
     store
         .save_connection(&SavedConnection {
             id: 0,
             name: "shop.db".into(),
-            target: Target::Sqlite { path: shop.display().to_string() },
+            target: Target::Sqlite {
+                path: shop.display().to_string(),
+            },
             environment: Environment::None,
             read_only: false,
         })
@@ -210,7 +260,10 @@ fn snapshots() {
 
         shot.act(|w, window, cx| w.open_palette(&crate::OpenPalette, window, cx));
         shot.save(&format!("04-palette-{suffix}"));
-        shot.act(|w, _, cx| { w.palette = None; cx.notify(); });
+        shot.act(|w, _, cx| {
+            w.palette = None;
+            cx.notify();
+        });
 
         shot.act(|w, window, cx| {
             let editor = w.active_tab().editor.clone();
@@ -249,11 +302,37 @@ fn snapshots() {
         shot.act(|w, window, cx| w.open_connect_tab(window, cx));
         shot.save(&format!("09-connect-tab-{suffix}"));
 
+        shot.act(|w, window, cx| {
+            w.new_server_connection(xenon_store::ServerEngine::Mysql, window, cx)
+        });
+        shot.save(&format!("10-connect-mysql-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.connect_dialog = None;
+            cx.notify();
+        });
+
+        // A live MariaDB from the test fleet (dev/fleet/up.sh mariadb), when asked for.
+        if std::env::var_os("XENON_SNAPSHOT_LIVE").is_some() {
+            shot.act(|w, window, cx| {
+                w.connect_url(
+                    xenon_store::ServerEngine::Mysql,
+                    "mysql://xenon:xenon@127.0.0.1:53307/shop".into(),
+                    window,
+                    cx,
+                )
+            });
+            shot.act(|w, window, cx| {
+                let id = w.sessions.last().expect("connected to the fleet").id;
+                w.browse(id, "shop", "type_zoo", window, cx)
+            });
+            shot.save(&format!("11-mariadb-type-zoo-{suffix}"));
+        }
+
         // Closing a connection closes only its tabs; the other stays open.
         shot.act(|w, window, cx| {
-            let first = w.sessions[0].id;
+            let (first, open) = (w.sessions[0].id, w.sessions.len());
             w.close_session(first, window, cx);
-            assert_eq!(w.sessions.len(), 1);
+            assert_eq!(w.sessions.len(), open - 1);
             assert!(w.tabs().iter().all(|tab| tab.session != Some(first)));
         });
     }
