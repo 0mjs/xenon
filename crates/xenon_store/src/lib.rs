@@ -104,7 +104,12 @@ pub struct Store {
 }
 
 impl Store {
+    /// `~/Library/Application Support/Xenon/xenon.db`, or `$XENON_DATA_DIR/xenon.db`
+    /// when set (tests and the snapshot tool use a throwaway directory).
     pub fn default_path() -> Result<PathBuf> {
+        if let Some(dir) = std::env::var_os("XENON_DATA_DIR") {
+            return Ok(PathBuf::from(dir).join("xenon.db"));
+        }
         let dir = dirs::data_dir()
             .ok_or_else(|| anyhow!("no data directory on this platform"))?
             .join("Xenon");

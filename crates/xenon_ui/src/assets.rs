@@ -13,15 +13,22 @@ macro_rules! icons {
 }
 
 icons![
+    "check",
     "clock",
     "close",
     "database",
     "eye",
+    "folder-search",
     "panel-left-close",
     "panel-left-open",
+    "pencil",
+    "play",
     "plus",
+    "refresh-cw",
     "search",
     "table-2",
+    "trash-2",
+    "triangle-alert",
     "x"
 ];
 

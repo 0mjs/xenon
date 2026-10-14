@@ -2,16 +2,18 @@
 
 use gpui::{
     Action, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, ScrollStrategy,
-    SharedString, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, rgba, svg,
+    SharedString, Subscription, UniformListScrollHandle, Window, div, prelude::*, px, svg,
     uniform_list,
 };
 use gpui_component::input::{Escape, Input, InputEvent, InputState};
 
-use crate::theme::{ActiveTheme, MONO_FONT, Mode};
-use crate::widgets::kbd;
+use gpui_component::Sizable as _;
+
+use crate::theme::ActiveTheme;
+use crate::widgets::{self, RADIUS_CONTROL, kbd};
 use crate::{PaletteDown, PaletteUp};
 
-const ROW_HEIGHT: f32 = 34.;
+const ROW_HEIGHT: f32 = 36.;
 const VISIBLE_ROWS: usize = 10;
 
 pub enum Target {
@@ -143,99 +145,135 @@ impl Render for Palette {
                     let (kind, label, detail, keys) = rows[position].clone();
                     let active = position == selected;
                     let this = this.clone();
+                    let icon = match kind {
+                        "TABLE" => "table-2",
+                        "VIEW" => "eye",
+                        "CONNECTION" => "database",
+                        _ => "play",
+                    };
                     div()
                         .id(position)
                         .w_full()
                         .h(px(ROW_HEIGHT))
-                        .px(px(12.))
+                        .px(px(10.))
                         .flex()
                         .items_center()
-                        .gap(px(12.))
+                        .gap(px(10.))
+                        .rounded(px(RADIUS_CONTROL))
                         .cursor_pointer()
-                        .when(active, |el| {
-                            el.bg(list_theme.s3)
-                                .text_color(list_theme.text)
-                                .border_l_2()
-                                .border_color(list_theme.acc)
-                        })
+                        .when(active, |el| el.bg(list_theme.acc_wash).text_color(list_theme.text))
                         .when(!active, |el| {
-                            el.text_color(list_theme.t2).hover(|s| s.bg(list_theme.s2))
+                            el.text_color(list_theme.t2).hover(|s| s.bg(list_theme.s3))
                         })
                         .on_click(move |_, _, cx| {
                             this.update(cx, |this, cx| this.pick(position, cx)).ok();
                         })
                         .child(
-                            div()
-                                .w(px(60.))
+                            svg()
+                                .path(crate::assets::icon(icon))
+                                .size(px(15.))
                                 .flex_none()
-                                .font_family(MONO_FONT)
-                                .text_size(px(9.5))
-                                .text_color(list_theme.t3)
-                                .child(kind),
+                                .text_color(if active { list_theme.acc } else { list_theme.t3 }),
                         )
-                        .child(div().truncate().text_size(px(13.)).child(label))
+                        .child(div().flex_none().text_size(px(13.)).child(label))
                         .when_some(detail, |el, detail| {
                             el.child(
                                 div()
+                                    .min_w(px(0.))
                                     .truncate()
-                                    .text_size(px(11.))
+                                    .text_size(px(11.5))
                                     .text_color(list_theme.t3)
                                     .child(detail),
                             )
                         })
                         .child(div().flex_1())
+                        .when(!matches!(kind, "COMMAND"), |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.))
+                                    .text_color(list_theme.t3)
+                                    .child(match kind {
+                                        "TABLE" => "Table",
+                                        "VIEW" => "View",
+                                        _ => "",
+                                    }),
+                            )
+                        })
                         .when_some(keys, |el, keys| el.child(kbd(&list_theme, &keys)))
                 })
                 .collect()
         })
         .track_scroll(&self.scroll)
+        .px(px(6.))
         .h(px(ROW_HEIGHT * row_count.clamp(1, VISIBLE_ROWS) as f32));
 
-        let panel = div()
+        let hint = |keys: &str, text: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(kbd(&theme, keys))
+                .child(text)
+        };
+
+        let panel = widgets::overlay_panel(&theme)
             .id("palette-panel")
-            .w(px(600.))
-            .flex()
-            .flex_col()
-            .bg(theme.s1)
-            .border_1()
-            .border_color(theme.line)
+            .w(px(620.))
             // Clicking anywhere outside the panel closes the dialog.
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismiss)))
             .child(
                 div()
-                    .h(px(48.))
-                    .px(px(16.))
+                    .h(px(52.))
+                    .px(px(18.))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(px(12.))
                     .border_b_1()
-                    .border_color(theme.line)
+                    .border_color(theme.line_2)
                     .child(
                         svg()
                             .path(crate::assets::icon("search"))
-                            .size(px(16.))
+                            .size(px(17.))
                             .flex_none()
                             .text_color(theme.acc),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(15.))
-                            .child(Input::new(&self.input).appearance(false)),
+                        div().flex_1().child(
+                            Input::new(&self.input)
+                                .with_size(gpui_component::Size::Size(px(14. / 0.875)))
+                                .appearance(false),
+                        ),
                     ),
             )
-            .child(div().py(px(4.)).when(row_count == 0, |el| {
+            .child(div().pt(px(6.)).when(row_count == 0, |el| {
                 el.child(
                     div()
-                        .h(px(ROW_HEIGHT))
-                        .px(px(16.))
+                        .h(px(ROW_HEIGHT * 2.))
                         .flex()
                         .items_center()
+                        .justify_center()
                         .text_color(theme.t3)
-                        .child("No matches"),
+                        .child("Nothing matches"),
                 )
             }))
-            .when(row_count > 0, |el| el.child(list));
+            .when(row_count > 0, |el| el.child(list))
+            .child(
+                div()
+                    .mt(px(6.))
+                    .h(px(36.))
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .gap(px(16.))
+                    .border_t_1()
+                    .border_color(theme.line_2)
+                    .text_size(px(11.))
+                    .text_color(theme.t3)
+                    .child(hint("↑↓", "to move"))
+                    .child(hint("↵", "to open"))
+                    .child(hint("esc", "to close")),
+            );
 
         div()
             .id("palette-scrim")
@@ -250,11 +288,8 @@ impl Render for Palette {
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(110.))
-            .bg(match theme.mode {
-                Mode::Dark => rgba(0x00000080),
-                Mode::Light => rgba(0x17181b30),
-            })
+            .pt(px(120.))
+            .bg(theme.scrim)
             .child(panel)
     }
 }

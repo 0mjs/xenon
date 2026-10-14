@@ -45,6 +45,18 @@ pub struct Theme {
     pub ok: Rgba,
     pub warn: Rgba,
     pub err: Rgba,
+    /// Text and icons on an accent or danger fill.
+    pub on_acc: Rgba,
+    /// Dialogs, the palette and other things floating above the window.
+    pub overlay: Rgba,
+    /// Text field fill: slightly inset from the surface it sits on.
+    pub field: Rgba,
+    /// The chosen segment of a segmented control.
+    pub raised: Rgba,
+    /// Dims the window behind a dialog.
+    pub scrim: Rgba,
+    /// Drop shadow under floating surfaces.
+    pub shadow: Rgba,
 }
 
 impl Global for Theme {}
@@ -76,6 +88,12 @@ impl Theme {
             ok: rgb(0x8cc49c),
             warn: rgb(0xd8b06a),
             err: rgb(0xe0837a),
+            on_acc: rgb(0x0b0c0e),
+            overlay: rgb(0x16181c),
+            field: rgb(0x0f1013),
+            raised: rgb(0x2a2d35),
+            scrim: rgba(0x05060799),
+            shadow: rgba(0x00000080),
         }
     }
 
@@ -96,6 +114,12 @@ impl Theme {
             ok: rgb(0x3f7d50),
             warn: rgb(0x8f6516),
             err: rgb(0xb2402f),
+            on_acc: rgb(0xffffff),
+            overlay: rgb(0xffffff),
+            field: rgb(0xffffff),
+            raised: rgb(0xffffff),
+            scrim: rgba(0x1113182e),
+            shadow: rgba(0x1113182e),
         }
     }
 }

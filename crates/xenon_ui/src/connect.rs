@@ -3,13 +3,14 @@
 
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px, rgba,
+    Subscription, Window, div, prelude::*, px,
 };
-use gpui_component::input::{Escape, Input, InputEvent, InputState};
+use gpui_component::input::{Escape, InputEvent, InputState};
 use xenon_postgres::{ConnectOptions, SslMode};
 use xenon_store::{Environment, SavedConnection, Target};
 
 use crate::theme::{ActiveTheme, MONO_FONT, Theme};
+use crate::widgets::{self, ButtonKind, RADIUS_CONTROL};
 
 /// What the dialog is for.
 #[derive(Clone)]
@@ -302,22 +303,31 @@ impl ConnectDialog {
 }
 
 impl Render for ConnectDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let editing = self.id != 0;
         let is_sqlite = self.sqlite_path.is_some();
 
-        let labelled = |label: &'static str, input: &Entity<InputState>| {
+        let labelled = |label: &'static str, input: &Entity<InputState>, focused: bool| {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(4.))
+                .gap(px(6.))
                 .flex_1()
-                .child(field_label(&theme, label))
-                .child(Input::new(input))
+                .min_w(px(0.))
+                .child(widgets::field_label(&theme, label))
+                .child(widgets::text_field(&theme, input, focused))
         };
+        let focused = |input: &Entity<InputState>| widgets::is_focused(input, window, cx);
+        let name_focused = focused(&self.name);
+        let url_focused = focused(&self.url);
+        let host_focused = focused(&self.host);
+        let port_focused = focused(&self.port);
+        let database_focused = focused(&self.database);
+        let user_focused = focused(&self.user);
+        let password_focused = focused(&self.password);
 
-        let ssl_picker = picker(
+        let ssl_picker = widgets::segmented(
             &theme,
             "ssl",
             SslMode::ALL
@@ -329,16 +339,16 @@ impl Render for ConnectDialog {
                 cx.notify();
             }),
         );
-        let environment_picker = picker(
+        let environment_picker = widgets::segmented(
             &theme,
             "environment",
             Environment::ALL
                 .into_iter()
                 .map(|e| {
                     let label = match e {
-                        Environment::None => "none",
-                        Environment::Development => "development",
-                        Environment::Production => "production",
+                        Environment::None => "None",
+                        Environment::Development => "Development",
+                        Environment::Production => "Production",
                     };
                     (label, e == self.environment)
                 })
@@ -348,152 +358,185 @@ impl Render for ConnectDialog {
                 cx.notify();
             }),
         );
-        let access_picker = picker(
+        let access_picker = widgets::segmented(
             &theme,
             "access",
-            vec![
-                ("read & write", !self.read_only),
-                ("read-only", self.read_only),
-            ],
+            vec![("Read & write", !self.read_only), ("Read-only", self.read_only)],
             cx.listener(|this, ix: &usize, _, cx| {
                 this.read_only = *ix == 1;
                 cx.notify();
             }),
         );
 
-        let title = match (editing, is_sqlite) {
-            (_, true) => "Edit connection",
-            (true, false) => "Edit Postgres connection",
-            (false, false) => "Connect to Postgres",
+        let (title, subtitle) = match (editing, is_sqlite) {
+            (_, true) => ("Edit connection", "How Xenon labels and opens this file."),
+            (true, false) => ("Edit connection", "Changes are saved when you connect."),
+            (false, false) => (
+                "Connect to Postgres",
+                "Paste a connection URL, or fill in the fields.",
+            ),
         };
 
-        let mut panel = div()
-            .id("connect-panel")
-            .w(px(480.))
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(engine_badge(&theme, if is_sqlite { "SQ" } else { "PG" }))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(div().text_size(px(11.5)).text_color(theme.t3).child(subtitle)),
+            );
+
+        let mut body = div()
             .flex()
             .flex_col()
             .gap(px(14.))
             .p(px(20.))
-            .bg(theme.s1)
-            .border_1()
-            .border_color(theme.line)
-            // Clicking anywhere outside the panel closes the dialog.
-            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(ConnectEvent::Dismiss)))
-            .child(
-                div()
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(title),
-            )
-            .child(labelled("Name", &self.name));
+            .child(header);
 
         if let Some(path) = &self.sqlite_path {
-            panel = panel.child(
+            body = body.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
-                    .child(field_label(&theme, "File"))
+                    .gap(px(6.))
+                    .child(widgets::field_label(&theme, "File"))
                     .child(
                         div()
+                            .px(px(10.))
+                            .py(px(8.))
+                            .rounded(px(RADIUS_CONTROL))
+                            .bg(theme.s3)
                             .font_family(MONO_FONT)
-                            .text_size(px(11.))
+                            .text_size(px(11.5))
                             .text_color(theme.t2)
-                            .child(path.clone()),
+                            .child(crate::detect::tilde(path)),
                     ),
             );
         } else {
             if !editing {
-                panel = panel.child(labelled("Connection URL", &self.url)).child(
+                body = body.child(labelled("Connection URL", &self.url, url_focused)).child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(10.))
                         .text_color(theme.t3)
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.))
-                        .child(div().flex_1().h(px(1.)).bg(theme.line))
-                        .child("OR")
-                        .child(div().flex_1().h(px(1.)).bg(theme.line)),
+                        .text_size(px(11.))
+                        .child(div().flex_1().h(px(1.)).bg(theme.line_2))
+                        .child("or")
+                        .child(div().flex_1().h(px(1.)).bg(theme.line_2)),
                 );
             }
-            panel = panel
+            body = body
                 .child(
                     div()
                         .flex()
                         .gap(px(10.))
-                        .child(labelled("Host", &self.host))
-                        .child(labelled("Port", &self.port).w(px(90.)).flex_none()),
+                        .child(labelled("Host", &self.host, host_focused))
+                        .child(
+                            labelled("Port", &self.port, port_focused)
+                                .w(px(92.))
+                                .flex_none(),
+                        ),
                 )
-                .child(labelled("Database", &self.database))
+                .child(labelled("Database", &self.database, database_focused))
                 .child(
                     div()
                         .flex()
                         .gap(px(10.))
-                        .child(labelled("User", &self.user))
-                        .child(labelled("Password", &self.password)),
+                        .child(labelled("User", &self.user, user_focused))
+                        .child(labelled("Password", &self.password, password_focused)),
                 )
                 .child(section(&theme, "SSL mode", ssl_picker));
         }
 
-        panel = panel
-            .child(section(&theme, "Environment", environment_picker))
-            .child(section(&theme, "Access", access_picker));
+        // How Xenon treats the connection, set apart from where it points.
+        body = body.child(div().h(px(1.)).my(px(2.)).bg(theme.line_2)).child(
+            labelled("Name", &self.name, name_focused),
+        );
+        body = body.child(
+            div()
+                .flex()
+                .gap(px(10.))
+                .child(section(&theme, "Environment", environment_picker).flex_1())
+                .child(section(&theme, "Access", access_picker).w(px(176.)).flex_none()),
+        );
 
-        panel = match &self.status {
-            Status::Idle => panel,
-            Status::Busy(text) => panel.child(div().text_color(theme.t2).child(*text)),
-            Status::Failed(error) => panel.child(note(&theme, error.clone(), theme.err)),
-            Status::Passed(message) => panel.child(note(&theme, message.clone(), theme.ok)),
+        body = match &self.status {
+            Status::Idle => body,
+            Status::Busy(text) => body.child(note(&theme, (*text).into(), theme.t3, None)),
+            Status::Failed(error) => {
+                body.child(note(&theme, error.clone(), theme.err, Some("triangle-alert")))
+            }
+            Status::Passed(message) => {
+                body.child(note(&theme, message.clone(), theme.ok, Some("check")))
+            }
         };
 
         let save_toggle = div()
             .id("save-toggle")
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(8.))
             .cursor_pointer()
             .text_color(theme.t2)
+            .hover(|s| s.text_color(theme.text))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.save = !this.save;
                 cx.notify();
             }))
-            .child(
-                div()
-                    .size(px(12.))
-                    .border_1()
-                    .border_color(if self.save { theme.acc } else { theme.t3 })
-                    .when(self.save, |el| el.bg(theme.acc)),
-            )
+            .child(widgets::checkbox(&theme, self.save))
             .child("Save connection");
 
-        let panel = panel.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .when(!editing && !is_sqlite, |el| el.child(save_toggle))
-                .child(div().flex_1())
-                .when(!is_sqlite, |el| {
-                    el.child(
-                        button(&theme, "test", "Test", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.test(cx))),
-                    )
-                })
-                .child(
-                    button(&theme, "cancel", "Cancel", false)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectEvent::Dismiss))),
+        let busy = matches!(self.status, Status::Busy(_));
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(20.))
+            .py(px(14.))
+            .border_t_1()
+            .border_color(theme.line_2)
+            .when(!editing && !is_sqlite, |el| el.child(save_toggle))
+            .child(div().flex_1())
+            .child(
+                widgets::button(&theme, "cancel", "Cancel", ButtonKind::Ghost, true)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ConnectEvent::Dismiss))),
+            )
+            .when(!is_sqlite, |el| {
+                el.child(
+                    widgets::button(&theme, "test", "Test", ButtonKind::Secondary, !busy)
+                        .on_click(cx.listener(|this, _, _, cx| this.test(cx))),
                 )
-                .child(
-                    button(
-                        &theme,
-                        "connect",
-                        if editing { "Save & connect" } else { "Connect" },
-                        true,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
-                ),
-        );
+            })
+            .child(
+                widgets::button(
+                    &theme,
+                    "connect",
+                    if editing { "Save & connect" } else { "Connect" },
+                    ButtonKind::Primary,
+                    !busy,
+                )
+                .child(widgets::kbd_on_accent(&theme, "↵"))
+                .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+            );
+
+        let panel = widgets::overlay_panel(&theme)
+            .id("connect-panel")
+            .w(px(520.))
+            // Clicking anywhere outside the panel closes the dialog.
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(ConnectEvent::Dismiss)))
+            .child(body)
+            .child(footer);
 
         div()
             .id("connect-scrim")
@@ -506,104 +549,69 @@ impl Render for ConnectDialog {
             .flex()
             .items_center()
             .justify_center()
-            .bg(match theme.mode {
-                crate::theme::Mode::Dark => rgba(0x00000099),
-                crate::theme::Mode::Light => rgba(0x17181b40),
-            })
+            .bg(theme.scrim)
             .child(panel)
     }
 }
 
-/// A row of mutually exclusive options; `on_pick` receives the chosen index.
-fn picker(
-    theme: &Theme,
-    id: &'static str,
-    options: Vec<(&'static str, bool)>,
-    on_pick: impl Fn(&usize, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let on_pick = std::rc::Rc::new(on_pick);
+/// The two-letter engine mark used on cards and dialogs.
+pub fn engine_badge(theme: &Theme, label: &'static str) -> impl IntoElement {
     div()
+        .size(px(32.))
         .flex()
-        .flex_row()
-        .border_1()
-        .border_color(theme.line)
-        .children(
-            options
-                .into_iter()
-                .enumerate()
-                .map(|(ix, (label, active))| {
-                    let on_pick = on_pick.clone();
-                    div()
-                        .id((id, ix))
-                        .flex_1()
-                        .py(px(5.))
-                        .flex()
-                        .justify_center()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
-                        .cursor_pointer()
-                        .when(active, |el| el.bg(theme.s3).text_color(theme.text))
-                        .when(!active, |el| {
-                            el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
-                        })
-                        .on_click(move |_, window, cx| on_pick(&ix, window, cx))
-                        .child(label)
-                }),
-        )
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_CONTROL + 1.))
+        .bg(theme.acc_wash)
+        .font_family(MONO_FONT)
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.acc)
+        .child(label)
 }
 
-fn section(theme: &Theme, label: &'static str, content: impl IntoElement) -> impl IntoElement {
+fn section(theme: &Theme, label: &'static str, content: impl IntoElement) -> gpui::Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(4.))
-        .child(field_label(theme, label))
+        .gap(px(6.))
+        .child(widgets::field_label(theme, label))
         .child(content)
 }
 
-fn note(theme: &Theme, text: SharedString, color: gpui::Rgba) -> impl IntoElement {
-    div()
-        .p(px(10.))
-        .bg(theme.s2)
-        .border_l_2()
-        .border_color(color)
-        .font_family(MONO_FONT)
-        .text_size(px(11.))
-        .text_color(theme.t2)
-        .child(text)
-}
-
-fn field_label(theme: &Theme, label: &'static str) -> impl IntoElement {
-    div()
-        .font_family(MONO_FONT)
-        .text_size(px(10.))
-        .text_color(theme.t3)
-        .child(label.to_uppercase())
-}
-
-fn button(
+fn note(
     theme: &Theme,
-    id: &'static str,
-    label: &'static str,
-    primary: bool,
-) -> gpui::Stateful<gpui::Div> {
+    text: SharedString,
+    color: gpui::Rgba,
+    icon: Option<&'static str>,
+) -> impl IntoElement {
     div()
-        .id(id)
+        .flex()
+        .gap(px(9.))
         .px(px(12.))
-        .py(px(6.))
+        .py(px(10.))
+        .rounded(px(RADIUS_CONTROL))
+        .bg(gpui::Rgba { a: 0.10, ..color })
         .border_1()
-        .cursor_pointer()
-        .text_size(px(12.))
-        .font_weight(FontWeight::MEDIUM)
-        .when(primary, |el| {
-            el.bg(theme.acc)
-                .border_color(theme.acc)
-                .text_color(theme.bg)
+        .border_color(gpui::Rgba { a: 0.28, ..color })
+        .when_some(icon, |el, icon| {
+            el.child(
+                gpui::svg()
+                    .path(crate::assets::icon(icon))
+                    .mt(px(1.))
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(color),
+            )
         })
-        .when(!primary, |el| {
-            el.border_color(theme.line)
-                .text_color(theme.t2)
-                .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-        })
-        .child(label)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(px(11.5))
+                .line_height(px(17.))
+                .text_color(theme.text)
+                .child(text),
+        )
 }

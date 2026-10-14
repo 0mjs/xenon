@@ -151,15 +151,36 @@ content and never stretched; stripes and borders continue to the pane's edge.
 | `ok` | `#8cc49c` | `#3f7d50` | Success, strings |
 | `warn` | `#d8b06a` | `#8f6516` | READ tag, numbers |
 | `err` | `#e0837a` | `#b2402f` | PROD tag, errors, destructive |
+| `on-acc` | `#0b0c0e` | `#ffffff` | Text on accent / danger fills |
+| `overlay` | `#16181c` | `#ffffff` | Dialogs, palette |
+| `field` | `#0f1013` | `#ffffff` | Text field fill (slightly inset) |
+| `raised` | `#2a2d35` | `#ffffff` | Chosen segment of a segmented control |
+| `scrim` | `rgba(5,6,7,.6)` | `rgba(17,19,24,.18)` | Behind dialogs |
+| `shadow` | `rgba(0,0,0,.5)` | `rgba(17,19,24,.18)` | Under floating surfaces |
 
 Syntax: keywords = `text` (weight 500), functions = `acc`, strings = `ok`, numbers = `warn`,
 comments = `t3` italic.
 
 **Type:** Archivo (UI, 500/600; headings 22 px max) + IBM Plex Mono (editor, grid, labels).
 
-**Components:** primary button is solid accent; secondary buttons are
-outlined. Env tags are 1 px outlined mono caps. Errors: left danger border, error code, line/col,
-"did you mean" with `Tab` to apply. Destructive statements on PROD need the table name typed.
+**Components** (all in `widgets.rs`; nothing styles its own controls):
+
+- **Radii:** 6 px controls, 8 px cards, 12 px overlays. Tags 3 px.
+- **Buttons** are 30 px (26 in toolbars): Primary = solid accent, Secondary = `s3` fill + border,
+  Ghost = text until hovered, Danger = solid `err`. Disabled = 45% opacity.
+- **Text fields** are 30 px (32 in dialogs) with `field` fill; focus = accent border + 3 px
+  `acc-wash` ring. Input text is 12 px (13 px for the launcher's paste field, 14 px in the palette).
+- **Segmented controls** replace radio rows: `field` track, `raised` chosen segment.
+- **Overlays** (dialogs, palette): `overlay` fill, 12 px radius, soft two-layer shadow, a footer
+  bar with keyboard hints. Labels above fields are sentence case, 11.5 px, `t2`.
+- **Section labels** in panels stay mono caps 10 px `t3`; everything else is sentence case.
+- **Env tags:** mono caps on a 12% wash of their colour with a 35% border.
+- **Icons:** Lucide, always given an explicit colour (GPUI SVGs don't inherit text colour).
+- Errors: tinted danger card with an icon. Destructive statements on PROD need the connection
+  name typed.
+
+Design review: `cargo test -p xenon_ui snapshots -- --ignored` renders every screen in both
+themes to `target/snapshots/` without opening a window.
 
 ## UX notes
 

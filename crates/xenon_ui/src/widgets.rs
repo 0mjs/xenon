@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use gpui::{AnyElement, FontWeight, IntoElement, Rgba, div, prelude::*, px};
+use gpui_component::Sizable as _;
 
 use crate::theme::{MONO_FONT, Theme};
 
@@ -49,12 +50,11 @@ pub fn kbd(theme: &Theme, keys: &str) -> gpui::Div {
 
 /// Keycaps drawn on an accent-filled button.
 pub fn kbd_on_accent(theme: &Theme, keys: &str) -> gpui::Div {
-    keycaps(
-        keys,
-        theme.bg,
-        gpui::rgba(0x00000026),
-        gpui::rgba(0x00000033),
-    )
+    let (fill, border) = match theme.mode {
+        crate::theme::Mode::Dark => (gpui::rgba(0x0000001f), gpui::rgba(0x0000002e)),
+        crate::theme::Mode::Light => (gpui::rgba(0xffffff26), gpui::rgba(0xffffff38)),
+    };
+    keycaps(keys, theme.on_acc, fill, border)
 }
 
 fn keycaps(keys: &str, color: Rgba, background: Rgba, border: Rgba) -> gpui::Div {
@@ -101,6 +101,35 @@ fn split_keys(keys: &str) -> Vec<String> {
     caps
 }
 
+/// Corner radii: one per tier, so every surface of a kind rounds the same.
+pub const RADIUS_CONTROL: f32 = 6.;
+pub const RADIUS_CARD: f32 = 8.;
+pub const RADIUS_OVERLAY: f32 = 12.;
+
+/// gpui-component sizes input text at 0.875 × the size given; this lands on
+/// the UI's 12px instead of its default (which reads as 10.5px here).
+fn input_size() -> gpui_component::Size {
+    input_size_for(12.)
+}
+
+fn input_size_for(text: f32) -> gpui_component::Size {
+    gpui_component::Size::Size(px(text / 0.875))
+}
+
+/// A soft ring outside a focused control, so focus reads without the border
+/// alone having to carry it.
+pub fn focus_ring(theme: &Theme) -> Vec<gpui::BoxShadow> {
+    vec![gpui::BoxShadow::new(px(0.), px(0.), theme.acc_wash.into()).spread_radius(px(3.))]
+}
+
+/// The shadow under dialogs and the palette.
+pub fn overlay_shadow(theme: &Theme) -> Vec<gpui::BoxShadow> {
+    vec![
+        gpui::BoxShadow::new(px(0.), px(24.), theme.shadow.into()).blur_radius(px(48.)),
+        gpui::BoxShadow::new(px(0.), px(2.), theme.shadow.into()).blur_radius(px(6.)),
+    ]
+}
+
 /// A search field: icon, the input (with a clear button) and an accent ring
 /// while focused.
 pub fn search_field(
@@ -110,43 +139,235 @@ pub fn search_field(
 ) -> gpui::Div {
     field(
         theme,
-        gpui::svg()
-            .path(crate::assets::icon("search"))
-            .size(px(14.))
-            .flex_none()
-            .text_color(if focused { theme.acc } else { theme.t3 })
-            .into_any_element(),
+        Some(
+            gpui::svg()
+                .path(crate::assets::icon("search"))
+                .size(px(14.))
+                .flex_none()
+                .text_color(if focused { theme.acc } else { theme.t3 })
+                .into_any_element(),
+        ),
         input,
         focused,
     )
 }
 
-/// A text field with something leading it (an icon, a label).
+/// A single-line text field, optionally led by an icon or a label. 30px high,
+/// so it lines up with buttons.
 pub fn field(
     theme: &Theme,
-    leading: AnyElement,
+    leading: Option<AnyElement>,
     input: &gpui::Entity<gpui_component::input::InputState>,
     focused: bool,
 ) -> gpui::Div {
-    div()
+    field_sized(theme, leading, input, focused, 12.)
+}
+
+/// `field` with larger text, for a field that is the point of its screen.
+pub fn field_sized(
+    theme: &Theme,
+    leading: Option<AnyElement>,
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    focused: bool,
+    text: f32,
+) -> gpui::Div {
+    field_frame(theme, focused)
         .h(px(30.))
-        .pl(px(9.))
-        .pr(px(4.))
-        .flex()
-        .items_center()
-        .gap(px(7.))
-        .rounded(px(6.))
-        .bg(theme.s2)
-        .border_1()
-        .border_color(if focused { theme.acc } else { theme.line })
-        .child(leading)
+        .when_some(leading, |el, leading| el.pl(px(10.)).child(leading))
         .child(
             div().flex_1().min_w(px(0.)).child(
                 gpui_component::input::Input::new(input)
+                    .with_size(input_size_for(text))
                     .appearance(false)
                     .cleanable(true),
             ),
         )
+}
+
+/// A dialog's text field: no clear button, a touch taller.
+pub fn text_field(
+    theme: &Theme,
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    focused: bool,
+) -> gpui::Div {
+    field_frame(theme, focused).h(px(32.)).child(
+        div().flex_1().min_w(px(0.)).child(
+            gpui_component::input::Input::new(input)
+                .with_size(input_size())
+                .appearance(false),
+        ),
+    )
+}
+
+fn field_frame(theme: &Theme, focused: bool) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .pr(px(4.))
+        .rounded(px(RADIUS_CONTROL))
+        .bg(theme.field)
+        .border_1()
+        .border_color(if focused { theme.acc } else { theme.line })
+        .when(focused, |el| el.shadow(focus_ring(theme)))
+}
+
+/// Whether `input` has keyboard focus, for drawing its ring.
+pub fn is_focused(
+    input: &gpui::Entity<gpui_component::input::InputState>,
+    window: &gpui::Window,
+    cx: &gpui::App,
+) -> bool {
+    gpui::Focusable::focus_handle(input.read(cx), cx).is_focused(window)
+}
+
+/// A label above a dialog field.
+pub fn field_label(theme: &Theme, label: &'static str) -> gpui::Div {
+    div()
+        .text_size(px(11.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.t2)
+        .child(label)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ButtonKind {
+    Primary,
+    Secondary,
+    Danger,
+    /// No fill until hovered: for quiet actions next to a primary one.
+    Ghost,
+}
+
+/// A 30px button. `enabled: false` dims it and drops the pointer cursor; the
+/// caller decides whether its click handler still does anything.
+pub fn button(
+    theme: &Theme,
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    kind: ButtonKind,
+    enabled: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let hover_fill = match theme.mode {
+        crate::theme::Mode::Dark => gpui::rgba(0xffffff1f),
+        crate::theme::Mode::Light => gpui::rgba(0xffffff33),
+    };
+    let base = div()
+        .id(id)
+        .h(px(30.))
+        .px(px(12.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .rounded(px(RADIUS_CONTROL))
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .when(enabled, |el| el.cursor_pointer())
+        .when(!enabled, |el| el.opacity(0.45))
+        .child(label.into());
+    let filled = |el: gpui::Stateful<gpui::Div>, fill: Rgba| {
+        el.bg(fill)
+            .text_color(theme.on_acc)
+            .when(enabled, |el| el.hover(|s| s.bg(blend(fill, hover_fill))))
+    };
+    match kind {
+        ButtonKind::Primary => filled(base, theme.acc),
+        ButtonKind::Danger => filled(base, theme.err),
+        ButtonKind::Secondary => base
+            .bg(theme.s3)
+            .border_1()
+            .border_color(theme.line)
+            .text_color(theme.text)
+            .when(enabled, |el| el.hover(|s| s.bg(theme.raised))),
+        ButtonKind::Ghost => base
+            .text_color(theme.t2)
+            .when(enabled, |el| el.hover(|s| s.bg(theme.s3).text_color(theme.text))),
+    }
+}
+
+/// `over` composited onto `base`.
+fn blend(base: Rgba, over: Rgba) -> Rgba {
+    let mix = |b: f32, o: f32| b * (1. - over.a) + o * over.a;
+    Rgba { r: mix(base.r, over.r), g: mix(base.g, over.g), b: mix(base.b, over.b), a: base.a }
+}
+
+/// A row of mutually exclusive options; `on_pick` receives the chosen index.
+pub fn segmented(
+    theme: &Theme,
+    id: &'static str,
+    options: Vec<(&'static str, bool)>,
+    on_pick: impl Fn(&usize, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Div {
+    let on_pick = std::rc::Rc::new(on_pick);
+    div()
+        .flex()
+        .flex_row()
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded(px(RADIUS_CONTROL + 1.))
+        .bg(theme.field)
+        .border_1()
+        .border_color(theme.line)
+        .children(options.into_iter().enumerate().map(|(ix, (label, active))| {
+            let on_pick = on_pick.clone();
+            div()
+                .id((id, ix))
+                .flex_1()
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_CONTROL - 1.))
+                .text_size(px(12.))
+                .cursor_pointer()
+                .when(active, |el| {
+                    el.bg(theme.raised)
+                        .text_color(theme.text)
+                        .font_weight(FontWeight::MEDIUM)
+                        .shadow(vec![
+                            gpui::BoxShadow::new(px(0.), px(1.), theme.shadow.into())
+                                .blur_radius(px(2.)),
+                        ])
+                })
+                .when(!active, |el| el.text_color(theme.t2).hover(|s| s.text_color(theme.text)))
+                .on_click(move |_, window, cx| on_pick(&ix, window, cx))
+                .child(label)
+        }))
+}
+
+/// A 14px checkbox square.
+pub fn checkbox(theme: &Theme, checked: bool) -> gpui::Div {
+    div()
+        .size(px(15.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .border_1()
+        .when(checked, |el| {
+            el.bg(theme.acc).border_color(theme.acc).child(
+                gpui::svg()
+                    .path(crate::assets::icon("check"))
+                    .size(px(11.))
+                    .text_color(theme.on_acc),
+            )
+        })
+        .when(!checked, |el| el.bg(theme.field).border_color(theme.t3))
+}
+
+/// The floating card a dialog sits in.
+pub fn overlay_panel(theme: &Theme) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(RADIUS_OVERLAY))
+        .bg(theme.overlay)
+        .border_1()
+        .border_color(theme.line)
+        .shadow(overlay_shadow(theme))
 }
 
 pub fn tree_row(depth: usize) -> gpui::Div {
@@ -162,9 +383,15 @@ pub fn tree_row(depth: usize) -> gpui::Div {
 
 pub fn env_tag(label: &'static str, color: Rgba) -> impl IntoElement {
     div()
-        .px(px(4.))
+        .h(px(16.))
+        .px(px(5.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(3.))
+        .bg(Rgba { a: 0.12, ..color })
         .border_1()
-        .border_color(color)
+        .border_color(Rgba { a: 0.35, ..color })
         .text_color(color)
         .font_family(MONO_FONT)
         .text_size(px(9.))

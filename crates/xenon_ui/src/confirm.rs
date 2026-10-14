@@ -3,11 +3,12 @@
 
 use gpui::{
     Context, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement, Render, SharedString,
-    Subscription, Window, div, prelude::*, px, rgba,
+    Subscription, Window, div, prelude::*, px,
 };
-use gpui_component::input::{Escape, Input, InputEvent, InputState};
+use gpui_component::input::{Escape, InputEvent, InputState};
 
-use crate::theme::{ActiveTheme, MONO_FONT, Mode};
+use crate::theme::{ActiveTheme, MONO_FONT};
+use crate::widgets::{self, ButtonKind, RADIUS_CONTROL};
 
 pub enum ConfirmEvent {
     Confirm,
@@ -81,93 +82,132 @@ impl ConfirmDialog {
 }
 
 impl Render for ConfirmDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let unlocked = self.unlocked(cx);
+        let input_focused = widgets::is_focused(&self.input, window, cx);
 
-        let panel = div()
-            .id("confirm-panel")
-            .w(px(480.))
+        let header = div()
             .flex()
-            .flex_col()
-            .gap(px(12.))
-            .p(px(20.))
-            .bg(theme.s1)
+            .gap(px(14.))
+            .child(
+                div()
+                    .size(px(34.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(gpui::Rgba { a: 0.14, ..theme.err })
+                    .child(
+                        gpui::svg()
+                            .path(crate::assets::icon("triangle-alert"))
+                            .size(px(17.))
+                            .text_color(theme.err),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .pt(px(1.))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.t2)
+                            .line_height(px(18.))
+                            .child(self.body.clone()),
+                    ),
+            );
+
+        let preview = div()
+            .px(px(12.))
+            .py(px(10.))
+            .rounded(px(RADIUS_CONTROL))
+            .bg(theme.field)
             .border_1()
             .border_color(theme.line)
-            // Clicking anywhere outside the panel closes the dialog.
-            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(ConfirmEvent::Cancel)))
-            .child(
-                div()
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.title.clone()),
-            )
-            .child(
-                div()
-                    .text_color(theme.t2)
-                    .line_height(px(18.))
-                    .child(self.body.clone()),
-            )
-            .child(
-                div()
-                    .p(px(10.))
-                    .bg(theme.s2)
-                    .border_l_2()
-                    .border_color(theme.err)
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.))
-                    .text_color(theme.t2)
-                    .child(self.preview.clone()),
-            )
+            .font_family(MONO_FONT)
+            .text_size(px(11.5))
+            .line_height(px(17.))
+            .text_color(theme.text)
+            .child(self.preview.clone());
+
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(20.))
+            .child(header)
+            .child(preview)
             .when_some(self.require.clone(), |el, text| {
                 el.child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(6.))
+                        .gap(px(7.))
                         .child(
                             div()
+                                .flex()
+                                .gap(px(4.))
+                                .text_size(px(11.5))
                                 .text_color(theme.t2)
-                                .child(format!("Type \"{text}\" to continue.")),
+                                .child("Type")
+                                .child(
+                                    div()
+                                        .font_family(MONO_FONT)
+                                        .text_color(theme.text)
+                                        .child(text),
+                                )
+                                .child("to confirm"),
                         )
-                        .child(Input::new(&self.input)),
+                        .child(widgets::text_field(&theme, &self.input, input_focused)),
                 )
-            })
+            });
+
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(20.))
+            .py(px(14.))
+            .border_t_1()
+            .border_color(theme.line_2)
             .child(
                 div()
                     .flex()
-                    .justify_end()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .id("confirm-cancel")
-                            .px(px(12.))
-                            .py(px(6.))
-                            .border_1()
-                            .border_color(theme.line)
-                            .text_color(theme.t2)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ConfirmEvent::Cancel)))
-                            .child("Cancel"),
-                    )
-                    .child(
-                        div()
-                            .id("confirm-run")
-                            .px(px(12.))
-                            .py(px(6.))
-                            .border_1()
-                            .border_color(theme.err)
-                            .font_weight(FontWeight::MEDIUM)
-                            .when(unlocked, |el| {
-                                el.bg(theme.err).text_color(theme.bg).cursor_pointer()
-                            })
-                            .when(!unlocked, |el| el.text_color(theme.err).opacity(0.5))
-                            .on_click(cx.listener(|this, _, _, cx| this.confirm(cx)))
-                            .child("Run anyway"),
-                    ),
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(11.))
+                    .text_color(theme.t3)
+                    .child(widgets::kbd(&theme, "esc"))
+                    .child("to cancel"),
+            )
+            .child(div().flex_1())
+            .child(
+                widgets::button(&theme, "confirm-cancel", "Cancel", ButtonKind::Ghost, true)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ConfirmEvent::Cancel))),
+            )
+            .child(
+                widgets::button(&theme, "confirm-run", "Run anyway", ButtonKind::Danger, unlocked)
+                    .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),
             );
+
+        let panel = widgets::overlay_panel(&theme)
+            .id("confirm-panel")
+            .w(px(460.))
+            // Clicking anywhere outside the panel closes the dialog.
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(ConfirmEvent::Cancel)))
+            .child(body)
+            .child(footer);
 
         div()
             .id("confirm-scrim")
@@ -183,10 +223,7 @@ impl Render for ConfirmDialog {
             .flex()
             .items_center()
             .justify_center()
-            .bg(match theme.mode {
-                Mode::Dark => rgba(0x00000099),
-                Mode::Light => rgba(0x17181b40),
-            })
+            .bg(theme.scrim)
             .child(panel)
     }
 }

@@ -7,12 +7,16 @@ use crate::assets;
 use crate::detect::tilde;
 use crate::discover::{Found, FoundTarget};
 use crate::theme::{MONO_FONT, Theme};
-use crate::widgets::{connection_tags, env_tag, field};
+use crate::widgets::{
+    ButtonKind, RADIUS_CARD, RADIUS_CONTROL, button, connection_tags, env_tag, field_sized,
+};
 use crate::workspace::Workspace;
 use crate::{NewConnection, OpenFile};
 
 const COLUMN_WIDTH: f32 = 760.;
-const CARD_WIDTH: f32 = 372.;
+const GAP: f32 = 10.;
+/// Two cards to a row, filling the column.
+const CARD_WIDTH: f32 = (COLUMN_WIDTH - GAP) / 2.;
 
 impl Workspace {
     pub(crate) fn render_launcher(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -21,26 +25,32 @@ impl Workspace {
             .max_w_full()
             .flex()
             .flex_col()
-            .gap(px(28.))
+            .gap(px(32.))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
+                    .gap(px(16.))
                     .child(
                         div()
-                            .text_size(px(22.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Connect"),
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_size(px(24.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Connect"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(theme.t2)
+                                    .child("Paste a connection, open a file, or pick one below."),
+                            ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(theme.t2)
-                            .child("Paste a connection, open a file, or pick one below."),
-                    ),
+                    .child(self.render_paste(theme)),
             )
-            .child(self.render_paste(theme))
             .child(section(
                 theme,
                 "New connection",
@@ -71,57 +81,65 @@ impl Workspace {
             .flex()
             .justify_center()
             .px(px(32.))
-            .py(px(36.))
+            .pt(px(48.))
+            .pb(px(64.))
             .child(column)
             .into_any_element()
     }
 
     fn render_paste(&self, theme: &Theme) -> impl IntoElement {
         let focused = self.field_focus.paste;
+        let (note, is_error) = &self.paste_note;
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
             .child(
-                field(
+                field_sized(
                     theme,
-                    svg()
-                        .path(assets::icon("plus"))
-                        .size(px(16.))
-                        .flex_none()
-                        .text_color(if focused { theme.acc } else { theme.t3 })
-                        .into_any_element(),
+                    Some(
+                        svg()
+                            .path(assets::icon("plus"))
+                            .size(px(16.))
+                            .flex_none()
+                            .text_color(if focused { theme.acc } else { theme.t3 })
+                            .into_any_element(),
+                    ),
                     &self.paste_input,
                     focused,
+                    13.,
                 )
-                .h(px(40.))
-                .text_size(px(14.)),
+                .h(px(42.))
+                .pl(px(14.))
+                .rounded(px(RADIUS_CARD)),
             )
-            .child(
-                div()
-                    .h(px(16.))
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.))
-                    .text_color(if self.paste_note.1 {
-                        theme.err
-                    } else {
-                        theme.t3
-                    })
-                    .child(self.paste_note.0.clone()),
-            )
+            .when(!note.is_empty(), |el| {
+                el.child(
+                    div()
+                        .pl(px(2.))
+                        .text_size(px(11.5))
+                        .text_color(if *is_error { theme.err } else { theme.t3 })
+                        .child(note.clone()),
+                )
+            })
     }
 
     fn render_tiles(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let tile = |id: &'static str, name: &'static str, kind: &'static str, available: bool| {
+        let tile = |id: &'static str,
+                    name: &'static str,
+                    badge: &'static str,
+                    kind: &'static str,
+                    available: bool| {
             div()
                 .id(id)
-                .w(px(140.))
-                .h(px(72.))
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(96.))
                 .p(px(12.))
                 .flex()
                 .flex_col()
                 .justify_between()
-                .rounded(px(8.))
+                .rounded(px(RADIUS_CARD))
                 .bg(theme.s2)
                 .border_1()
                 .border_color(theme.line)
@@ -129,48 +147,53 @@ impl Workspace {
                     el.cursor_pointer()
                         .hover(|s| s.border_color(theme.acc).bg(theme.s3))
                 })
-                .when(!available, |el| el.opacity(0.5))
+                .child(engine_badge(theme, badge, available))
                 .child(
                     div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.))
-                        .text_color(if available { theme.t3 } else { theme.warn })
-                        .child(if available { kind } else { "soon" }),
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(if available { theme.text } else { theme.t3 })
+                                .child(name),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme.t3)
+                                .child(if available { kind } else { "Coming soon" }),
+                        ),
                 )
         };
 
         div()
             .flex()
-            .flex_wrap()
-            .gap(px(10.))
-            .child(tile("tile-postgres", "Postgres", "server", true).on_click(
+            .gap(px(GAP))
+            .child(tile("tile-postgres", "Postgres", "PG", "Server", true).on_click(
                 cx.listener(|this, _, window, cx| this.new_connection(&NewConnection, window, cx)),
             ))
             .child(
-                tile("tile-sqlite", "SQLite", "file", true).on_click(
+                tile("tile-sqlite", "SQLite", "SQ", "Open a file", true).on_click(
                     cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx)),
                 ),
             )
-            .child(tile("tile-mysql", "MySQL", "server", false))
-            .child(tile("tile-duckdb", "DuckDB", "file", false))
-            .child(tile("tile-sqlserver", "SQL Server", "server", false))
+            .child(tile("tile-mysql", "MySQL", "MY", "Server", false))
+            .child(tile("tile-duckdb", "DuckDB", "DK", "File", false))
+            .child(tile("tile-sqlserver", "SQL Server", "MS", "Server", false))
             .into_any_element()
     }
 
     fn render_saved_cards(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let groups = [
-            (Environment::Production, "Production"),
-            (Environment::Development, "Development"),
-            (Environment::None, "Other"),
+            (Environment::Production, "Production", theme.err),
+            (Environment::Development, "Development", theme.t2),
+            (Environment::None, "Other", theme.t3),
         ];
-        let mut list = div().flex().flex_col().gap(px(14.));
-        for (environment, label) in groups {
+        let mut list = div().flex().flex_col().gap(px(16.));
+        for (environment, label, color) in groups {
             let cards: Vec<&SavedConnection> = self
                 .saved
                 .iter()
@@ -179,7 +202,7 @@ impl Workspace {
             if cards.is_empty() {
                 continue;
             }
-            let mut grid = div().flex().flex_wrap().gap(px(10.));
+            let mut grid = div().flex().flex_wrap().gap(px(GAP));
             for saved in cards {
                 grid = grid.child(self.render_card(saved, theme, cx));
             }
@@ -188,7 +211,17 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(div().text_size(px(11.)).text_color(theme.t3).child(label))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.t2)
+                            .child(div().size(px(6.)).rounded_full().bg(color))
+                            .child(label),
+                    )
                     .child(grid),
             );
         }
@@ -217,31 +250,52 @@ impl Workspace {
         };
         let group = SharedString::from(format!("card-{}", saved.id));
         let (connect, edit, forget) = (saved.clone(), saved.clone(), saved.clone());
+        let icon_button = |id: (&'static str, usize), icon: &'static str, danger: bool| {
+            div()
+                .id(id)
+                .size(px(26.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_CONTROL))
+                .text_color(theme.t3)
+                .hover(|s| {
+                    s.bg(theme.raised)
+                        .text_color(if danger { theme.err } else { theme.text })
+                })
+                .child(
+                    svg()
+                        .path(assets::icon(icon))
+                        .size(px(14.))
+                        .text_color(if danger { theme.err } else { theme.t2 }),
+                )
+        };
 
         div()
             .id(group.clone())
             .group(group.clone())
             .w(px(CARD_WIDTH))
             .h(px(64.))
-            .px(px(12.))
+            .pl(px(12.))
+            .pr(px(8.))
             .flex()
             .items_center()
             .gap(px(12.))
-            .rounded(px(8.))
+            .rounded(px(RADIUS_CARD))
             .bg(theme.s2)
             .border_1()
             .border_color(theme.line)
             .cursor_pointer()
             .hover(|s| s.border_color(theme.acc).bg(theme.s3))
             .on_click(cx.listener(move |this, _, _, cx| this.connect_to_saved(&connect, cx)))
-            .child(engine_badge(theme, engine))
+            .child(engine_badge(theme, engine, true))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
+                    .gap(px(3.))
                     .child(
                         div()
                             .flex()
@@ -273,59 +327,58 @@ impl Workspace {
             .child(
                 div()
                     .flex()
-                    .gap(px(10.))
+                    .flex_none()
+                    .gap(px(2.))
                     .opacity(0.)
                     .group_hover(group, |s| s.opacity(1.))
                     .child(
-                        div()
-                            .id(("card-edit", saved.id as usize))
-                            .text_color(theme.t3)
-                            .hover(|s| s.text_color(theme.text))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        icon_button(("card-edit", saved.id as usize), "pencil", false).on_click(
+                            cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.edit_saved(&edit, window, cx);
-                            }))
-                            .child("✎"),
+                            }),
+                        ),
                     )
                     .child(
-                        div()
-                            .id(("card-forget", saved.id as usize))
-                            .text_color(theme.t3)
-                            .hover(|s| s.text_color(theme.err))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        icon_button(("card-forget", saved.id as usize), "trash-2", true).on_click(
+                            cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.forget_saved(&forget, window, cx);
-                            }))
-                            .child("✕"),
+                            }),
+                        ),
                     ),
             )
     }
 
     fn render_discovery_actions(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let link = |id: &'static str, label: &'static str| {
+        let action = |id: &'static str, icon: &'static str, label: &'static str| {
             div()
                 .id(id)
+                .h(px(24.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(RADIUS_CONTROL))
                 .text_size(px(11.5))
-                .text_color(theme.acc)
+                .text_color(theme.t2)
                 .cursor_pointer()
-                .hover(|s| s.text_color(theme.text))
+                .hover(|s| s.bg(theme.s3).text_color(theme.text))
+                .child(svg().path(assets::icon(icon)).size(px(13.)).text_color(theme.t3))
                 .child(label)
         };
         div()
             .flex()
-            .gap(px(14.))
+            .gap(px(2.))
             .child(
-                link("scan-project", "Scan a project's .env files…")
+                action("scan-project", "folder-search", "Scan a project…")
                     .on_click(cx.listener(|this, _, _, cx| this.scan_project(cx))),
             )
             .child(
-                link(
+                action(
                     "rediscover",
-                    if self.discovering {
-                        "Looking…"
-                    } else {
-                        "Refresh"
-                    },
+                    "refresh-cw",
+                    if self.discovering { "Looking…" } else { "Refresh" },
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.rediscover(cx))),
             )
@@ -335,7 +388,13 @@ impl Workspace {
         let found: Vec<&Found> = self.project_found.iter().chain(&self.found).collect();
         if found.is_empty() {
             return div()
-                .text_size(px(12.5))
+                .px(px(16.))
+                .py(px(14.))
+                .rounded(px(RADIUS_CARD))
+                .border_1()
+                .border_color(theme.line_2)
+                .text_size(px(12.))
+                .line_height(px(18.))
                 .text_color(theme.t3)
                 .child(if self.discovering {
                     "Looking for databases on this Mac…"
@@ -348,27 +407,28 @@ impl Workspace {
         let mut list = div()
             .flex()
             .flex_col()
-            .rounded(px(8.))
+            .rounded(px(RADIUS_CARD))
             .border_1()
             .border_color(theme.line)
+            .bg(theme.s2)
             .overflow_hidden();
         for (ix, found) in found.into_iter().enumerate() {
             let target = found.clone();
             let available = !matches!(found.target, FoundTarget::NotYet(_));
-            let action = match (&found.target, found.ready()) {
-                (FoundTarget::NotYet(_), _) => "Soon",
-                (_, true) => "Connect",
-                (_, false) => "Set up…",
+            let (action, kind) = match (&found.target, found.ready()) {
+                (FoundTarget::NotYet(_), _) => ("Coming soon", None),
+                (_, true) => ("Connect", Some(ButtonKind::Primary)),
+                (_, false) => ("Set up…", Some(ButtonKind::Secondary)),
             };
             list = list.child(
                 div()
                     .id(("found", ix))
-                    .h(px(52.))
-                    .px(px(12.))
+                    .h(px(56.))
+                    .pl(px(12.))
+                    .pr(px(12.))
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .bg(theme.s2)
                     .when(ix > 0, |el| el.border_t_1().border_color(theme.line_2))
                     .when(available, |el| {
                         el.cursor_pointer()
@@ -377,7 +437,6 @@ impl Workspace {
                                 this.connect_found(&target, window, cx)
                             }))
                     })
-                    .when(!available, |el| el.opacity(0.55))
                     .child(engine_badge(
                         theme,
                         match found.engine() {
@@ -387,6 +446,7 @@ impl Workspace {
                             "DuckDB" => "DK",
                             _ => "··",
                         },
+                        available,
                     ))
                     .child(
                         div()
@@ -394,8 +454,15 @@ impl Workspace {
                             .min_w(px(0.))
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
-                            .child(div().truncate().text_size(px(13.)).child(found.detail()))
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(12.))
+                                    .text_color(if available { theme.text } else { theme.t2 })
+                                    .child(found.detail()),
+                            )
                             .child(
                                 div()
                                     .truncate()
@@ -404,14 +471,17 @@ impl Workspace {
                                     .child(found.source.clone()),
                             ),
                     )
-                    .child(
-                        div()
+                    .child(match kind {
+                        Some(kind) => button(theme, ("found-action", ix), action, kind, true)
+                            .h(px(26.))
+                            .into_any_element(),
+                        None => div()
                             .flex_none()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if available { theme.acc } else { theme.warn })
-                            .child(action),
-                    ),
+                            .text_size(px(11.5))
+                            .text_color(theme.t3)
+                            .child(action)
+                            .into_any_element(),
+                    }),
             );
         }
         list.into_any_element()
@@ -427,9 +497,10 @@ fn section(
     div()
         .flex()
         .flex_col()
-        .gap(px(10.))
+        .gap(px(12.))
         .child(
             div()
+                .h(px(24.))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -445,18 +516,18 @@ fn section(
         .child(content)
 }
 
-fn engine_badge(theme: &Theme, label: &'static str) -> impl IntoElement {
+fn engine_badge(theme: &Theme, label: &'static str, available: bool) -> impl IntoElement {
     div()
-        .size(px(30.))
+        .size(px(32.))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(6.))
-        .bg(theme.acc_wash)
+        .rounded(px(RADIUS_CONTROL + 1.))
+        .bg(if available { theme.acc_wash } else { theme.s3 })
         .font_family(MONO_FONT)
-        .text_size(px(10.))
+        .text_size(px(11.))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.acc)
+        .text_color(if available { theme.acc } else { theme.t3 })
         .child(label)
 }

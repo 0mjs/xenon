@@ -34,7 +34,7 @@ use crate::results::{self, Grid, Selection};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
     centered_hint, connection_tags, empty_hint, env_tag, field, format_duration, group_digits, kbd,
-    kbd_on_accent, panel_label, pretty_json,
+    kbd_on_accent, panel_label, pretty_json, ButtonKind, RADIUS_CONTROL, self as widgets,
 };
 use crate::{
     CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown,
@@ -409,7 +409,7 @@ pub struct Workspace {
     pub(crate) project_found: Vec<Found>,
     pub(crate) discovering: bool,
     theme_choice: ThemeChoice,
-    palette: Option<(Entity<Palette>, Subscription)>,
+    pub(crate) palette: Option<(Entity<Palette>, Subscription)>,
     connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
     confirm: Option<(Entity<ConfirmDialog>, Subscription, Pending)>,
     pub(crate) saved: Vec<SavedConnection>,
@@ -1480,7 +1480,7 @@ impl Workspace {
         }
     }
 
-    fn select_cell(
+    pub(crate) fn select_cell(
         &mut self,
         row: usize,
         column: usize,
@@ -1589,7 +1589,7 @@ impl Workspace {
 
     // ------------------------------------------------------------- palette
 
-    fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             return;
         }
@@ -1715,7 +1715,7 @@ impl Workspace {
         self.show_panel(SidePanel::Explorer, window, cx);
     }
 
-    fn show_history(&mut self, _: &ShowHistory, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_history(&mut self, _: &ShowHistory, window: &mut Window, cx: &mut Context<Self>) {
         self.show_panel(SidePanel::History, window, cx);
     }
 
@@ -1776,7 +1776,7 @@ impl Render for Workspace {
                 el.child(self.render_side_panel(&theme, cx))
             })
             .child(self.render_center(&theme, cx))
-            .when(self.show_inspector, |el| {
+            .when(self.show_inspector && self.session.is_some(), |el| {
                 el.child(self.render_inspector(&theme))
             });
 
@@ -1885,6 +1885,7 @@ impl Workspace {
             let running = matches!(tab.query, Query::Running { .. });
             div()
                 .id(("tab", tab.id))
+                .group("tab")
                 .h_full()
                 .max_w(px(TAB_MAX_WIDTH))
                 .pl(px(14.))
@@ -1911,15 +1912,20 @@ impl Workspace {
                 .child(
                     div()
                         .id(("close-tab", tab.id))
-                        .px(px(3.))
-                        .text_size(px(10.))
-                        .text_color(if active { theme.t3 } else { theme.bg })
-                        .hover(|s| s.text_color(theme.text))
+                        .size(px(18.))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        // Hidden on inactive tabs until the tab is hovered.
+                        .when(!active, |el| el.opacity(0.).group_hover("tab", |s| s.opacity(1.)))
+                        .hover(|s| s.bg(theme.s3))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_tab_at(index, window, cx);
                         }))
-                        .child("✕"),
+                        .child(svg().path(assets::icon("x")).size(px(12.)).text_color(theme.t2)),
                 )
                 .when(active, |el| {
                     el.child(
@@ -1978,7 +1984,7 @@ impl Workspace {
                             .text_color(theme.t2),
                     ),
             )
-            .child(
+            .when(self.session.is_some(), |el| el.child(
                 div()
                     .id("tab-strip")
                     .h_full()
@@ -1987,23 +1993,25 @@ impl Workspace {
                     .min_w(px(0.))
                     .overflow_x_scroll()
                     .children(tabs),
-            )
-            .child(
+            ).child(
                 div()
                     .id("new-tab")
-                    .h_full()
-                    .px(px(10.))
+                    .ml(px(6.))
+                    .size(px(24.))
                     .flex()
+                    .flex_none()
                     .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_CONTROL))
                     .text_color(theme.t3)
                     .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
+                    .hover(|s| s.bg(theme.s3).text_color(theme.text))
                     .on_click(cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
                         this.new_tab(&NewTab, window, cx);
                     }))
-                    .child("+"),
-            )
+                    .child(svg().path(assets::icon("plus")).size(px(14.)).text_color(theme.t3)),
+            ))
             .child(div().flex_1().h_full())
             .child(
                 div()
@@ -2134,15 +2142,21 @@ impl Workspace {
         let editor = div()
             .h(px(self.editor_height))
             .flex_none()
-            .relative()
+            .flex()
+            .flex_col()
             .bg(theme.s2)
             .border_b_1()
             .border_color(theme.line)
-            .font_family(MONO_FONT)
-            .text_size(px(12.5))
-            .py(px(6.))
-            .child(Editor::new(&tab.editor).h_full().appearance(false))
-            .child(self.render_toolbar(theme, cx));
+            .child(self.render_toolbar(theme, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .pt(px(6.))
+                    .font_family(MONO_FONT)
+                    .text_size(px(12.5))
+                    .child(Editor::new(&tab.editor).h_full().appearance(false)),
+            );
 
         div()
             .flex_1()
@@ -2187,67 +2201,70 @@ impl Workspace {
     }
 
     fn render_toolbar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = matches!(self.active_tab().query, Query::Running { .. });
-        let button =
-            |id: &'static str, label: &'static str, keys: Option<&'static str>, primary: bool| {
-                div()
-                    .id(id)
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .border_1()
-                    .cursor_pointer()
-                    .font_family(UI_FONT)
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .when(primary, |el| {
-                        el.bg(theme.acc)
-                            .border_color(theme.acc)
-                            .text_color(theme.bg)
-                    })
-                    .when(!primary, |el| {
-                        el.bg(theme.s1)
-                            .border_color(theme.line)
-                            .text_color(theme.t2)
-                            .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-                    })
-                    .child(label)
-                    .when_some(keys, |el, keys| {
-                        el.child(if primary {
-                            kbd_on_accent(theme, keys)
+        let tab = self.active_tab();
+        let running = matches!(tab.query, Query::Running { .. });
+        let small = |button: gpui::Stateful<gpui::Div>| button.h(px(26.)).px(px(10.));
+
+        // Where this query runs: the connection, then what the tab is.
+        let context = self.session.as_ref().map(|session| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .min_w(px(0.))
+                .text_color(theme.t3)
+                .child(
+                    svg()
+                        .path(assets::icon("database"))
+                        .size(px(13.))
+                        .flex_none()
+                        .text_color(if session.environment == Environment::Production {
+                            theme.err
                         } else {
-                            kbd(theme, keys)
-                        })
-                    })
-            };
+                            theme.t3
+                        }),
+                )
+                .child(div().text_color(theme.t2).truncate().child(session.name.clone()))
+                .child("/")
+                .child(div().truncate().child(tab.title.clone()))
+        });
 
         let mut bar = div()
-            .absolute()
-            .top(px(8.))
-            .right(px(10.))
+            .h(px(40.))
+            .flex_none()
             .flex()
-            .gap(px(6.));
+            .items_center()
+            .gap(px(6.))
+            .pl(px(14.))
+            .pr(px(8.))
+            .border_b_1()
+            .border_color(theme.line_2)
+            .font_family(UI_FONT)
+            .children(context)
+            .child(div().flex_1());
         if running {
-            bar = bar
-                .child(button("cancel", "Cancel", Some("⌘."), true).on_click(
-                    cx.listener(|this, _, w, cx| this.cancel_query(&CancelQuery, w, cx)),
-                ));
+            bar = bar.child(
+                small(widgets::button(theme, "cancel", "Cancel", ButtonKind::Secondary, true))
+                    .child(kbd(theme, "⌘."))
+                    .on_click(cx.listener(|this, _, w, cx| this.cancel_query(&CancelQuery, w, cx))),
+            );
         } else {
             bar = bar
                 .child(
-                    button("explain", "Explain", None, false)
+                    small(widgets::button(theme, "explain", "Explain", ButtonKind::Ghost, true))
                         .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::Explain, w, cx))),
                 )
                 .child(
-                    button("run-all", "Run all", Some("⇧⌘↵"), false)
+                    small(widgets::button(theme, "run-all", "Run all", ButtonKind::Ghost, true))
                         .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::All, w, cx))),
                 )
                 .child(
-                    button("run", "Run", Some("⌘↵"), true).on_click(
-                        cx.listener(|this, _, w, cx| this.run(RunScope::Statement, w, cx)),
-                    ),
+                    small(widgets::button(theme, "run", "Run", ButtonKind::Primary, true))
+                        .pl(px(8.))
+                        .child(kbd_on_accent(theme, "⌘↵"))
+                        .on_click(
+                            cx.listener(|this, _, w, cx| this.run(RunScope::Statement, w, cx)),
+                        ),
                 );
         }
         bar
@@ -2269,27 +2286,29 @@ impl Workspace {
         let active = sorted.is_some() || !browse.filter.read(cx).value().trim().is_empty();
 
         div()
-            .h(px(42.))
+            .h(px(44.))
             .flex_none()
             .flex()
             .items_center()
             .gap(px(8.))
-            .px(px(10.))
+            .px(px(8.))
             .border_b_1()
             .border_color(theme.line)
             .child(
                 field(
                     theme,
-                    div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
-                        .text_color(if self.field_focus.browse {
-                            theme.acc
-                        } else {
-                            theme.t3
-                        })
-                        .child("WHERE")
-                        .into_any_element(),
+                    Some(
+                        div()
+                            .font_family(MONO_FONT)
+                            .text_size(px(10.5))
+                            .text_color(if self.field_focus.browse {
+                                theme.acc
+                            } else {
+                                theme.t3
+                            })
+                            .child("WHERE")
+                            .into_any_element(),
+                    ),
                     &browse.filter,
                     self.field_focus.browse,
                 )
@@ -2306,72 +2325,78 @@ impl Workspace {
             })
             .when(active, |el| {
                 el.child(
-                    div()
-                        .id("clear-filter")
-                        .px(px(8.))
-                        .py(px(3.))
-                        .border_1()
-                        .border_color(theme.line)
-                        .text_color(theme.t2)
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text).border_color(theme.t3))
-                        .on_click(cx.listener(|this, _, w, cx| this.clear_browse_filter(w, cx)))
-                        .child("Clear"),
+                    widgets::button(theme, "clear-filter", "Reset", ButtonKind::Ghost, true)
+                        .on_click(cx.listener(|this, _, w, cx| this.clear_browse_filter(w, cx))),
                 )
             })
     }
 
     fn render_results_bar(&self, theme: &Theme) -> impl IntoElement {
         let tab = self.active_tab();
-        let mut cells: Vec<(SharedString, Rgba)> = Vec::new();
-        match &tab.query {
-            Query::Idle => cells.push(("No results".into(), theme.t3)),
-            Query::Running { .. } => cells.push(("Running… ⌘. to cancel".into(), theme.t2)),
-            Query::Failed(_) => cells.push(("ERROR".into(), theme.err)),
-            Query::Done(result) => {
-                cells.push(("OK".into(), theme.ok));
+        // A status dot and word, then quieter facts about the result.
+        let (dot, status): (Rgba, SharedString) = match &tab.query {
+            Query::Idle => (theme.t3, "No results".into()),
+            Query::Running { .. } => (theme.acc, "Running…".into()),
+            Query::Failed(_) => (theme.err, "Error".into()),
+            Query::Done(result) => (
+                theme.ok,
                 match (&result.outcome, &tab.grid) {
                     (QueryOutcome::Rows(_), Some(grid)) => {
                         let count = group_digits(grid.data.rows.len());
-                        let label = if grid.data.truncated {
-                            format!("first {count} rows")
+                        let noun = if grid.data.rows.len() == 1 { "row" } else { "rows" };
+                        if grid.data.truncated {
+                            format!("First {count} {noun}")
                         } else {
-                            format!("{count} rows")
-                        };
-                        cells.push((label.into(), theme.t2));
+                            format!("{count} {noun}")
+                        }
                     }
-                    (QueryOutcome::Affected(n), _) => cells.push((
-                        format!("{} rows affected", group_digits(*n as usize)).into(),
-                        theme.t2,
-                    )),
-                    _ => {}
+                    (QueryOutcome::Affected(n), _) => {
+                        format!("{} rows affected", group_digits(*n as usize))
+                    }
+                    _ => "Done".into(),
                 }
-                cells.push((format_duration(result.elapsed).into(), theme.t3));
-                if result.statements > 1 {
-                    cells.push((format!("{} statements", result.statements).into(), theme.t3));
-                }
+                .into(),
+            ),
+        };
+        let mut facts: Vec<SharedString> = Vec::new();
+        if let Query::Done(result) = &tab.query {
+            facts.push(format_duration(result.elapsed).into());
+            if result.statements > 1 {
+                facts.push(format!("{} statements", result.statements).into());
             }
+        }
+        if let Query::Running { .. } = &tab.query {
+            facts.push("⌘. to cancel".into());
         }
 
         div()
-            .h(px(30.))
+            .h(px(32.))
             .flex_none()
             .flex()
             .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .px(px(14.))
             .border_b_1()
             .border_color(theme.line)
-            .font_family(MONO_FONT)
-            .text_size(px(11.))
-            .children(cells.into_iter().map(|(text, color)| {
+            .bg(theme.s1)
+            .text_size(px(11.5))
+            .child(
                 div()
-                    .h_full()
-                    .px(px(12.))
                     .flex()
                     .items_center()
-                    .border_r_1()
-                    .border_color(theme.line)
-                    .text_color(color)
-                    .child(text)
+                    .gap(px(7.))
+                    .text_color(theme.text)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(div().size(px(7.)).rounded_full().bg(dot))
+                    .child(status),
+            )
+            .children(facts.into_iter().map(|fact| {
+                div()
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(theme.t3)
+                    .child(fact)
             }))
     }
 
@@ -2464,15 +2489,33 @@ impl Workspace {
 
         match &tab.query {
             Query::Failed(message) => div()
-                .m(px(12.))
-                .p(px(12.))
-                .bg(theme.s1)
-                .border_l_2()
-                .border_color(theme.err)
-                .font_family(MONO_FONT)
-                .text_size(px(11.5))
-                .text_color(theme.t2)
-                .child(message.clone())
+                .m(px(14.))
+                .px(px(14.))
+                .py(px(12.))
+                .flex()
+                .gap(px(10.))
+                .rounded(px(widgets::RADIUS_CARD))
+                .bg(Rgba { a: 0.08, ..theme.err })
+                .border_1()
+                .border_color(Rgba { a: 0.3, ..theme.err })
+                .child(
+                    svg()
+                        .path(assets::icon("triangle-alert"))
+                        .mt(px(1.))
+                        .size(px(15.))
+                        .flex_none()
+                        .text_color(theme.err),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .line_height(px(18.))
+                        .text_color(theme.text)
+                        .child(message.clone()),
+                )
                 .into_any_element(),
             Query::Running { .. } => centered_hint(theme, "Running…"),
             Query::Done(_) => centered_hint(theme, "Done."),
@@ -2532,17 +2575,19 @@ impl Workspace {
             .overflow_y_scroll()
             .children(columns.iter().zip(row).map(|(column, value)| {
                 div()
-                    .px(px(14.))
-                    .py(px(6.))
+                    .px(px(12.))
+                    .py(px(8.))
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
+                    .gap(px(3.))
                     .border_b_1()
                     .border_color(theme.line_2)
                     .font_family(MONO_FONT)
-                    .text_size(px(11.))
+                    .text_size(px(11.5))
                     .child(
                         div()
+                            .font_family(UI_FONT)
+                            .text_size(px(11.))
                             .text_color(theme.t3)
                             .child(SharedString::from(column.name.clone())),
                     )
@@ -2586,7 +2631,7 @@ impl Workspace {
                 .child(
                     cell("".into(), theme.t2)
                         .gap(px(6.))
-                        .child(div().text_color(theme.ok).child("●"))
+                        .child(div().size(px(6.)).rounded_full().bg(theme.ok))
                         .child(session.name.clone())
                         .children(
                             connection_tags(
