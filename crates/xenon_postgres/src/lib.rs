@@ -59,6 +59,8 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
 
 pub struct PostgresConnection {
     name: String,
+    /// `current_schema()` when connected: where unqualified names resolve.
+    schema: Option<String>,
     id: String,
     local: bool,
     version: String,
@@ -166,6 +168,16 @@ impl PostgresConnection {
                 let _ = connection.await;
             });
 
+            let schema = client
+                .simple_query("select current_schema()")
+                .await
+                .map_err(describe_error)?
+                .into_iter()
+                .find_map(|msg| match msg {
+                    SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+                    _ => None,
+                });
+
             let version = client
                 .simple_query("show server_version")
                 .await
@@ -181,6 +193,7 @@ impl PostgresConnection {
                 name,
                 id,
                 local,
+                schema,
                 version: format!(
                     "postgres {}",
                     version.split_whitespace().next().unwrap_or("")
@@ -370,6 +383,10 @@ impl Connection for PostgresConnection {
 
     fn is_local(&self) -> bool {
         self.local
+    }
+
+    fn default_schema(&self) -> Option<String> {
+        self.schema.clone()
     }
 }
 

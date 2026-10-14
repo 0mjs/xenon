@@ -42,7 +42,7 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 | `⌘O` | Open SQLite file |
 | `⌘N` | New server connection (Postgres, MySQL / MariaDB) |
 | `⇧⌘N` | Connections: open another database alongside |
-| `⇧⌘W` | Close the current tab's connection |
+| `⇧⌘W` | Disconnect the current tab's database (or the plug button next to it in the explorer) |
 | `⌘↵` | Run the statement under the cursor (or the selection) |
 | `⇧⌘↵` | Run everything in the editor (or the selection) |
 | `⌘E` | Explain the statement under the cursor |

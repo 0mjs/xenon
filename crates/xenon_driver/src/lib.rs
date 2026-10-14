@@ -214,4 +214,20 @@ pub trait Connection: Send + Sync {
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
     }
+
+    /// An identifier as a person would write it: bare when that reads back as
+    /// the same name (`orders`), quoted otherwise (`"Orders"`, `"order"`, `"two words"`).
+    fn ident(&self, ident: &str) -> String {
+        if sql::is_plain_ident(ident) {
+            ident.to_string()
+        } else {
+            self.quote_ident(ident)
+        }
+    }
+
+    /// The schema that unqualified names resolve to (Postgres's `current_schema()`,
+    /// MySQL's current database, SQLite's `main`), so generated SQL can leave it out.
+    fn default_schema(&self) -> Option<String> {
+        None
+    }
 }

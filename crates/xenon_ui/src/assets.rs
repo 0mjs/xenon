@@ -36,6 +36,7 @@ icons![
     "table-2",
     "trash-2",
     "triangle-alert",
+    "unplug",
     "x"
 ];
 

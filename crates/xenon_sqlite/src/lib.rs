@@ -202,6 +202,10 @@ impl Connection for SqliteConnection {
         true
     }
 
+    fn default_schema(&self) -> Option<String> {
+        Some("main".into())
+    }
+
     fn explain(&self, sql: &str) -> String {
         format!("explain query plan {sql}")
     }

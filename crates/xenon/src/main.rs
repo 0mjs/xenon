@@ -73,7 +73,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Connections…", ShowConnections),
             MenuItem::action("Open SQLite File…", OpenFile),
             MenuItem::action("New Connection…", NewConnection),
-            MenuItem::action("Close Connection", CloseConnection),
+            MenuItem::action("Disconnect", CloseConnection),
         ]),
         Menu::new("Query").items([
             MenuItem::action("Run Statement", RunQuery),

@@ -108,6 +108,8 @@ pub struct MysqlConnection {
     id: String,
     local: bool,
     version: String,
+    /// The database connected to, if any: where unqualified names resolve.
+    schema: Option<String>,
     mariadb: bool,
     read_only: bool,
     conn: Mutex<Conn>,
@@ -192,6 +194,10 @@ impl MysqlConnection {
         };
 
         let mut conn = conn;
+        let schema: Option<String> = conn
+            .query_first("select database()")
+            .map_err(describe_error)?
+            .flatten();
         let raw_version: String = conn
             .query_first("select version()")
             .map_err(describe_error)?
@@ -213,6 +219,7 @@ impl MysqlConnection {
             local: matches!(host, "localhost" | "127.0.0.1" | "::1"),
             version: format!("{} {number}", if mariadb { "mariadb" } else { "mysql" }),
             mariadb,
+            schema,
             read_only: options.read_only,
             cancel: Arc::new(MyCancel {
                 opts,
@@ -389,6 +396,10 @@ impl Connection for MysqlConnection {
 
     fn quote_ident(&self, ident: &str) -> String {
         format!("`{}`", ident.replace('`', "``"))
+    }
+
+    fn default_schema(&self) -> Option<String> {
+        self.schema.clone()
     }
 }
 

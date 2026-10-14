@@ -301,17 +301,176 @@ impl SortDirection {
     }
 }
 
+/// Words that can't be a bare identifier in at least one engine Xenon supports.
+/// Sorted, for binary search.
+const RESERVED: &[&str] = &[
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "authorization",
+    "between",
+    "binary",
+    "both",
+    "by",
+    "call",
+    "case",
+    "cast",
+    "change",
+    "check",
+    "collate",
+    "column",
+    "columns",
+    "constraint",
+    "create",
+    "cross",
+    "current_date",
+    "current_role",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "database",
+    "databases",
+    "default",
+    "deferrable",
+    "delete",
+    "desc",
+    "describe",
+    "distinct",
+    "div",
+    "do",
+    "drop",
+    "else",
+    "end",
+    "except",
+    "exists",
+    "explain",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "freeze",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "having",
+    "ilike",
+    "in",
+    "index",
+    "initially",
+    "inner",
+    "insert",
+    "intersect",
+    "interval",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "key",
+    "keys",
+    "kill",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "localtime",
+    "localtimestamp",
+    "lock",
+    "match",
+    "mod",
+    "natural",
+    "not",
+    "notnull",
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "over",
+    "overlaps",
+    "partition",
+    "placing",
+    "primary",
+    "range",
+    "read",
+    "references",
+    "regexp",
+    "rename",
+    "replace",
+    "returning",
+    "right",
+    "rlike",
+    "row",
+    "rows",
+    "schema",
+    "select",
+    "session_user",
+    "set",
+    "show",
+    "similar",
+    "some",
+    "symmetric",
+    "table",
+    "tablesample",
+    "then",
+    "to",
+    "trailing",
+    "trigger",
+    "true",
+    "union",
+    "unique",
+    "update",
+    "usage",
+    "user",
+    "using",
+    "values",
+    "variadic",
+    "verbose",
+    "when",
+    "where",
+    "window",
+    "with",
+    "write",
+    "xor",
+];
+
+/// True when `ident` can be written without quotes and still mean itself in
+/// every engine: lowercase letters, digits and `_`, not starting with a digit,
+/// and not a reserved word.
+pub fn is_plain_ident(ident: &str) -> bool {
+    let mut chars = ident.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && RESERVED.binary_search(&ident).is_err()
+}
+
 /// The query behind "browse a table": `select *` with an optional raw `where`
-/// condition and sort column, capped at `limit` rows.
+/// condition and sort column, capped at `limit` rows. `schema` is left out when
+/// it's `None` (the connection's default).
 pub fn browse_table(
     quote: impl Fn(&str) -> String,
-    schema: &str,
+    schema: Option<&str>,
     table: &str,
     filter: &str,
     order: Option<(&str, SortDirection)>,
     limit: usize,
 ) -> String {
-    let mut sql = format!("select * from {}.{}", quote(schema), quote(table));
+    let name = match schema {
+        Some(schema) => format!("{}.{}", quote(schema), quote(table)),
+        None => quote(table),
+    };
+    let mut sql = format!("select * from {name}");
     let filter = filter.trim().trim_end_matches(';').trim();
     if !filter.is_empty() {
         sql.push_str(&format!("\nwhere {filter}"));
@@ -335,6 +494,56 @@ fn same_line(sql: &str, a: usize, b: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_words_are_sorted() {
+        assert!(RESERVED.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn plain_identifiers() {
+        for plain in ["orders", "order_items", "_tmp", "v2"] {
+            assert!(is_plain_ident(plain), "{plain}");
+        }
+        for quoted in [
+            "Orders",
+            "order",
+            "user",
+            "two words",
+            "2fa",
+            "naïve",
+            "",
+            "a-b",
+        ] {
+            assert!(!is_plain_ident(quoted), "{quoted}");
+        }
+    }
+
+    #[test]
+    fn browse_queries_read_like_hand_written_sql() {
+        let quote = |i: &str| {
+            if is_plain_ident(i) {
+                i.to_string()
+            } else {
+                format!("\"{i}\"")
+            }
+        };
+        assert_eq!(
+            browse_table(quote, None, "orders", "", None, 1000),
+            "select * from orders\nlimit 1000;"
+        );
+        assert_eq!(
+            browse_table(
+                quote,
+                Some("Analytics"),
+                "order",
+                "total > 5",
+                Some(("created_at", SortDirection::Descending)),
+                50
+            ),
+            "select * from \"Analytics\".\"order\"\nwhere total > 5\norder by created_at desc\nlimit 50;"
+        );
+    }
 
     fn texts(sql: &str) -> Vec<&str> {
         split_statements(sql).into_iter().map(|r| &sql[r]).collect()
@@ -433,13 +642,13 @@ mod tests {
     fn browse_table_builds_filter_and_order() {
         let quote = |s: &str| format!("\"{s}\"");
         assert_eq!(
-            browse_table(quote, "public", "orders", "", None, 1000),
+            browse_table(quote, Some("public"), "orders", "", None, 1000),
             "select * from \"public\".\"orders\"\nlimit 1000;"
         );
         assert_eq!(
             browse_table(
                 quote,
-                "public",
+                Some("public"),
                 "orders",
                 "  status = 'paid';  ",
                 Some(("total", SortDirection::Descending)),

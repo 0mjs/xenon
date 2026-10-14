@@ -129,23 +129,27 @@ impl Workspace {
                 .child(
                     div()
                         .id(("close-session", id))
-                        .size(px(18.))
+                        .size(px(22.))
                         .flex()
                         .flex_none()
                         .items_center()
                         .justify_center()
-                        .rounded(px(4.))
-                        .opacity(0.)
+                        .rounded(px(5.))
+                        .opacity(0.6)
                         .group_hover(group, |s| s.opacity(1.))
                         .hover(|s| s.bg(theme.raised))
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("Disconnect  ⇧⌘W")
+                                .build(window, cx)
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_session(id, window, cx);
                         }))
                         .child(
                             svg()
-                                .path(assets::icon("x"))
-                                .size(px(12.))
+                                .path(assets::icon("unplug"))
+                                .size(px(13.))
                                 .text_color(theme.t2),
                         ),
                 )

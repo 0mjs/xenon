@@ -1565,9 +1565,12 @@ impl Workspace {
             return;
         };
         let conn = session.conn.clone();
+        // Leave out the schema names resolve to anyway: `from orders`, not `from "public"."orders"`.
+        let schema = (conn.default_schema().as_deref() != Some(browse.schema.as_str()))
+            .then_some(browse.schema.as_str());
         let sql = browse_table(
-            |ident| conn.quote_ident(ident),
-            &browse.schema,
+            |ident| conn.ident(ident),
+            schema,
             &browse.table,
             &browse.filter.read(cx).value(),
             browse
@@ -1777,7 +1780,7 @@ impl Workspace {
             ("Next Tab", "⌃⇥", Box::new(NextTab)),
             ("Previous Tab", "⌃⇧⇥", Box::new(PrevTab)),
             ("Connections…", "⇧⌘N", Box::new(ShowConnections)),
-            ("Close Connection", "⇧⌘W", Box::new(CloseConnection)),
+            ("Disconnect", "⇧⌘W", Box::new(CloseConnection)),
             ("Open SQLite File…", "⌘O", Box::new(OpenFile)),
             ("New Connection…", "⌘N", Box::new(NewConnection)),
             ("Show Explorer", "⇧⌘E", Box::new(ShowExplorer)),
