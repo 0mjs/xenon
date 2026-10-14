@@ -191,11 +191,23 @@ Measure with `XENON_TRACE=1`.
 5. **Connectivity** — SSH tunnels/jump hosts, TLS variants, cloud IAM auth, reconnect after sleep.
 6. **GPUI maturity** — pre-1.0, API churn, thin docs, accessibility/IME gaps. Pin versions.
 
-## After v0.1
+## v0.2: connect to more, more easily
 
-Roughly in order: streaming result batches (and lifting the 100k cap), autocomplete from the
-schema, inline cell editing with generated `UPDATE`s, SSH tunnels, import/export, MySQL, then the
-long tail toward Beekeeper parity (SQL Server, DuckDB, ClickHouse, Redis, MongoDB…).
+Two halves: make getting connected effortless, then add the engines most people use after
+Postgres and SQLite. Each milestone ships on its own.
+
+| # | Milestone | Done when |
+|---|---|---|
+| M7 | **Connections home** | With nothing open, the window is a launcher: saved connections as cards grouped by environment, recent files, and **New connection** with an engine picker. One "paste anything" field takes `postgres://`, `mysql://`, `sqlserver://` URLs, a `DATABASE_URL=` line or a file path and works out the engine. |
+| M8 | **Find my databases** | **Discover** lists databases already on this Mac: Docker containers exposing Postgres/MySQL/SQL Server ports, Homebrew services on default ports, `~/.pgpass` and `pg_service.conf` entries, and `DATABASE_URL`s in a chosen project's `.env` files. One click to connect or save. |
+| M9 | **Several connections at once** | Connections stay open side by side; the explorer lists each one; every tab is bound to a connection (shown on the tab); ⌘K searches tables across all of them. |
+| M10 | **MySQL & MariaDB** | Driver on `mysql_async`, covering MySQL 5.7/8/9, MariaDB, TiDB and PlanetScale: TLS, cancel (`KILL QUERY`), schemas, exact decimals and dates, EXPLAIN. Tested against Docker MySQL and MariaDB. |
+| M11 | **DuckDB, and open CSV / Parquet** | Driver on the bundled `duckdb` crate. Dropping a `.duckdb`, `.parquet`, `.csv` or `.json` file opens it and queries it with SQL straight away. |
+| M12 | **SQL Server, and SSH tunnels** | Driver on `tiberius` (SQL Server 2017+, Azure SQL). Any server connection can go through an SSH bastion (`russh`, keys from `~/.ssh` or the agent), with the tunnel shown in the status bar. |
+
+After v0.2, in rough order: streaming result batches (lifting the 100k cap), schema-aware
+autocomplete, inline cell editing with generated `UPDATE`s, import/export, then the long tail
+toward Beekeeper parity (ClickHouse, Redis, MongoDB, Oracle via ODBC…).
 
 ## Open questions
 
