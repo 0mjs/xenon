@@ -4,9 +4,9 @@
 
 ## Vision
 
-Most DB clients are either powerful and cluttered (DBeaver), pretty but closed (TablePlus),
-or Electron-heavy (Beekeeper). Xenon aims to be all three of: **native-fast**, **calm and
-keyboard-first**, and **open source**.
+Most DB clients are either powerful and cluttered, pretty but closed, or slow because they
+ship a browser. Xenon aims to be all three of: **native-fast**, **calm and keyboard-first**,
+and **open source**.
 
 **Principles**
 
@@ -17,8 +17,9 @@ keyboard-first**, and **open source**.
    Read-only connections are a first-class toggle.
 5. **Local-first.** No account, no telemetry by default. Your data stays on your machine.
 
-**Long-term goal:** feature parity with Beekeeper Studio, including NoSQL engines
-(Redis, MongoDB, Cassandra, DynamoDB, SurrealDB), delivered in finite driver tiers.
+**Long-term goal:** a complete everyday database client, including non-relational engines
+(MongoDB, Redis, DynamoDB, Cassandra), delivered in finite driver tiers. The full scope and
+release order for 1.0 is in [ROADMAP.md](ROADMAP.md).
 
 ## Prototype scope (v0.1)
 
@@ -203,7 +204,8 @@ Measure with `XENON_TRACE=1`.
 ## Key risks
 
 1. **SQL editor** — GPUI ships no standalone editor (Zed's is welded to Zed), so the basics
-   Beekeeper gets free from CodeMirror (editing, undo, selection, IME, highlighting) are on us.
+   browser-based clients get free from their editor libraries (editing, undo, selection, IME,
+   highlighting) are on us.
    Parity autocomplete is simple (keywords, tables, columns); smarter is a later bonus.
 2. **Data grid** — virtualization, selection, keyboard nav, inline editing, huge cells; all custom.
 3. **Type fidelity** — every type must display, edit and round-trip losslessly (numeric, tz,
@@ -226,9 +228,8 @@ Postgres and SQLite. Each milestone ships on its own.
 | M11 | **DuckDB, and open CSV / Parquet** | Driver on the bundled `duckdb` crate. Dropping a `.duckdb`, `.parquet`, `.csv` or `.json` file opens it and queries it with SQL straight away. |
 | M12 | **SQL Server, and SSH tunnels** | Driver on `tiberius` (SQL Server 2017+, Azure SQL). Any server connection can go through an SSH bastion (`russh`, keys from `~/.ssh` or the agent), with the tunnel shown in the status bar. |
 
-After v0.2, in rough order: streaming result batches (lifting the 100k cap), schema-aware
-autocomplete, inline cell editing with generated `UPDATE`s, import/export, then the long tail
-toward Beekeeper parity (ClickHouse, Redis, MongoDB, Oracle via ODBC…).
+After v0.2, see [ROADMAP.md](ROADMAP.md): 0.3 change data, 0.4 write queries faster, 0.5 schema,
+0.6 wider SQL, 0.7 beyond SQL, 0.8 move data, 0.9 everywhere, 1.0 finish.
 
 ## Open questions
 

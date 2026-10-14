@@ -13,7 +13,7 @@ A fast, minimal database client for Postgres and SQLite. Native, written in Rust
   connection's name to go ahead. Passwords live in the macOS Keychain.
 - **Postgres and SQLite**, with TLS (every libpq `sslmode`), cancel, exact numbers, query plans.
 
-Version 0.1, early. See [PLAN.md](PLAN.md) for what's next.
+Version 0.1, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
 
 ## Install
 
