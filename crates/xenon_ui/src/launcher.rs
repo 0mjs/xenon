@@ -51,7 +51,8 @@ impl Workspace {
                                     .child("Paste a connection, open a file, or pick one below."),
                             ),
                     )
-                    .child(self.render_paste(theme)),
+                    .child(self.render_paste(theme))
+                    .children(self.render_status(theme, cx)),
             )
             .child(section(
                 theme,
@@ -87,6 +88,93 @@ impl Workspace {
             .pb(px(64.))
             .child(column)
             .into_any_element()
+    }
+
+    /// "Connecting to …" while a connection opens, or why the last one didn't.
+    fn render_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(name) = &self.connecting {
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .text_color(theme.t2)
+                    .child(div().size(px(7.)).rounded_full().bg(theme.acc))
+                    .child(format!("Connecting to {name}…"))
+                    .into_any_element(),
+            );
+        }
+        let notice = self.notice.clone()?;
+        Some(
+            div()
+                .flex()
+                .gap(px(10.))
+                .px(px(14.))
+                .py(px(12.))
+                .rounded(px(RADIUS_CARD))
+                .bg(gpui::Rgba {
+                    a: 0.08,
+                    ..theme.err
+                })
+                .border_1()
+                .border_color(gpui::Rgba {
+                    a: 0.3,
+                    ..theme.err
+                })
+                .child(
+                    svg()
+                        .path(assets::icon("triangle-alert"))
+                        .mt(px(1.))
+                        .size(px(15.))
+                        .flex_none()
+                        .text_color(theme.err),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child("Couldn't connect"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(px(18.))
+                                .text_color(theme.t2)
+                                .child(notice),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("dismiss-notice")
+                        .size(px(22.))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS_CONTROL))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.s3))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.notice = None;
+                            cx.notify();
+                        }))
+                        .child(
+                            svg()
+                                .path(assets::icon("x"))
+                                .size(px(12.))
+                                .text_color(theme.t2),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn render_paste(&self, theme: &Theme) -> impl IntoElement {

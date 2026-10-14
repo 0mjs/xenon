@@ -401,8 +401,10 @@ pub struct Workspace {
     next_tab_id: usize,
     pub(crate) sessions: Vec<Session>,
     next_session_id: usize,
-    /// A problem opening a database, shown in the explorer.
+    /// A problem opening a database, shown on the Connect screen and in the explorer.
     pub(crate) notice: Option<SharedString>,
+    /// The connection being opened, while it opens.
+    pub(crate) connecting: Option<SharedString>,
     pub(crate) store: Option<Arc<Store>>,
     pub(crate) history: Vec<HistoryEntry>,
     pub(crate) history_filter: Entity<InputState>,
@@ -498,6 +500,7 @@ impl Workspace {
             sessions: Vec::new(),
             next_session_id: 0,
             notice: None,
+            connecting: None,
             store,
             history: Vec::new(),
             history_filter,
@@ -810,6 +813,8 @@ impl Workspace {
             return;
         }
         let store = self.store.clone();
+        self.connecting = Some(profile.name.clone().into());
+        cx.notify();
         let task = cx.background_spawn(async move {
             let conn = profile.connect()?;
             let schemas = conn.introspect()?;
@@ -819,6 +824,7 @@ impl Workspace {
         cx.spawn_in(window, async move |this, cx| {
             let opened = task.await;
             this.update_in(cx, |this, window, cx| {
+                this.connecting = None;
                 match opened {
                     Ok((conn, schemas, profile, saved_id)) => {
                         this.connect_dialog = None;

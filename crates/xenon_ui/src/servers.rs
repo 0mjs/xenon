@@ -148,6 +148,14 @@ fn or<'a>(value: &'a str, default: &'a str) -> &'a str {
 }
 
 /// `user@host:port/database`, with each engine's defaults filled in and no password.
+/// The user a server assumes when none is given (Postgres: your account name).
+pub fn default_user(engine: ServerEngine) -> String {
+    match engine {
+        ServerEngine::Postgres => xenon_postgres::default_user(),
+        engine => engine.default_user().to_string(),
+    }
+}
+
 pub fn describe(
     engine: ServerEngine,
     host: &str,
@@ -156,7 +164,8 @@ pub fn describe(
     user: &str,
 ) -> String {
     let host = or(host, "localhost");
-    let user = or(user, engine.default_user());
+    let fallback = default_user(engine);
+    let user = or(user, &fallback);
     let port = port.unwrap_or(engine.default_port());
     match (engine, database) {
         (ServerEngine::Mysql | ServerEngine::SqlServer, "") => format!("{user}@{host}:{port}"),
@@ -280,6 +289,23 @@ mod live {
         assert!(matches!(orders(my.as_ref()), Value::Integer(3000)));
     }
 
+    /// A Homebrew or Postgres.app server on 5432 has a role named after you,
+    /// not `postgres`; empty fields must work, as they do for psql.
+    #[test]
+    #[ignore]
+    fn local_postgres_with_empty_fields() {
+        if std::net::TcpStream::connect(("127.0.0.1", 5432)).is_err() {
+            return;
+        }
+        let options = ConnectOptions {
+            host: "localhost".into(),
+            port: Some(5432),
+            ..Default::default()
+        };
+        let conn = connect(ServerEngine::Postgres, &options).unwrap();
+        assert!(conn.server_version().starts_with("postgres "));
+    }
+
     #[test]
     #[ignore]
     fn an_unreachable_database_says_why() {
@@ -303,9 +329,11 @@ mod tests {
 
     #[test]
     fn descriptions_fill_in_defaults() {
+        // Like psql, no user means your account name; no database means `postgres`.
+        let me = xenon_postgres::default_user();
         assert_eq!(
             describe(ServerEngine::Postgres, "", None, "", ""),
-            "postgres@localhost:5432/postgres"
+            format!("{me}@localhost:5432/postgres")
         );
         assert_eq!(
             describe(ServerEngine::Mysql, "db", Some(3307), "", "app"),

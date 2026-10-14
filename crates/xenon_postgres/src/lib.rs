@@ -126,15 +126,19 @@ impl PostgresConnection {
                     .address
                     .map_or(options.port.unwrap_or(5432), |a| a.port()),
             )
-            .user(if options.user.is_empty() {
-                "postgres"
+            .user(&if options.user.is_empty() {
+                default_user()
             } else {
-                &options.user
+                options.user.clone()
             })
             .ssl_mode(wire_mode(options.ssl));
-        if !options.database.is_empty() {
-            config.dbname(&options.database);
-        }
+        // `postgres` exists on every server; a database named after the user
+        // (libpq's default) often doesn't.
+        config.dbname(if options.database.is_empty() {
+            "postgres"
+        } else {
+            &options.database
+        });
         if !options.password.is_empty() {
             config.password(&options.password);
         }
@@ -456,6 +460,15 @@ fn connection_name(config: &Config) -> String {
         .or(config.get_user())
         .unwrap_or("postgres");
     format!("{database}@{host}")
+}
+
+/// The user name libpq (and psql) assume when none is given: your account name.
+/// Homebrew and Postgres.app create a role with it rather than `postgres`.
+pub fn default_user() -> String {
+    std::env::var("USER")
+        .ok()
+        .filter(|user| !user.is_empty())
+        .unwrap_or_else(|| "postgres".into())
 }
 
 fn apply_types(rows: &mut ResultSet, types: &[Type]) {

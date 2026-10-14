@@ -49,8 +49,10 @@ impl Found {
 
     /// True when it has everything needed to connect; otherwise the
     /// connection form opens pre-filled.
+    /// Local servers are tried as they are (they often trust local users);
+    /// remote ones need a password first.
     pub fn ready(&self) -> bool {
-        matches!(&self.target, FoundTarget::Server(_, o) if !o.password.is_empty())
+        matches!(&self.target, FoundTarget::Server(_, o) if !o.password.is_empty() || is_local(&o.host))
     }
 
     fn key(&self) -> String {
@@ -599,7 +601,10 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].name, "reporting");
         assert_eq!(found[0].detail(), "analyst@replica.internal:5433/reports");
-        assert_eq!(found[1].detail(), "postgres@localhost:5432/dev");
+        assert_eq!(
+            found[1].detail(),
+            format!("{}@localhost:5432/dev", xenon_postgres::default_user())
+        );
     }
 
     #[test]
