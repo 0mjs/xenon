@@ -18,14 +18,10 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/xenon "$app/Contents/MacOS/xenon"
 
-# Icon: every size macOS asks for, from the 1024px master.
-iconset=$(mktemp -d)/Xenon.iconset
-mkdir -p "$iconset"
-for size in 16 32 128 256 512; do
-  sips -z $size $size assets/icon/xenon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
-  sips -z $((size * 2)) $((size * 2)) assets/icon/xenon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$iconset" -o "$app/Contents/Resources/Xenon.icns"
+# Icon: compile the layered Icon Composer icon. macOS 26 renders its light, dark, clear and
+# tinted looks from Assets.car; AppIcon.icns is the fallback for older systems.
+xcrun actool --compile "$PWD/$app/Contents/Resources" --platform macosx --minimum-deployment-target 12.0 \
+  --app-icon AppIcon --output-partial-info-plist "$(mktemp -d)/icon.plist" "$PWD/assets/icon/AppIcon.icon" >/dev/null
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,7 +32,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>Xenon</string>
   <key>CFBundleIdentifier</key><string>software.carbon.xenon</string>
   <key>CFBundleExecutable</key><string>xenon</string>
-  <key>CFBundleIconFile</key><string>Xenon</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleVersion</key><string>${version}</string>

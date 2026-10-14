@@ -11,10 +11,7 @@ cargo build --release -p xenon
 mkdir -p "$(dirname "$TARGET_BUILD_DIR/$EXECUTABLE_PATH")" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 cp target/release/xenon "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
 
-iconset="$DERIVED_FILE_DIR/Xenon.iconset"
-rm -rf "$iconset" && mkdir -p "$iconset"
-for size in 16 32 128 256 512; do
-  sips -z $size $size assets/icon/xenon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
-  sips -z $((size * 2)) $((size * 2)) assets/icon/xenon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$iconset" -o "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/Xenon.icns"
+# Layered Icon Composer icon: Assets.car for macOS 26's appearances, AppIcon.icns for older systems.
+xcrun actool --compile "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH" --platform macosx \
+  --minimum-deployment-target 12.0 --app-icon AppIcon \
+  --output-partial-info-plist "$DERIVED_FILE_DIR/icon.plist" "$root/assets/icon/AppIcon.icon" >/dev/null

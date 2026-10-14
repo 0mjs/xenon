@@ -1,0 +1,30 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "srgb:0.29412,0.51373,0.86275,1.00000",
+      "srgb:0.15294,0.33725,0.68235,1.00000"
+    ]
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "strata.svg",
+          "name": "strata"
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": false,
+        "value": 0.0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
