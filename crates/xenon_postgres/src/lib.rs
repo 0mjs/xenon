@@ -594,6 +594,18 @@ impl Connection for PostgresConnection {
                 .await
                 .map_err(describe_error)?
                 .and_then(|row| row.get(0));
+            // -1 until the table has been analyzed.
+            info.estimated_rows = self
+                .client
+                .query_opt(
+                    "select c.reltuples::bigint from pg_class c
+                     join pg_namespace n on n.oid = c.relnamespace
+                     where n.nspname = $1 and c.relname = $2",
+                    &params,
+                )
+                .await
+                .map_err(describe_error)?
+                .and_then(|row| u64::try_from(row.get::<_, i64>(0)).ok());
             Ok(info)
         })
     }

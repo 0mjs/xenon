@@ -579,6 +579,15 @@ impl Connection for MysqlConnection {
                 info.foreign_keys.push(key);
             }
         }
+        info.estimated_rows = conn
+            .exec_first::<Option<u64>, _, _>(
+                "select table_rows from information_schema.tables \
+                 where table_schema = ? and table_name = ?",
+                (schema, table),
+            )
+            .ok()
+            .flatten()
+            .flatten();
         let create = format!(
             "show create table {}.{}",
             self.quote_ident(schema),

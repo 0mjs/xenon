@@ -486,6 +486,16 @@ impl Connection for DuckDbConnection {
             .map_err(query_error)?;
         info.indexes.extend(more);
 
+        info.estimated_rows = conn
+            .query_row(
+                "select estimated_size from duckdb_tables()
+                 where database_name = current_database() and schema_name = ? and table_name = ?",
+                [schema, table],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten()
+            .and_then(|n| u64::try_from(n).ok());
         info.definition = conn
             .query_row(
                 "select sql from duckdb_tables()

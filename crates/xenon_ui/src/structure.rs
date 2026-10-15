@@ -105,6 +105,17 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                     ),
             )
     });
+    if let Some(rows) = info.estimated_rows {
+        body = body.child(
+            div()
+                .text_size(px(11.5))
+                .text_color(theme.t3)
+                .child(format!(
+                    "About {} rows (from the server's statistics)",
+                    crate::widgets::group_digits(rows as usize)
+                )),
+        );
+    }
     body = body.child(section(
         theme,
         "Columns",

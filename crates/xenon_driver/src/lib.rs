@@ -190,6 +190,18 @@ pub struct TableInfo {
     pub referenced_by: Vec<ForeignKey>,
     /// The `CREATE` statement, or a view's query, when the engine can give one.
     pub definition: Option<String>,
+    /// Rows by the engine's statistics (cheap, approximate), when it keeps them.
+    pub estimated_rows: Option<u64>,
+}
+
+impl TableInfo {
+    /// Whether some index leads with `column`, so sorting or filtering by it
+    /// needn't read the whole table.
+    pub fn indexed(&self, column: &str) -> bool {
+        self.indexes
+            .iter()
+            .any(|index| index.columns.first().is_some_and(|c| c == column))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

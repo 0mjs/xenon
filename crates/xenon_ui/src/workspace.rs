@@ -65,6 +65,8 @@ const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
 const TAB_MAX_WIDTH: f32 = 240.;
+/// Rows from which sorting by an unindexed column asks first.
+const LARGE_TABLE: u64 = 1_000_000;
 /// Room for the macOS traffic lights in the transparent title bar.
 const TRAFFIC_LIGHT_INSET: f32 = 78.;
 
@@ -287,6 +289,11 @@ pub(crate) enum Pending {
     DeleteQuery(i64),
     /// Disconnect a session with a transaction open.
     Disconnect(usize),
+    /// Sort a large table by a column without an index.
+    Sort {
+        tab_id: usize,
+        column: usize,
+    },
     /// Save a tab's staged changes.
     Save {
         tab_id: usize,
@@ -1433,6 +1440,12 @@ impl Workspace {
                     Pending::Disconnect(id) => {
                         this.disconnect(id, window, cx);
                         return;
+                    }
+                    Pending::Sort { tab_id, column } => {
+                        if let Some(index) = this.tabs.iter().position(|t| t.id == tab_id) {
+                            this.active = index;
+                            this.sort_now(column, window, cx);
+                        }
                     }
                 }
             }
@@ -2601,6 +2614,33 @@ impl Workspace {
         if self.guard_edits(cx) {
             return;
         }
+        // Sorting a big table by a column no index leads with reads all of it: ask.
+        let tab = &self.tabs[self.active];
+        if let (Some(browse), Some(grid)) = (&tab.browse, &tab.grid)
+            && let Some(info) = &browse.info
+            && let Some(rows) = info.estimated_rows.filter(|n| *n >= LARGE_TABLE)
+            && let Some(name) = grid.data.columns.get(column).map(|c| c.name.clone())
+            && !info.indexed(&name)
+            && browse.order.as_ref().is_none_or(|(c, _)| *c != name)
+        {
+            let body = format!(
+                "{} has about {} rows and no index on {name}, so the server reads all of them \
+                 to sort. On a busy server, that can slow everyone down.",
+                browse.table,
+                group_digits(rows as usize)
+            );
+            let tab_id = tab.id;
+            let dialog = cx.new(|cx| {
+                ConfirmDialog::new("Sort the whole table?", body, "", None, window, cx)
+                    .action("Sort anyway", false)
+            });
+            self.show_confirm(dialog, Pending::Sort { tab_id, column }, window, cx);
+            return;
+        }
+        self.sort_now(column, window, cx);
+    }
+
+    fn sort_now(&mut self, column: usize, window: &mut Window, cx: &mut Context<Self>) {
         let tab = &mut self.tabs[self.active];
         let Some(grid) = &mut tab.grid else { return };
         let name = grid.data.columns[column].name.clone();

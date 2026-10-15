@@ -747,6 +747,15 @@ impl Connection for MssqlConnection {
                 info.foreign_keys.push(key);
             }
         }
+        info.estimated_rows = rows(format!(
+            "select sum(rows) from sys.partitions \
+             where object_id = object_id({object}) and index_id in (0, 1)"
+        ))?
+        .first()
+        .and_then(|row| match row[0] {
+            Value::Integer(n) => u64::try_from(n).ok(),
+            _ => None,
+        });
         // Views, procedures and the like keep their source; tables don't.
         info.definition = rows(format!("select object_definition(object_id({object}))"))?
             .first()
