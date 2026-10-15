@@ -241,8 +241,8 @@ Postgres and SQLite. Each milestone ships on its own.
 | M18 ✅ | **Saved queries, session restore** | ⌘S names and keeps a query; a Saved panel; last session's tabs reopen at launch. |
 | M19 ✅ | **Conformance and CI** | One suite every driver passes against real servers, run on GitHub for every push. |
 
-After v0.2, see [ROADMAP.md](ROADMAP.md): 0.3 change data, 0.4 write queries faster, 0.5 schema,
-0.6 wider SQL, 0.7 beyond SQL, 0.8 move data, 0.9 everywhere, 1.0 finish.
+After v0.3, see [ROADMAP.md](ROADMAP.md): 0.4 change data, 0.5 write queries faster, 0.6 schema,
+0.7 wider SQL, 0.8 beyond SQL, 0.9 move data, 1.0 everywhere and finish.
 
 ## Open questions
 

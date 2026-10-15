@@ -20,11 +20,11 @@ A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server, SQLite
 - **SSH tunnels** through a bastion, using your own `ssh`: `~/.ssh/config` aliases, `ProxyJump`, the
   agent (1Password, Secretive) and `known_hosts` all just work.
 
-Version 0.2.0, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
+Version 0.3.0, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
 
 ## Install
 
-Download `Xenon-0.2.0.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
+Download `Xenon-0.3.0.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
 drag Xenon to Applications. It's signed with Carbon Software's Developer ID and notarized by
 Apple.
 

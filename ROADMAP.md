@@ -43,15 +43,15 @@ products.
 | **1** | MySQL / MariaDB ✅ | `mysql` | MySQL 5.7–9, MariaDB, TiDB, PlanetScale, Vitess | 0.2 |
 | **1** | SQL Server ✅ | `tiberius` | SQL Server 2017+, Azure SQL | 0.2 |
 | **2** | DuckDB ✅ | `duckdb` (prebuilt library) | DuckDB files; CSV / Parquet / JSON opened as tables | 0.2 |
-| **2** | CockroachDB | Postgres driver | Cockroach, YugabyteDB | 0.6 |
-| **2** | Amazon Redshift | Postgres driver | Redshift (old Postgres dialect, no `RETURNING`) | 0.6 |
-| **2** | libSQL / Turso | `libsql` | Remote libSQL, embedded replicas | 0.6 |
-| **2** | ClickHouse | `clickhouse` (HTTP) | ClickHouse, ClickHouse Cloud | 0.6 |
-| **2** | Oracle | `oracle` (ODPI-C, needs Instant Client) | Oracle 12c+, Autonomous DB | 0.6 |
-| **3** | MongoDB | `mongodb` | MongoDB 5+, Atlas, DocumentDB | 0.7 |
-| **3** | Redis | `redis` | Redis 6+, Valkey, Upstash, ElastiCache | 0.7 |
-| **3** | DynamoDB | `aws-sdk-dynamodb` | DynamoDB, local DynamoDB | 0.7 |
-| **3** | Cassandra | `scylla` | Cassandra 4+, ScyllaDB, Astra | 0.7 |
+| **2** | CockroachDB | Postgres driver | Cockroach, YugabyteDB | 0.7 |
+| **2** | Amazon Redshift | Postgres driver | Redshift (old Postgres dialect, no `RETURNING`) | 0.7 |
+| **2** | libSQL / Turso | `libsql` | Remote libSQL, embedded replicas | 0.7 |
+| **2** | ClickHouse | `clickhouse` (HTTP) | ClickHouse, ClickHouse Cloud | 0.7 |
+| **2** | Oracle | `oracle` (ODPI-C, needs Instant Client) | Oracle 12c+, Autonomous DB | 0.7 |
+| **3** | MongoDB | `mongodb` | MongoDB 5+, Atlas, DocumentDB | 0.8 |
+| **3** | Redis | `redis` | Redis 6+, Valkey, Upstash, ElastiCache | 0.8 |
+| **3** | DynamoDB | `aws-sdk-dynamodb` | DynamoDB, local DynamoDB | 0.8 |
+| **3** | Cassandra | `scylla` | Cassandra 4+, ScyllaDB, Astra | 0.8 |
 | **4** | BigQuery | REST (`gcp-bigquery-client`) | BigQuery | 1.x |
 | **4** | Snowflake | REST (SQL API) | Snowflake | 1.x |
 | **4** | Trino / Presto | HTTP client | Trino, Presto, Athena-compatible | 1.x |
@@ -84,9 +84,9 @@ so it can join the test fleet.
 | ✅ Discover local databases (Docker, ports, `.pgpass`, `pg_service.conf`, `.env`) | 0.2 |
 | ✅ Several connections open at once; tabs bound to a connection | 0.2 |
 | ✅ SSH tunnels: password, key, agent, `~/.ssh/config` hosts, jump hosts (`ProxyJump`) | 0.2 |
-| Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.3 |
-| Reconnect after sleep or network loss, keep tabs and unsaved edits | 0.3 |
-| Connection colours and folders; import connections from a URL list or other clients' exports | 0.4 |
+| Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.4 |
+| Reconnect after sleep or network loss, keep tabs and unsaved edits | 0.4 |
+| Connection colours and folders; import connections from a URL list or other clients' exports | 0.5 |
 | Cloud auth: AWS RDS IAM tokens, Azure AD, GCP Cloud SQL IAM | 1.0 |
 | Per-connection settings: row limit, statement timeout, auto-commit vs manual transactions | 1.0 |
 | Kerberos / LDAP | Later |
@@ -97,12 +97,12 @@ so it can join the test fleet.
 |---|---|
 | ✅ Highlighting, run statement under cursor / all, cancel, explain, history, tabs, palette | 0.1 |
 | ✅ Autocomplete from the live schema: tables, columns (alias-aware), functions, keywords | 0.4 |
-| Run a selection; run several statements and get one result tab each | 0.4 |
-| Query parameters (`:name`, `$1`, `?`) with a fill-in prompt that remembers values | 0.4 |
+| Run a selection; run several statements and get one result tab each | 0.5 |
+| Query parameters (`:name`, `$1`, `?`) with a fill-in prompt that remembers values | 0.5 |
 | ✅ Saved queries (⌘S, a Saved panel with filter) and reopening last session's tabs at launch. Still to do: folders | 0.4 |
-| Format SQL (per dialect), comment toggle, multi-cursor, find/replace | 0.4 |
-| Inline errors with position, plus "did you mean" for unknown columns and tables | 0.4 |
-| Visual EXPLAIN plan: tree plus timings, slowest node highlighted | 0.5 |
+| Format SQL (per dialect), comment toggle, multi-cursor, find/replace | 0.5 |
+| Inline errors with position, plus "did you mean" for unknown columns and tables | 0.5 |
+| Visual EXPLAIN plan: tree plus timings, slowest node highlighted | 0.6 |
 | Snippets, plus a scratchpad that survives restarts | 1.0 |
 | Manual transaction mode: Begin / Commit / Rollback in the toolbar, with a "pending changes" badge | 1.0 |
 | AI: write or explain SQL from schema context (opt-in, bring your own key) | Later |
@@ -114,13 +114,13 @@ so it can join the test fleet.
 | ✅ Virtualized grid, keyboard selection, copy TSV/CSV/JSON, sort, WHERE filter, inspector | 0.1 |
 | ✅ Stream results (first rows at once, live count); "No limit" setting and Fetch all; cancel keeps rows read so far. Still to do: full fetch to a file | 0.3 |
 | ✅ **Inline editing:** edit cells, add rows, delete; changes staged, SQL previewed, applied in one transaction (duplicating rows still to do) | 0.3 |
-| Value editors per type: JSON tree, long text, dates, enums (dropdown), booleans, bytea (hex/image), arrays | 0.3 |
+| Value editors per type: JSON tree, long text, dates, enums (dropdown), booleans, bytea (hex/image), arrays | 0.4 |
 | ✅ Click-through foreign keys: open the referenced row from the grid or inspector. Still to do: rows that reference this one | 0.3 |
-| Filter builder (column / operator / value chips) alongside the raw WHERE field | 0.3 |
-| Pagination with exact counts (where cheap) or estimates | 0.3 |
-| Column visibility, pinning, reordering; remembered per table | 0.4 |
-| Show results as JSON / as records; transpose a single row | 0.4 |
-| Aggregates for a selection in the status bar (sum, avg, count, min, max) | 0.4 |
+| Filter builder (column / operator / value chips) alongside the raw WHERE field | 0.4 |
+| Pagination with exact counts (where cheap) or estimates | 0.4 |
+| Column visibility, pinning, reordering; remembered per table | 0.5 |
+| Show results as JSON / as records; transpose a single row | 0.5 |
+| Aggregates for a selection in the status bar (sum, avg, count, min, max) | 0.5 |
 | Geometry/PostGIS preview on a small map | Later |
 
 ### Schema (structure)
@@ -128,12 +128,12 @@ so it can join the test fleet.
 | Feature | Target |
 |---|---|
 | ✅ Schema tree: schemas, tables, views, column counts | 0.1 |
-| Full tree: columns, indexes, keys, foreign keys, triggers, sequences, functions/procedures, materialized views, enums/types, extensions | 0.5 |
+| Full tree: columns, indexes, keys, foreign keys, triggers, sequences, functions/procedures, materialized views, enums/types, extensions | 0.6 |
 | ✅ Table structure view: columns, types, defaults, nullability, comments, indexes, FKs both ways. Still to do: checks, triggers | 0.5 |
-| **Table designer:** create or alter tables, columns, indexes and FKs; shows the generated DDL before applying | 0.5 |
+| **Table designer:** create or alter tables, columns, indexes and FKs; shows the generated DDL before applying | 0.6 |
 | ✅ View and copy a table's `CREATE` statement or a view's definition. Still to do: other objects | 0.5 |
-| Rename, drop and truncate with previews and typed confirmation on prod | 0.5 |
-| Table info: row estimate, size on disk, index sizes, last vacuum/analyze (Postgres) | 0.5 |
+| Rename, drop and truncate with previews and typed confirmation on prod | 0.6 |
+| Table info: row estimate, size on disk, index sizes, last vacuum/analyze (Postgres) | 0.6 |
 | ER diagram for a schema or selected tables; export PNG/SVG | 1.0 |
 | Schema diff between two connections (e.g. staging vs prod) producing migration SQL | 1.x |
 | Users, roles and grants editor | 1.x |
@@ -143,9 +143,9 @@ so it can join the test fleet.
 | Feature | Target |
 |---|---|
 | ✅ Export a result to CSV, TSV, JSON, Excel, Markdown or SQL `INSERT`s (⇧⌘S); copy cells as any of them. Still to do: NDJSON, Parquet, export a whole table without loading it | 0.8 |
-| Import CSV / Excel / JSON into a new or existing table: column mapping, type inference, preview, batch inserts | 0.8 |
-| Copy a table between connections (same or different engines) | 0.8 |
-| Backup and restore, wrapping `pg_dump`/`pg_restore`, `mysqldump`, `sqlite3 .backup` with progress | 0.8 |
+| Import CSV / Excel / JSON into a new or existing table: column mapping, type inference, preview, batch inserts | 0.9 |
+| Copy a table between connections (same or different engines) | 0.9 |
+| Backup and restore, wrapping `pg_dump`/`pg_restore`, `mysqldump`, `sqlite3 .backup` with progress | 0.9 |
 | Generate fake data for a table (types and FK-aware) | 1.x |
 
 ### Workspace and app
@@ -153,12 +153,12 @@ so it can join the test fleet.
 | Feature | Target |
 |---|---|
 | ✅ Command palette, light/dark/system themes, keyboard shortcuts, menus | 0.1 |
-| Restore session: open connections, tabs, editor contents, scroll positions | 0.4 |
-| Multiple windows; drag a tab out into its own window | 0.9 |
-| Customisable keybindings (JSON file + a UI); Vim mode in the editor | 0.9 |
-| Settings UI (fonts, sizes, row limit, timeouts, theme) | 0.9 |
-| Auto-update (Sparkle on macOS, equivalents elsewhere), release channels | 0.9 |
-| Linux and Windows builds at parity | 0.9 |
+| Restore session: open connections, tabs, editor contents, scroll positions | 0.5 |
+| Multiple windows; drag a tab out into its own window | 1.0 |
+| Customisable keybindings (JSON file + a UI); Vim mode in the editor | 1.0 |
+| Settings UI (fonts, sizes, row limit, timeouts, theme) | 1.0 |
+| Auto-update (Sparkle on macOS, equivalents elsewhere), release channels | 1.0 |
+| Linux and Windows builds at parity | 1.0 |
 | Accessibility: VoiceOver/Narrator labels, full keyboard reachability, contrast check | 1.0 |
 | IME and non-Latin input in the editor and grid | 1.0 |
 | Docs site: getting started, every engine, keyboard reference | 1.0 |
@@ -189,14 +189,14 @@ Each release is shippable on its own. The order puts the most-used workflows fir
 | Release | Theme | Headline |
 |---|---|---|
 | **0.2** ✅ | Connect to more | Several connections, MySQL/MariaDB, DuckDB + files, SQL Server, SSH (M9–M12 in PLAN.md). Also shipped, pulled forward: editing, autocomplete, streaming, export, structure view, FK navigation, saved queries, session restore, CI conformance and production safety (M13–M19) |
-| **0.3** | Production-safe, change data | Close every fixable gap in [SAFETY.md](SAFETY.md) (server-enforced read-only reads, unindexed-sort warning, `verify-full` for production, no history on production, quit and cancel prompts, checked deletes, editing tests in CI); value editors, filter builder |
-| **0.4** | Write queries faster | Parameters, formatting, saved-query folders (autocomplete, saved queries and session restore shipped in 0.2) |
-| **0.5** | Understand and change schema | Full object tree, structure view, table designer with DDL preview, visual EXPLAIN |
-| **0.6** | Wider SQL | CockroachDB, Redshift, libSQL, ClickHouse, Oracle |
-| **0.7** | Beyond SQL | MongoDB, Redis, DynamoDB, Cassandra |
-| **0.8** | Move data | Import, export to every format, copy between connections, backup and restore |
-| **0.9** | Everywhere | Linux and Windows, auto-update, settings, keybindings, multiple windows |
-| **1.0** | Finish | ER diagrams, cloud IAM auth, accessibility, IME, docs site, stability window |
+| **0.3** ✅ | Production-safe | Every fixable gap in [SAFETY.md](SAFETY.md) closed and proven: writes spotted deny-by-default, server-enforced read-only reads on production, read-only rechecked after every statement, production time limits and lock waits, open transactions shown and kept, all-or-nothing scripts, conflict-checked edits and deletes, an independent audit, and a test in CI behind every guard |
+| **0.4** | Change data | Value editors (long text, JSON, dates, enums), filter builder |
+| **0.5** | Write queries faster | Parameters, formatting, saved-query folders (autocomplete, saved queries and session restore shipped in 0.2) |
+| **0.6** | Understand and change schema | Full object tree, table designer with DDL preview, visual EXPLAIN (structure view shipped in 0.2) |
+| **0.7** | Wider SQL | CockroachDB, Redshift, libSQL, ClickHouse, Oracle |
+| **0.8** | Beyond SQL | MongoDB, Redis, DynamoDB, Cassandra |
+| **0.9** | Move data | Import, export to every format, copy between connections, backup and restore |
+| **1.0** | Everywhere, and finish | Linux and Windows, auto-update, multiple windows; ER diagrams, cloud IAM auth, accessibility, IME, docs site, stability window |
 
 Tier 4 engines and the **1.x** rows follow 1.0, in an order driven by demand.
 

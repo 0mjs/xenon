@@ -58,7 +58,7 @@ What's still between Xenon and "safe on production, no caveats", most important 
 |---|---|---|---|
 | 1 | **Spotting writes on SQL Server reads the SQL text.** Deny by default makes it strict, but SQL Server has no read-only session or transaction, so a read-only SQL Server connection rests on Xenon reading the SQL right. Use a `db_datareader` login for read-only work. | Medium | Inherent to SQL Server; documented |
 | 2 | **Conflict checks skip some column types.** An edit or delete doesn't check JSON, XML, spatial, floating-point or SQL Server `text` / `ntext` / `image` columns for changes made meanwhile, because they can't be compared exactly. | Low | 0.4: compare them where the engine can |
-| 3 | **The production time limit doesn't cover saving edits** or Commit / Roll back; the lock wait does. | Low | 0.4 |
+| 3 | **The production time limit doesn't cover saving edits** or Commit / Roll back; the lock wait does. | Low | 0.5 |
 | 4 | **History is kept by default.** Settings → Data → Keep history for production turns it off for production connections. | Low | Documented |
 | 5 | **`verify-full` is the default only for new production connections.** An existing connection switched to Production shows a warning instead. | Low | Documented |
 | 6 | **SQL Server `money`** is exact only below about 900 billion (the driver decodes it as a floating-point number). | Low | 1.0 at the latest |
