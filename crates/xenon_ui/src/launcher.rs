@@ -251,7 +251,9 @@ impl Workspace {
                                 .child(name),
                         )
                         .child(
+                            // One line, cut with "…" when a tile is narrow.
                             div()
+                                .truncate()
                                 .text_size(px(11.))
                                 .text_color(theme.t3)
                                 .child(if available { kind } else { "Coming soon" }),
@@ -296,7 +298,7 @@ impl Workspace {
                     "tile-duckdb",
                     "DuckDB",
                     Engine::DuckDb,
-                    "And CSV, Parquet, JSON",
+                    "Files, CSV, Parquet",
                     true,
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx))),
