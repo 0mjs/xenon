@@ -262,6 +262,29 @@ fn snapshots() {
         });
         shot.save(&format!("03-browse-{suffix}"));
 
+        shot.act(|w, window, cx| w.open_settings(&crate::OpenSettings, window, cx));
+        shot.save(&format!("15-settings-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.settings = None;
+            cx.notify();
+        });
+        // Another accent: everything that was silver turns amber, numbers turn lilac.
+        shot.act(|w, window, cx| {
+            let prefs = crate::settings::Prefs {
+                accent: crate::theme::Accent::Amber,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx)
+        });
+        shot.save(&format!("16-amber-{suffix}"));
+        shot.act(|w, window, cx| {
+            let prefs = crate::settings::Prefs {
+                accent: crate::theme::Accent::Xenon,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx)
+        });
+
         shot.act(|w, window, cx| w.open_palette(&crate::OpenPalette, window, cx));
         shot.save(&format!("04-palette-{suffix}"));
         shot.act(|w, _, cx| {

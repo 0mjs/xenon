@@ -451,6 +451,12 @@ impl Store {
         Ok(())
     }
 
+    /// Forget every query run, on every connection.
+    pub fn clear_history(&self) -> Result<()> {
+        self.lock().execute("delete from history", [])?;
+        Ok(())
+    }
+
     /// Newest first. `filter` matches anywhere in the SQL, case-insensitively.
     pub fn history(
         &self,

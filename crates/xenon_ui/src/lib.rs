@@ -11,6 +11,7 @@ mod launcher;
 mod palette;
 mod results;
 mod servers;
+mod settings;
 pub mod theme;
 mod widgets;
 pub mod workspace;
@@ -26,6 +27,7 @@ actions!(
         OpenFile,
         NewConnection,
         ShowConnections,
+        OpenSettings,
         CloseConnection,
         RunQuery,
         RunAll,
@@ -92,6 +94,17 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-o", OpenFile, None),
         KeyBinding::new("cmd-n", NewConnection, None),
         KeyBinding::new("cmd-shift-n", ShowConnections, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new(
+            "escape",
+            gpui_component::input::Escape,
+            Some("SettingsDialog"),
+        ),
+        KeyBinding::new(
+            "escape",
+            gpui_component::input::Escape,
+            Some("ConfirmDialog"),
+        ),
         KeyBinding::new("cmd-shift-w", CloseConnection, None),
         KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-w", CloseTab, None),

@@ -33,6 +33,7 @@ icons![
     "plus",
     "refresh-cw",
     "search",
+    "settings",
     "table-2",
     "trash-2",
     "triangle-alert",

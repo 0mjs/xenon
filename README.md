@@ -43,6 +43,7 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 | Shortcut | Action |
 |---|---|
 | `⌘K` / `⌘P` | Command palette: jump to a table or run any command |
+| `⌘,` | Settings: theme, accent colour, row limits, editor size, safety, history |
 | `⌘O` | Open SQLite file |
 | `⌘N` | New server connection (Postgres, MySQL / MariaDB, SQL Server) |
 | `⇧⌘N` | Connections: open another database alongside |

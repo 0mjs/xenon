@@ -33,6 +33,7 @@ use crate::discover::{Found, FoundTarget};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::servers;
+use crate::settings::{Prefs, SettingsDialog, SettingsEvent, ThemeChoice};
 use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
     self as widgets, ButtonKind, Engine, RADIUS_CONTROL, centered_hint, connection_tags,
@@ -42,9 +43,9 @@ use crate::widgets::{
 use crate::{
     CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown,
     ExtendLeft, ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp,
-    NewConnection, NewTab, NextTab, OpenFile, OpenPalette, PrevTab, Quit, RunAll, RunQuery,
-    SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector,
-    UseDarkTheme, UseLightTheme, UseSystemTheme,
+    NewConnection, NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab, Quit, RunAll,
+    RunQuery, SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer,
+    ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -61,10 +62,6 @@ const MIN_RESULTS_HEIGHT: f32 = 180.;
 const TAB_MAX_WIDTH: f32 = 240.;
 /// Room for the macOS traffic lights in the transparent title bar.
 const TRAFFIC_LIGHT_INSET: f32 = 78.;
-/// Rows kept from a single result set; the rest are dropped and flagged.
-const ROW_LIMIT: usize = 100_000;
-/// Rows fetched when a table is opened from the explorer.
-const BROWSE_LIMIT: usize = 1_000;
 
 /// What to open on launch, from the command line.
 pub enum Launch {
@@ -286,41 +283,6 @@ pub(crate) enum RunScope {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ThemeChoice {
-    System,
-    Light,
-    Dark,
-}
-
-impl ThemeChoice {
-    const SETTING: &str = "theme";
-
-    fn parse(value: &str) -> Self {
-        match value {
-            "light" => ThemeChoice::Light,
-            "dark" => ThemeChoice::Dark,
-            _ => ThemeChoice::System,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            ThemeChoice::System => "system",
-            ThemeChoice::Light => "light",
-            ThemeChoice::Dark => "dark",
-        }
-    }
-
-    fn mode(self, window: &Window) -> Mode {
-        match self {
-            ThemeChoice::System => Mode::from_appearance(window.appearance()),
-            ThemeChoice::Light => Mode::Light,
-            ThemeChoice::Dark => Mode::Dark,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidePanel {
     Explorer,
     History,
@@ -428,7 +390,8 @@ pub struct Workspace {
     pub(crate) found: Vec<Found>,
     pub(crate) project_found: Vec<Found>,
     pub(crate) discovering: bool,
-    theme_choice: ThemeChoice,
+    pub(crate) prefs: Prefs,
+    pub(crate) settings: Option<(Entity<SettingsDialog>, Subscription)>,
     pub(crate) palette: Option<(Entity<Palette>, Subscription)>,
     pub(crate) connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
     confirm: Option<(Entity<ConfirmDialog>, Subscription, Pending)>,
@@ -442,7 +405,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
-            if this.theme_choice == ThemeChoice::System {
+            if this.prefs.theme == ThemeChoice::System {
                 theme::apply(Mode::from_appearance(window.appearance()), cx);
                 cx.notify();
             }
@@ -486,11 +449,9 @@ impl Workspace {
                 None
             }
         };
-        let theme_choice = store
-            .as_ref()
-            .and_then(|store| store.setting(ThemeChoice::SETTING).ok().flatten())
-            .map_or(ThemeChoice::System, |value| ThemeChoice::parse(&value));
-        theme::apply(theme_choice.mode(window), cx);
+        let prefs = Prefs::load(store.as_deref());
+        theme::set_accent(prefs.accent, cx);
+        theme::apply(prefs.theme.mode(window), cx);
 
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -523,7 +484,8 @@ impl Workspace {
             found: Vec::new(),
             project_found: Vec::new(),
             discovering: false,
-            theme_choice,
+            prefs,
+            settings: None,
             palette: None,
             connect_dialog: None,
             confirm: None,
@@ -1320,7 +1282,8 @@ impl Workspace {
         // are already protected by the server.
         if !session.read_only
             && let Some((risk, what)) = assess(&sql)
-            && (session.environment == Environment::Production || risk >= Risk::EveryRow)
+            && (session.environment == Environment::Production
+                || (self.prefs.confirm_risky && risk >= Risk::EveryRow))
         {
             let production = session.environment == Environment::Production;
             let body = match risk {
@@ -1376,10 +1339,11 @@ impl Workspace {
         };
         let conn = session.conn.clone();
         let store = self.store.clone();
+        let row_limit = self.prefs.row_limit;
         let cancel = conn.cancel_handle();
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
-            let result = conn.execute(&sql, ROW_LIMIT);
+            let result = conn.execute(&sql, row_limit);
             crate::trace("execute query", started);
             if let Some(store) = store {
                 let (rows, error) = match &result {
@@ -1636,7 +1600,7 @@ impl Workspace {
                 .order
                 .as_ref()
                 .map(|(column, dir)| (column.as_str(), *dir)),
-            BROWSE_LIMIT,
+            self.prefs.browse_limit,
             conn.uses_top(),
         );
         let editor = self.active_tab().editor.clone();
@@ -1830,7 +1794,7 @@ impl Workspace {
         }
         // Keys are listed here rather than looked up: several bindings only
         // apply inside the editor or grid, which the palette's focus isn't.
-        let commands: [(&str, &str, Box<dyn gpui::Action>); 23] = [
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 24] = [
             ("Run Statement", "⌘↵", Box::new(RunQuery)),
             ("Run All", "⇧⌘↵", Box::new(RunAll)),
             ("Explain", "⌘E", Box::new(Explain)),
@@ -1839,6 +1803,7 @@ impl Workspace {
             ("Close Tab", "⌘W", Box::new(CloseTab)),
             ("Next Tab", "⌃⇥", Box::new(NextTab)),
             ("Previous Tab", "⌃⇧⇥", Box::new(PrevTab)),
+            ("Settings…", "⌘,", Box::new(OpenSettings)),
             ("Connections…", "⇧⌘N", Box::new(ShowConnections)),
             ("Disconnect", "⇧⌘W", Box::new(CloseConnection)),
             ("Open SQLite File…", "⌘O", Box::new(OpenFile)),
@@ -1890,13 +1855,54 @@ impl Workspace {
     }
 
     fn set_theme(&mut self, choice: ThemeChoice, window: &mut Window, cx: &mut Context<Self>) {
-        self.theme_choice = choice;
-        theme::apply(choice.mode(window), cx);
-        if let Some(store) = &self.store
-            && let Err(err) = store.set_setting(ThemeChoice::SETTING, choice.as_str())
-        {
-            eprintln!("xenon: could not save the theme: {err:#}");
+        let prefs = Prefs {
+            theme: choice,
+            ..self.prefs
+        };
+        self.set_prefs(prefs, window, cx);
+    }
+
+    /// Apply and save new preferences.
+    pub(crate) fn set_prefs(&mut self, prefs: Prefs, window: &mut Window, cx: &mut Context<Self>) {
+        let old = std::mem::replace(&mut self.prefs, prefs);
+        if prefs.accent != old.accent {
+            theme::set_accent(prefs.accent, cx);
         }
+        if prefs.theme != old.theme || prefs.accent != old.accent {
+            theme::apply(prefs.theme.mode(window), cx);
+        }
+        prefs.save(self.store.as_deref());
+        cx.notify();
+    }
+
+    pub(crate) fn open_settings(
+        &mut self,
+        _: &OpenSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.is_some() {
+            return;
+        }
+        let dialog = cx.new(|cx| SettingsDialog::new(self.prefs, window, cx));
+        let subscription =
+            cx.subscribe_in(&dialog, window, |this, _, event, window, cx| match event {
+                SettingsEvent::Changed(prefs) => this.set_prefs(*prefs, window, cx),
+                SettingsEvent::ClearHistory => {
+                    if let Some(store) = &this.store
+                        && let Err(err) = store.clear_history()
+                    {
+                        eprintln!("xenon: could not clear history: {err:#}");
+                    }
+                    this.reload_history(cx);
+                }
+                SettingsEvent::Dismiss => {
+                    this.settings = None;
+                    this.focus_editor(window, cx);
+                    cx.notify();
+                }
+            });
+        self.settings = Some((dialog, subscription));
         cx.notify();
     }
 
@@ -2056,6 +2062,7 @@ impl Render for Workspace {
                 cx.listener(|this, _: &FocusEditor, window, cx| this.focus_editor(window, cx)),
             )
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::close_connection))
             .on_action(cx.listener(|this, _: &ShowConnections, window, cx| {
                 this.open_connect_tab(window, cx)
@@ -2106,6 +2113,9 @@ impl Render for Workspace {
             })
             .when_some(self.palette.as_ref(), |el, (palette, _)| {
                 el.child(palette.clone())
+            })
+            .when_some(self.settings.as_ref(), |el, (settings, _)| {
+                el.child(settings.clone())
             })
             .when_some(self.confirm.as_ref(), |el, (dialog, _, _)| {
                 el.child(dialog.clone())
@@ -2369,8 +2379,33 @@ impl Workspace {
             .bg(theme.bg)
             .border_r_1()
             .border_color(theme.line)
+            .pb(px(10.))
             .child(item("rail-explorer", "database", SidePanel::Explorer))
             .child(item("rail-history", "clock", SidePanel::History))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("rail-settings")
+                    .size(px(36.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .rounded(px(6.))
+                    .hover(|s| s.bg(theme.s3))
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Settings  ⌘,").build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings(&OpenSettings, window, cx)
+                    }))
+                    .child(
+                        svg()
+                            .path(assets::icon("settings"))
+                            .size(px(18.))
+                            .text_color(theme.t2),
+                    ),
+            )
     }
 
     fn render_side_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2469,7 +2504,7 @@ impl Workspace {
                     .min_h(px(0.))
                     .pt(px(6.))
                     .font_family(MONO_FONT)
-                    .text_size(px(12.5))
+                    .text_size(px(self.prefs.editor_font))
                     .child(Editor::new(&tab.editor).h_full().appearance(false)),
             );
 
