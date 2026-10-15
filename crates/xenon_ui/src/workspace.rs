@@ -108,6 +108,9 @@ pub(crate) struct Session {
     pub catalog: Rc<RefCell<Option<Rc<Catalog>>>>,
     /// A transaction the user began is open (its locks held until it ends).
     pub in_transaction: bool,
+    /// The server's TLS certificate is checked (`verify-ca` / `verify-full`),
+    /// or it's a file.
+    pub tls_verified: bool,
 }
 
 /// Everything needed to open (and maybe remember) a connection.
@@ -999,6 +1002,12 @@ impl Workspace {
                             collapsed_schemas: HashSet::new(),
                             collapsed: false,
                             in_transaction: false,
+                            tls_verified: match &profile.target {
+                                RequestTarget::Sqlite(_) => true,
+                                RequestTarget::Server(_, options) => {
+                                    matches!(options.ssl, SslMode::VerifyFull | SslMode::VerifyCa)
+                                }
+                            },
                         });
                         if !this.reopen_tabs(saved_id, id, window, cx) {
                             this.attach(id, false, window, cx);
@@ -4725,6 +4734,13 @@ impl Workspace {
                             )
                             .into_iter()
                             .map(|(label, color)| env_tag(label, color)),
+                        )
+                        // Production over TLS that doesn't check the server.
+                        .when(
+                            session.environment == Environment::Production
+                                && !session.tls_verified
+                                && !session.conn.is_local(),
+                            |el| el.child(env_tag("TLS UNVERIFIED", theme.warn)),
                         ),
                 )
                 .child(cell(session.version.clone().into(), theme.t3))

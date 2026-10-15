@@ -83,6 +83,8 @@ pub struct ConnectDialog {
     user: Entity<InputState>,
     password: Entity<InputState>,
     ssl: SslMode,
+    /// The user picked the SSL mode, so choosing Production leaves it alone.
+    ssl_chosen: bool,
     /// Tunnel through SSH, with these settings.
     ssh: bool,
     ssh_host: Entity<InputState>,
@@ -268,6 +270,8 @@ impl ConnectDialog {
             user,
             password,
             ssl: options.ssl,
+            // An existing connection's mode was chosen; a new one's is the default.
+            ssl_chosen: id != 0,
             environment,
             read_only,
             save: true,
@@ -467,6 +471,7 @@ impl Render for ConnectDialog {
                 .collect(),
             cx.listener(|this, ix: &usize, _, cx| {
                 this.ssl = SslMode::ALL[*ix];
+                this.ssl_chosen = true;
                 cx.notify();
             }),
         );
@@ -486,6 +491,10 @@ impl Render for ConnectDialog {
                 .collect(),
             cx.listener(|this, ix: &usize, _, cx| {
                 this.environment = Environment::ALL[*ix];
+                // Production should check who it's talking to.
+                if this.environment == Environment::Production && !this.ssl_chosen {
+                    this.ssl = SslMode::VerifyFull;
+                }
                 cx.notify();
             }),
         );
@@ -626,6 +635,22 @@ impl Render for ConnectDialog {
                         .child(labelled("Password", &self.password, password_focused)),
                 )
                 .child(section(&theme, "SSL mode", ssl_picker))
+                .when(
+                    self.environment == Environment::Production
+                        && !matches!(self.ssl, SslMode::VerifyFull | SslMode::VerifyCa),
+                    |el| {
+                        el.child(
+                            div()
+                                .mt(px(-4.))
+                                .text_size(px(11.5))
+                                .text_color(theme.warn)
+                                .child(
+                                    "Production should verify the server (verify-full). Without it, \
+                                     anything between you and the server could read or change what's sent.",
+                                ),
+                        )
+                    },
+                )
                 .child(
                     div()
                         .id("ssh-toggle")
