@@ -11,11 +11,12 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, Rgba,
-    SharedString, UniformListScrollHandle, Window, canvas, div, prelude::*, px, uniform_list,
+    SharedString, UniformListScrollHandle, Window, canvas, div, prelude::*, px, svg, uniform_list,
 };
 use xenon_driver::sql::SortDirection;
 use xenon_driver::{Column, ResultSet, Value};
 
+use crate::assets;
 use crate::edits::{Edits, RowRef};
 use crate::theme::{MONO_FONT, Theme};
 
@@ -211,6 +212,8 @@ pub struct Callbacks {
     /// A double-click on a cell (display row, column).
     pub edit: ColumnPairCallback,
     pub sort: ColumnCallback,
+    /// A click on a foreign-key cell's arrow (display row, column).
+    pub follow: ColumnPairCallback,
     pub resize_start: ResizeCallback,
     pub autofit: ColumnCallback,
 }
@@ -224,6 +227,8 @@ pub struct View<'a> {
     /// Staged changes to show: edited cells, deleted rows, rows being added
     /// (drawn after the fetched ones).
     pub edits: Rc<Edits>,
+    /// Per column, the table its values point at, for foreign-key columns.
+    pub links: Vec<Option<SharedString>>,
 }
 
 pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoElement {
@@ -256,7 +261,8 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
                 .enumerate()
                 .map(|(ix, (column, width))| {
                     let direction = view.sort.filter(|(c, _)| *c == ix).map(|(_, d)| d);
-                    header_cell(ix, column, *width, direction, theme, &callbacks)
+                    let link = view.links.get(ix).cloned().flatten();
+                    header_cell(ix, column, *width, direction, link, theme, &callbacks)
                 }),
         )
         .child(div().flex_1())
@@ -278,6 +284,7 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
     let theme = theme.clone();
     let row_callbacks = callbacks.clone();
     let edits = view.edits;
+    let links: Arc<Vec<bool>> = Arc::new(view.links.iter().map(Option::is_some).collect());
     let count = order.len() + edits.inserted.len();
     let rows = uniform_list("result-rows", count, move |range, _, _| {
         range
@@ -319,6 +326,7 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
                         deleted,
                     },
                     &widths,
+                    &links,
                     selection,
                     &theme,
                     &row_callbacks,
@@ -358,6 +366,7 @@ fn header_cell(
     column: &Column,
     width: f32,
     direction: Option<SortDirection>,
+    link: Option<SharedString>,
     theme: &Theme,
     callbacks: &Rc<Callbacks>,
 ) -> impl IntoElement {
@@ -403,13 +412,23 @@ fn header_cell(
                 )
                 .child(
                     div()
-                        .truncate()
+                        .flex()
+                        .gap(px(4.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
                         .font_family(MONO_FONT)
                         .text_size(px(9.5))
                         .text_color(theme.t3)
                         .child(SharedString::from(
                             column.type_name.clone().unwrap_or_default().to_lowercase(),
-                        )),
+                        ))
+                        .when_some(link, |el, table| {
+                            el.child(
+                                div()
+                                    .text_color(theme.acc)
+                                    .child(SharedString::from(format!("→ {table}"))),
+                            )
+                        }),
                 ),
         )
         .child(div().text_size(px(8.)).text_color(theme.acc).child(arrow))
@@ -457,6 +476,7 @@ fn render_row(
     row: &[Shown],
     state: RowState,
     widths: &Arc<Vec<f32>>,
+    links: &Arc<Vec<bool>>,
     selection: Option<Selection>,
     theme: &Theme,
     callbacks: &Rc<Callbacks>,
@@ -466,7 +486,10 @@ fn render_row(
     let background = if ix % 2 == 1 { Some(theme.s2) } else { None };
     let select = callbacks.select.clone();
     let edit = callbacks.edit.clone();
+    let follow = callbacks.follow.clone();
     let (origin_x, column_widths) = (origin_x.clone(), widths.clone());
+    let column_links = links.clone();
+    let linked = |column: usize| !state.new && links.get(column).copied().unwrap_or(false);
 
     div()
         .id(ix)
@@ -496,8 +519,14 @@ fn render_row(
             MouseButton::Left,
             move |event: &MouseDownEvent, window, cx| {
                 let x = f32::from(event.position.x - origin_x.get()) - INDEX_WIDTH;
-                if let Some(column) = column_at(&column_widths, x) {
-                    if event.click_count >= 2 {
+                if let Some((column, offset)) = column_at(&column_widths, x) {
+                    let on_arrow = !state.new
+                        && column_links.get(column).copied().unwrap_or(false)
+                        && offset < LINK_ZONE;
+                    if on_arrow && event.click_count == 1 {
+                        select(ix, column, false, window, cx);
+                        follow(ix, column, window, cx);
+                    } else if event.click_count >= 2 {
                         edit(ix, column, window, cx);
                     } else {
                         select(ix, column, event.modifiers.shift, window, cx);
@@ -536,15 +565,18 @@ fn render_row(
                 .map(|(column, (shown, width))| {
                     let selected = selection.is_some_and(|s| s.contains(ix, column));
                     let focused = selection.is_some_and(|s| s.head == (ix, column));
+                    let link = linked(column);
                     let el = match shown {
-                        Shown::Value(value) => cell(value, *width, theme),
+                        Shown::Value(value) => cell(value, *width, link, theme),
                         // A staged change: amber, like a pending edit anywhere.
-                        Shown::Edited(value) => cell(value, *width, theme).when(!state.new, |el| {
-                            el.bg(Rgba {
-                                a: 0.14,
-                                ..theme.warn
+                        Shown::Edited(value) => {
+                            cell(value, *width, link, theme).when(!state.new, |el| {
+                                el.bg(Rgba {
+                                    a: 0.14,
+                                    ..theme.warn
+                                })
                             })
-                        }),
+                        }
                         Shown::Default => default_cell(*width, theme),
                     };
                     el.when(state.deleted, |el| el.line_through().text_color(theme.t3))
@@ -556,21 +588,28 @@ fn render_row(
         .into_any_element()
 }
 
-/// The column under `x` (pixels from the first data column's left edge).
-fn column_at(widths: &[f32], x: f32) -> Option<usize> {
+/// The column under `x` (pixels from the first data column's left edge), and
+/// how far into it `x` is.
+fn column_at(widths: &[f32], x: f32) -> Option<(usize, f32)> {
     if x < 0. {
         return None;
     }
-    let mut right = 0.;
-    widths.iter().position(|w| {
-        right += w;
-        x < right
-    })
+    let mut left = 0.;
+    for (column, width) in widths.iter().enumerate() {
+        if x < left + width {
+            return Some((column, x - left));
+        }
+        left += width;
+    }
+    None
 }
+
+/// How far into a foreign-key cell a click follows the link: the arrow and its padding.
+const LINK_ZONE: f32 = 28.;
 
 /// One element per cell. Text is cut to what fits the column up front, so the
 /// grid never measures text for an ellipsis while it draws.
-fn cell(value: &Value, width: f32, theme: &Theme) -> gpui::Div {
+fn cell(value: &Value, width: f32, link: bool, theme: &Theme) -> gpui::Div {
     let el = div()
         .w(px(width))
         .h_full()
@@ -596,6 +635,22 @@ fn cell(value: &Value, width: f32, theme: &Theme) -> gpui::Div {
             (display.chars().next(), display.chars().last()),
             (Some('{'), Some('}')) | (Some('['), Some(']'))
         );
+    // A foreign key: an arrow to the row it points at, before the value.
+    if link {
+        let numeric = value.is_numeric();
+        return el
+            .justify_start()
+            .gap(px(6.))
+            .child(
+                svg()
+                    .path(assets::icon("arrow-up-right"))
+                    .size(px(12.))
+                    .flex_none()
+                    .text_color(theme.acc),
+            )
+            .when(numeric, |el| el.child(div().flex_1()))
+            .child(SharedString::from(fit(&display, width - 18.)));
+    }
     el.when(structured, |el| el.text_color(theme.t2))
         .child(SharedString::from(fit(&display, width)))
 }
@@ -649,9 +704,9 @@ mod tests {
     fn column_at_maps_x_to_columns() {
         let widths = [100., 50., 80.];
         assert_eq!(column_at(&widths, -1.), None);
-        assert_eq!(column_at(&widths, 0.), Some(0));
-        assert_eq!(column_at(&widths, 149.), Some(1));
-        assert_eq!(column_at(&widths, 229.), Some(2));
+        assert_eq!(column_at(&widths, 0.), Some((0, 0.)));
+        assert_eq!(column_at(&widths, 149.), Some((1, 49.)));
+        assert_eq!(column_at(&widths, 229.), Some((2, 79.)));
         assert_eq!(column_at(&widths, 400.), None);
     }
 

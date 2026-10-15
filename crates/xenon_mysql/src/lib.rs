@@ -12,8 +12,9 @@ use mysql::consts::{ColumnFlags, ColumnType};
 use mysql::prelude::Queryable as _;
 use mysql::{Conn, Opts, OptsBuilder, SslOpts};
 use xenon_driver::{
-    CancelHandle, Column, Connection, Feed, ObjectColumn, ObjectKind, Progress, QueryError,
-    QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, ColumnInfo, Connection, Feed, ForeignKey, IndexInfo, ObjectColumn,
+    ObjectKind, Progress, QueryError, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject,
+    TableInfo, Value, referential_action,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -431,6 +432,131 @@ impl Connection for MysqlConnection {
                 });
         }
         Ok(schemas)
+    }
+
+    fn describe(&self, schema: &str, table: &str) -> Result<TableInfo> {
+        const COLUMNS: &str = "
+            select column_name, column_type, is_nullable = 'YES', column_default, extra,
+                   column_key = 'PRI', column_comment
+            from information_schema.columns
+            where table_schema = ? and table_name = ?
+            order by ordinal_position";
+        const INDEXES: &str = "
+            select index_name, non_unique = 0, coalesce(column_name, '(expression)')
+            from information_schema.statistics
+            where table_schema = ? and table_name = ?
+            order by index_name = 'PRIMARY' desc, index_name, seq_in_index";
+        const KEYS: &str = "
+            select k.constraint_name, k.table_schema, k.table_name, k.column_name,
+                   k.referenced_table_schema, k.referenced_table_name, k.referenced_column_name,
+                   r.delete_rule, r.update_rule
+            from information_schema.key_column_usage k
+            join information_schema.referential_constraints r
+              on r.constraint_schema = k.constraint_schema
+             and r.constraint_name = k.constraint_name
+             and r.table_name = k.table_name
+            where k.referenced_table_name is not null
+              and ((k.table_schema = ? and k.table_name = ?)
+                or (k.referenced_table_schema = ? and k.referenced_table_name = ?))
+            order by k.table_schema, k.table_name, k.constraint_name, k.ordinal_position";
+
+        let mut conn = self.lock();
+        let mut info = TableInfo::default();
+        type ColumnRow = (String, String, bool, Option<String>, String, bool, String);
+        let columns: Vec<ColumnRow> = conn
+            .exec(COLUMNS, (schema, table))
+            .map_err(describe_error)?;
+        for (name, type_name, nullable, default, extra, primary_key, comment) in columns {
+            // `auto_increment`, `on update CURRENT_TIMESTAMP`, `VIRTUAL GENERATED`…
+            let extra = extra.replace("DEFAULT_GENERATED", "").trim().to_string();
+            let default = match (default, extra.is_empty()) {
+                (Some(default), true) => Some(default),
+                (Some(default), false) => Some(format!("{default} {extra}")),
+                (None, false) => Some(extra),
+                (None, true) => None,
+            };
+            info.columns.push(ColumnInfo {
+                name,
+                type_name,
+                nullable,
+                default,
+                primary_key,
+                comment: (!comment.is_empty()).then_some(comment),
+            });
+        }
+        let indexes: Vec<(String, bool, String)> = conn
+            .exec(INDEXES, (schema, table))
+            .map_err(describe_error)?;
+        for (name, unique, column) in indexes {
+            match info.indexes.last_mut() {
+                Some(last) if last.name == name => last.columns.push(column),
+                _ => info.indexes.push(IndexInfo {
+                    primary: name == "PRIMARY",
+                    name,
+                    unique,
+                    columns: vec![column],
+                }),
+            }
+        }
+        type KeyRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        );
+        let keys: Vec<KeyRow> = conn
+            .exec(KEYS, (schema, table, schema, table))
+            .map_err(describe_error)?;
+        let mut all: Vec<ForeignKey> = Vec::new();
+        for (name, from_schema, from_table, column, to_schema, to_table, to_column, del, upd) in
+            keys
+        {
+            match all.last_mut() {
+                Some(last)
+                    if last.name == name
+                        && last.schema == from_schema
+                        && last.table == from_table =>
+                {
+                    last.columns.push(column);
+                    last.ref_columns.push(to_column);
+                }
+                _ => all.push(ForeignKey {
+                    name,
+                    schema: from_schema,
+                    table: from_table,
+                    columns: vec![column],
+                    ref_schema: to_schema,
+                    ref_table: to_table,
+                    ref_columns: vec![to_column],
+                    on_delete: referential_action(&del),
+                    on_update: referential_action(&upd),
+                }),
+            }
+        }
+        for key in all {
+            if key.ref_schema == schema && key.ref_table == table {
+                info.referenced_by.push(key.clone());
+            }
+            if key.schema == schema && key.table == table {
+                info.foreign_keys.push(key);
+            }
+        }
+        let create = format!(
+            "show create table {}.{}",
+            self.quote_ident(schema),
+            self.quote_ident(table)
+        );
+        info.definition = conn
+            .query_first::<mysql::Row, _>(create)
+            .ok()
+            .flatten()
+            .and_then(|row| row.get_opt::<String, _>(1)?.ok());
+        Ok(info)
     }
 
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {

@@ -9,8 +9,9 @@ use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
 use xenon_driver::{
-    CancelHandle, Column, Connection, Feed, ObjectColumn, ObjectKind, Progress, QueryOutcome,
-    QueryResult, ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, ColumnInfo, Connection, Feed, ForeignKey, IndexInfo, ObjectColumn,
+    ObjectKind, Progress, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject, TableInfo,
+    Value, referential_action,
 };
 
 pub struct SqliteConnection {
@@ -221,6 +222,156 @@ impl Connection for SqliteConnection {
         }])
     }
 
+    fn describe(&self, schema: &str, table: &str) -> Result<TableInfo> {
+        let conn = self.lock()?;
+        let mut info = TableInfo::default();
+        // `hidden` is 2 or 3 for generated columns.
+        let mut columns = conn.prepare(
+            "select name, type, \"notnull\", dflt_value, pk, hidden \
+             from pragma_table_xinfo(?1, ?2) where hidden != 1 order by cid",
+        )?;
+        info.columns = columns
+            .query_map([table, schema], |row| {
+                let generated = row.get::<_, i64>(5)? >= 2;
+                Ok(ColumnInfo {
+                    name: row.get(0)?,
+                    type_name: row.get(1)?,
+                    nullable: !row.get::<_, bool>(2)?,
+                    default: if generated {
+                        Some("generated".into())
+                    } else {
+                        row.get(3)?
+                    },
+                    primary_key: row.get::<_, i64>(4)? > 0,
+                    comment: None,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut indexes = conn.prepare(
+            "select name, \"unique\", origin = 'pk' from pragma_index_list(?1, ?2) order by origin = 'pk' desc, name",
+        )?;
+        let mut index_columns = conn.prepare(
+            "select coalesce(name, '(expression)') from pragma_index_info(?1, ?2) order by seqno",
+        )?;
+        let listed = indexes
+            .query_map([table, schema], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (name, unique, primary) in listed {
+            let columns = index_columns
+                .query_map([&name, schema], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            info.indexes.push(IndexInfo {
+                name,
+                columns,
+                unique,
+                primary,
+            });
+        }
+        // A rowid table's `integer primary key` has no index of its own.
+        if !info.indexes.iter().any(|i| i.primary) {
+            let key: Vec<String> = info
+                .columns
+                .iter()
+                .filter(|c| c.primary_key)
+                .map(|c| c.name.clone())
+                .collect();
+            if !key.is_empty() {
+                info.indexes.insert(
+                    0,
+                    IndexInfo {
+                        name: "primary key".into(),
+                        columns: key,
+                        unique: true,
+                        primary: true,
+                    },
+                );
+            }
+        }
+
+        // `to` is null when a key points at the other table's primary key.
+        let primary_key = |table: &str| -> rusqlite::Result<Vec<String>> {
+            conn.prepare("select name from pragma_table_info(?1, ?2) where pk > 0 order by pk")?
+                .query_map([table, schema], |row| row.get(0))?
+                .collect()
+        };
+        let quoted = format!("\"{}\"", schema.replace('"', "\"\""));
+        let mut keys = conn.prepare(&format!(
+            "select m.name, f.id, f.\"from\", f.\"table\", f.\"to\", f.on_delete, f.on_update
+             from {quoted}.sqlite_schema m
+             join pragma_foreign_key_list(m.name, ?2) f
+             where m.type = 'table' and (m.name = ?1 or f.\"table\" = ?1 collate nocase)
+             order by m.name, f.id, f.seq"
+        ))?;
+        type KeyRow = (String, i64, String, String, Option<String>, String, String);
+        let rows = keys
+            .query_map([table, schema], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<KeyRow>>>()?;
+        let mut all: Vec<(i64, ForeignKey)> = Vec::new();
+        for (from_table, id, from, to_table, to, on_delete, on_update) in rows {
+            match all.last_mut() {
+                Some((last_id, last)) if *last_id == id && last.table == from_table => {
+                    last.columns.push(from);
+                    last.ref_columns.extend(to);
+                }
+                _ => all.push((
+                    id,
+                    ForeignKey {
+                        name: String::new(),
+                        schema: schema.into(),
+                        table: from_table,
+                        columns: vec![from],
+                        ref_schema: schema.into(),
+                        ref_table: to_table,
+                        ref_columns: to.into_iter().collect(),
+                        on_delete: referential_action(&on_delete),
+                        on_update: referential_action(&on_update),
+                    },
+                )),
+            }
+        }
+        for (_, mut key) in all {
+            if key.ref_columns.is_empty() {
+                key.ref_columns = primary_key(&key.ref_table)?;
+            }
+            key.name = format!("{}_{}_fkey", key.table, key.columns.join("_"));
+            if key.ref_table.eq_ignore_ascii_case(table) {
+                key.ref_table = table.into();
+                info.referenced_by.push(key.clone());
+            }
+            if key.table == table {
+                info.foreign_keys.push(key);
+            }
+        }
+        drop(keys);
+
+        info.definition = conn
+            .query_row(
+                &format!("select sql from {quoted}.sqlite_schema where name = ?1"),
+                [table],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(info)
+    }
+
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.interrupt.clone()
     }
@@ -269,6 +420,53 @@ mod tests {
             QueryOutcome::Rows(rows) => rows,
             other => panic!("expected rows, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn describe_lists_columns_indexes_and_keys_both_ways() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute(
+            "create table customers (id integer primary key, email text not null unique);
+             create table orders (
+                 id integer primary key,
+                 customer_id integer references customers on delete cascade,
+                 status text default 'new',
+                 total real generated always as (1.0) virtual
+             );
+             create index orders_status on orders (status, customer_id);",
+            10,
+        )
+        .unwrap();
+        let orders = db.describe("main", "orders").unwrap();
+        let names: Vec<_> = orders.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "customer_id", "status", "total"]);
+        assert!(orders.columns[0].primary_key);
+        assert_eq!(orders.columns[2].default.as_deref(), Some("'new'"));
+        assert_eq!(orders.columns[3].default.as_deref(), Some("generated"));
+        assert_eq!(orders.indexes[0].columns, ["id"]);
+        assert!(orders.indexes[0].primary);
+        assert_eq!(orders.indexes[1].columns, ["status", "customer_id"]);
+        let key = &orders.foreign_keys[0];
+        assert_eq!(key.single(), Some(("customer_id", "id")));
+        assert_eq!(key.ref_table, "customers");
+        assert_eq!(key.on_delete.as_deref(), Some("cascade"));
+        assert!(
+            orders
+                .definition
+                .unwrap()
+                .starts_with("CREATE TABLE orders")
+        );
+
+        let customers = db.describe("main", "customers").unwrap();
+        assert!(customers.foreign_keys.is_empty());
+        assert_eq!(customers.referenced_by.len(), 1);
+        assert_eq!(customers.referenced_by[0].table, "orders");
+        assert!(
+            customers
+                .indexes
+                .iter()
+                .any(|i| i.unique && i.columns == ["email"])
+        );
     }
 
     #[test]

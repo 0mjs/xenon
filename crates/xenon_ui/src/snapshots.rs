@@ -270,6 +270,16 @@ fn snapshots() {
             w.export_menu = false;
             cx.notify();
         });
+        // Structure, then back to the rows and through a foreign key.
+        shot.act(|w, _, cx| w.toggle_structure(cx));
+        shot.save(&format!("22-structure-{suffix}"));
+        shot.act(|w, _, cx| w.toggle_structure(cx));
+        shot.act(|w, window, cx| w.follow_key(2, 1, window, cx));
+        shot.save(&format!("23-follow-{suffix}"));
+        shot.act(|w, window, cx| {
+            let id = w.sessions[0].id;
+            w.browse(id, "main", "orders", window, cx)
+        });
 
         // Editing: change a status, delete a row, add one; review; save.
         shot.act(|w, window, cx| {

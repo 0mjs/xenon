@@ -102,6 +102,9 @@ impl Connection for Tunneled {
     fn introspect(&self) -> anyhow::Result<Vec<xenon_driver::Schema>> {
         self.inner.introspect()
     }
+    fn describe(&self, schema: &str, table: &str) -> anyhow::Result<xenon_driver::TableInfo> {
+        self.inner.describe(schema, table)
+    }
     fn cancel_handle(&self) -> Arc<dyn xenon_driver::CancelHandle> {
         self.inner.cancel_handle()
     }

@@ -115,7 +115,7 @@ so it can join the test fleet.
 | ✅ Stream results (first rows at once, live count); "No limit" setting and Fetch all; cancel keeps rows read so far. Still to do: full fetch to a file | 0.3 |
 | ✅ **Inline editing:** edit cells, add rows, delete; changes staged, SQL previewed, applied in one transaction (duplicating rows still to do) | 0.3 |
 | Value editors per type: JSON tree, long text, dates, enums (dropdown), booleans, bytea (hex/image), arrays | 0.3 |
-| Click-through foreign keys: open the referenced row, or see rows that reference this one | 0.3 |
+| ✅ Click-through foreign keys: open the referenced row from the grid or inspector. Still to do: rows that reference this one | 0.3 |
 | Filter builder (column / operator / value chips) alongside the raw WHERE field | 0.3 |
 | Pagination with exact counts (where cheap) or estimates | 0.3 |
 | Column visibility, pinning, reordering; remembered per table | 0.4 |
@@ -129,9 +129,9 @@ so it can join the test fleet.
 |---|---|
 | ✅ Schema tree: schemas, tables, views, column counts | 0.1 |
 | Full tree: columns, indexes, keys, foreign keys, triggers, sequences, functions/procedures, materialized views, enums/types, extensions | 0.5 |
-| Table structure view: columns, types, defaults, nullability, comments, indexes, FKs, checks | 0.5 |
+| ✅ Table structure view: columns, types, defaults, nullability, comments, indexes, FKs both ways. Still to do: checks, triggers | 0.5 |
 | **Table designer:** create or alter tables, columns, indexes and FKs; shows the generated DDL before applying | 0.5 |
-| View DDL for any object; copy `CREATE` statements | 0.5 |
+| ✅ View and copy a table's `CREATE` statement or a view's definition. Still to do: other objects | 0.5 |
 | Rename, drop and truncate with previews and typed confirmation on prod | 0.5 |
 | Table info: row estimate, size on disk, index sizes, last vacuum/analyze (Postgres) | 0.5 |
 | ER diagram for a schema or selected tables; export PNG/SVG | 1.0 |

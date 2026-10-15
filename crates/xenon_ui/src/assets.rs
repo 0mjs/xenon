@@ -14,6 +14,7 @@ macro_rules! icons {
 }
 
 icons![
+    "arrow-up-right",
     "check",
     "clock",
     "close",

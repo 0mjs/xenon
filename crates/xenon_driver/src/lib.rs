@@ -177,6 +177,75 @@ pub struct Schema {
     pub objects: Vec<SchemaObject>,
 }
 
+/// Everything about one table or view, for its Structure view and for
+/// following foreign keys.
+#[derive(Clone, Debug, Default)]
+pub struct TableInfo {
+    pub columns: Vec<ColumnInfo>,
+    pub indexes: Vec<IndexInfo>,
+    /// Keys in this table that point at other rows.
+    pub foreign_keys: Vec<ForeignKey>,
+    /// Keys in other tables (or this one) that point at this table's rows.
+    pub referenced_by: Vec<ForeignKey>,
+    /// The `CREATE` statement, or a view's query, when the engine can give one.
+    pub definition: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub type_name: String,
+    pub nullable: bool,
+    /// The default expression as the engine prints it, or how the value is
+    /// generated (`identity`, `auto_increment`).
+    pub default: Option<String>,
+    pub primary_key: bool,
+    pub comment: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IndexInfo {
+    pub name: String,
+    /// Column names, or expressions for expression indexes.
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub primary: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ForeignKey {
+    pub name: String,
+    /// The table holding the key.
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    /// The table it points at.
+    pub ref_schema: String,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    /// Referential actions in words (`cascade`, `set null`); `None` for the
+    /// default, no action.
+    pub on_delete: Option<String>,
+    pub on_update: Option<String>,
+}
+
+impl ForeignKey {
+    /// The referenced column when the key is a single column, which is what a
+    /// cell can link through.
+    pub fn single(&self) -> Option<(&str, &str)> {
+        match (self.columns.as_slice(), self.ref_columns.as_slice()) {
+            ([from], [to]) => Some((from, to)),
+            _ => None,
+        }
+    }
+}
+
+/// A referential action in words, leaving out the default.
+pub fn referential_action(action: &str) -> Option<String> {
+    let words = action.trim().to_lowercase().replace('_', " ");
+    (!words.is_empty() && words != "no action").then_some(words)
+}
+
 /// Bytes as lowercase hex, for blob literals.
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -289,6 +358,9 @@ pub trait Connection: Send + Sync {
     ) -> Result<QueryResult>;
 
     fn introspect(&self) -> Result<Vec<Schema>>;
+
+    /// Columns, indexes, keys and definition of one table or view.
+    fn describe(&self, schema: &str, table: &str) -> Result<TableInfo>;
 
     fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
 

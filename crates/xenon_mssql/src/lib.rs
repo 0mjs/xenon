@@ -17,8 +17,9 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt as _};
 use xenon_driver::{
-    CancelHandle, Column, Connection, Feed, ObjectColumn, ObjectKind, Progress, QueryError,
-    QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, ColumnInfo, Connection, Feed, ForeignKey, IndexInfo, ObjectColumn,
+    ObjectKind, Progress, QueryError, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject,
+    TableInfo, Value, referential_action,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -594,6 +595,138 @@ impl Connection for MssqlConnection {
         Ok(schemas)
     }
 
+    fn describe(&self, schema: &str, table: &str) -> Result<TableInfo> {
+        let object = self.literal(&Value::Text(format!(
+            "{}.{}",
+            self.quote_ident(schema),
+            self.quote_ident(table)
+        )));
+        let (schema_lit, table_lit) = (
+            self.literal(&Value::Text(schema.into())),
+            self.literal(&Value::Text(table.into())),
+        );
+        let rows = |sql: String| -> Result<Vec<Vec<Value>>> {
+            Ok(match self.execute(&sql, usize::MAX)?.outcome {
+                QueryOutcome::Rows(rows) => rows.rows,
+                QueryOutcome::Affected(_) => Vec::new(),
+            })
+        };
+        let text = |v: &Value| match v {
+            Value::Null => None,
+            Value::Text(t) => Some(t.clone()),
+            other => Some(other.display().into_owned()),
+        };
+        let string = |v: &Value| text(v).unwrap_or_default();
+        let yes = |v: &Value| *v == Value::Integer(1);
+
+        let mut info = TableInfo::default();
+        let columns = rows(format!(
+            "select c.COLUMN_NAME,
+                    c.DATA_TYPE + case
+                        when c.CHARACTER_MAXIMUM_LENGTH = -1 then '(max)'
+                        when c.CHARACTER_MAXIMUM_LENGTH is not null then '(' + cast(c.CHARACTER_MAXIMUM_LENGTH as varchar) + ')'
+                        when c.DATA_TYPE in ('decimal', 'numeric') then '(' + cast(c.NUMERIC_PRECISION as varchar) + ',' + cast(c.NUMERIC_SCALE as varchar) + ')'
+                        else '' end,
+                    case when c.IS_NULLABLE = 'YES' then 1 else 0 end,
+                    case when columnproperty(object_id({object}), c.COLUMN_NAME, 'IsIdentity') = 1
+                         then 'identity' else c.COLUMN_DEFAULT end,
+                    case when exists (
+                        select 1 from sys.indexes i
+                        join sys.index_columns ic on ic.object_id = i.object_id and ic.index_id = i.index_id
+                        where i.object_id = object_id({object}) and i.is_primary_key = 1
+                          and col_name(ic.object_id, ic.column_id) = c.COLUMN_NAME) then 1 else 0 end,
+                    (select cast(ep.value as nvarchar(max)) from sys.extended_properties ep
+                     where ep.major_id = object_id({object}) and ep.name = 'MS_Description'
+                       and ep.minor_id = columnproperty(object_id({object}), c.COLUMN_NAME, 'ColumnId'))
+             from INFORMATION_SCHEMA.COLUMNS c
+             where c.TABLE_SCHEMA = {schema_lit} and c.TABLE_NAME = {table_lit}
+             order by c.ORDINAL_POSITION"
+        ))?;
+        for row in columns {
+            info.columns.push(ColumnInfo {
+                name: string(&row[0]),
+                type_name: string(&row[1]),
+                nullable: yes(&row[2]),
+                default: text(&row[3]).map(|d| unwrap_parens(&d).to_string()),
+                primary_key: yes(&row[4]),
+                comment: text(&row[5]),
+            });
+        }
+        let indexes = rows(format!(
+            "select i.name, cast(i.is_unique as int), cast(i.is_primary_key as int),
+                    col_name(ic.object_id, ic.column_id)
+             from sys.indexes i
+             join sys.index_columns ic on ic.object_id = i.object_id and ic.index_id = i.index_id
+             where i.object_id = object_id({object}) and i.type > 0 and ic.is_included_column = 0
+             order by i.is_primary_key desc, i.name, ic.key_ordinal"
+        ))?;
+        for row in indexes {
+            let name = string(&row[0]);
+            match info.indexes.last_mut() {
+                Some(last) if last.name == name => last.columns.push(string(&row[3])),
+                _ => info.indexes.push(IndexInfo {
+                    name,
+                    unique: yes(&row[1]),
+                    primary: yes(&row[2]),
+                    columns: vec![string(&row[3])],
+                }),
+            }
+        }
+        let keys = rows(format!(
+            "select fk.name,
+                    object_schema_name(fk.parent_object_id), object_name(fk.parent_object_id),
+                    col_name(fkc.parent_object_id, fkc.parent_column_id),
+                    object_schema_name(fk.referenced_object_id), object_name(fk.referenced_object_id),
+                    col_name(fkc.referenced_object_id, fkc.referenced_column_id),
+                    fk.delete_referential_action_desc, fk.update_referential_action_desc
+             from sys.foreign_keys fk
+             join sys.foreign_key_columns fkc on fkc.constraint_object_id = fk.object_id
+             where fk.parent_object_id = object_id({object})
+                or fk.referenced_object_id = object_id({object})
+             order by object_schema_name(fk.parent_object_id), object_name(fk.parent_object_id),
+                      fk.name, fkc.constraint_column_id"
+        ))?;
+        let mut all: Vec<ForeignKey> = Vec::new();
+        for row in keys {
+            let (name, from_schema, from_table) =
+                (string(&row[0]), string(&row[1]), string(&row[2]));
+            match all.last_mut() {
+                Some(last)
+                    if last.name == name
+                        && last.schema == from_schema
+                        && last.table == from_table =>
+                {
+                    last.columns.push(string(&row[3]));
+                    last.ref_columns.push(string(&row[6]));
+                }
+                _ => all.push(ForeignKey {
+                    name,
+                    schema: from_schema,
+                    table: from_table,
+                    columns: vec![string(&row[3])],
+                    ref_schema: string(&row[4]),
+                    ref_table: string(&row[5]),
+                    ref_columns: vec![string(&row[6])],
+                    on_delete: referential_action(&string(&row[7])),
+                    on_update: referential_action(&string(&row[8])),
+                }),
+            }
+        }
+        for key in all {
+            if key.ref_schema == schema && key.ref_table == table {
+                info.referenced_by.push(key.clone());
+            }
+            if key.schema == schema && key.table == table {
+                info.foreign_keys.push(key);
+            }
+        }
+        // Views, procedures and the like keep their source; tables don't.
+        info.definition = rows(format!("select object_definition(object_id({object}))"))?
+            .first()
+            .and_then(|row| text(&row[0]));
+        Ok(info)
+    }
+
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.cancel.clone()
     }
@@ -736,6 +869,28 @@ fn locate(err: anyhow::Error, sql: &str) -> anyhow::Error {
         }
         Err(err) => err,
     }
+}
+
+/// SQL Server prints defaults wrapped in parentheses: `((0))`, `(getdate())`.
+fn unwrap_parens(text: &str) -> &str {
+    let mut text = text.trim();
+    while let Some(inner) = text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        // Only when the outer pair encloses everything: not `(a) + (b)`.
+        let mut depth = 0;
+        let balanced = inner.chars().all(|c| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            depth >= 0
+        });
+        if !balanced {
+            break;
+        }
+        text = inner.trim();
+    }
+    text
 }
 
 #[cfg(test)]

@@ -17,7 +17,8 @@ use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use xenon_driver::export::{self, Format};
 use xenon_driver::sql::{Risk, SortDirection, assess, browse_table, statement_at};
 use xenon_driver::{
-    CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema, Value,
+    CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema, TableInfo,
+    Value,
 };
 use xenon_driver::{ConnectOptions, SslMode};
 use xenon_sqlite::SqliteConnection;
@@ -49,7 +50,7 @@ use crate::{
     ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection,
     NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab, Quit, RunAll, RunQuery,
     SaveEdits, SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer,
-    ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme,
+    ToggleInspector, ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -321,6 +322,22 @@ struct Browse {
     filter: Entity<InputState>,
     order: Option<(String, SortDirection)>,
     _filter_enter: Subscription,
+    /// Columns, keys and indexes, loaded when the tab opens.
+    info: Option<Rc<TableInfo>>,
+    info_error: Option<SharedString>,
+    /// Show the table's structure instead of its rows.
+    pub(crate) structure: bool,
+}
+
+impl Browse {
+    /// The single-column foreign key a column belongs to.
+    fn key_for(&self, column: &str) -> Option<&xenon_driver::ForeignKey> {
+        self.info
+            .as_ref()?
+            .foreign_keys
+            .iter()
+            .find(|key| key.single().is_some_and(|(from, _)| from == column))
+    }
 }
 
 impl Browse {
@@ -628,6 +645,9 @@ impl Workspace {
                         filter,
                         order: None,
                         _filter_enter: filter_enter,
+                        info: None,
+                        info_error: None,
+                        structure: false,
                     }),
                 )
             }
@@ -1735,6 +1755,20 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.browse_where(session, schema, table, None, window, cx);
+    }
+
+    /// Open a table's tab (or switch to it), with `filter` in its WHERE box
+    /// when given, and load its rows.
+    pub(crate) fn browse_where(
+        &mut self,
+        session: usize,
+        schema: &str,
+        table: &str,
+        filter: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.session(session).is_none() {
             return;
         }
@@ -1751,7 +1785,115 @@ impl Workspace {
             ),
         }
         self.reload_history(cx);
+        let mut needs_info = false;
+        if let Some(browse) = &mut self.tabs[self.active].browse {
+            browse.structure = false;
+            needs_info = browse.info.is_none();
+            if let Some(filter) = filter {
+                browse.order = None;
+                let input = browse.filter.clone();
+                input.update(cx, |input, cx| input.set_value(filter, window, cx));
+            }
+        }
+        if needs_info {
+            self.load_table_info(cx);
+        }
         self.run_browse(window, cx);
+    }
+
+    /// Fetch the active table tab's columns, keys and indexes in the background.
+    fn load_table_info(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab();
+        let (Some(session), Some(browse)) = (self.active_session(), &tab.browse) else {
+            return;
+        };
+        let (conn, tab_id) = (session.conn.clone(), tab.id);
+        let (schema, table) = (browse.schema.clone(), browse.table.clone());
+        let task = cx.background_spawn(async move { conn.describe(&schema, &table) });
+        cx.spawn(async move |this, cx| {
+            let info = task.await;
+            this.update(cx, |this, cx| {
+                let Some(browse) = this
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.id == tab_id)
+                    .and_then(|t| t.browse.as_mut())
+                else {
+                    return;
+                };
+                match info {
+                    Ok(info) => {
+                        browse.info = Some(Rc::new(info));
+                        browse.info_error = None;
+                    }
+                    Err(err) => browse.info_error = Some(format!("{err:#}").into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Switch the active table tab between its rows and its structure.
+    pub(crate) fn toggle_structure(&mut self, cx: &mut Context<Self>) {
+        let Some(browse) = &mut self.tabs[self.active].browse else {
+            return;
+        };
+        browse.structure = !browse.structure;
+        if browse.structure && browse.info.is_none() {
+            self.load_table_info(cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the row a foreign-key cell points at, in its table's tab.
+    pub(crate) fn follow_key(
+        &mut self,
+        row: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = self.active_tab();
+        let (Some(session), Some(browse), Some(grid)) =
+            (self.active_session(), &tab.browse, &tab.grid)
+        else {
+            return;
+        };
+        let Some(name) = grid.data.columns.get(column).map(|c| c.name.as_str()) else {
+            return;
+        };
+        let Some(key) = browse.key_for(name) else {
+            return;
+        };
+        let Some(value) = (row < grid.row_count()).then(|| &grid.row(row)[column]) else {
+            return;
+        };
+        if value.is_null() {
+            return;
+        }
+        let (_, to) = key.single().expect("key_for finds single-column keys");
+        let filter = format!(
+            "{} = {}",
+            session.conn.ident(to),
+            session.conn.literal(value)
+        );
+        let (id, schema, table) = (session.id, key.ref_schema.clone(), key.ref_table.clone());
+        self.browse_where(id, &schema, &table, Some(filter), window, cx);
+    }
+
+    /// Open a table from the Structure view.
+    fn open_table(
+        &mut self,
+        schema: String,
+        table: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.active_tab().session {
+            self.browse(id, &schema, &table, window, cx);
+        }
     }
 
     /// Regenerate the active browse tab's query from its filter and sort, and run it.
@@ -2519,7 +2661,7 @@ impl Workspace {
         }
         // Keys are listed here rather than looked up: several bindings only
         // apply inside the editor or grid, which the palette's focus isn't.
-        let commands: [(&str, &str, Box<dyn gpui::Action>); 30] = [
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 31] = [
             ("Run Statement", "⌘↵", Box::new(RunQuery)),
             ("Run All", "⇧⌘↵", Box::new(RunAll)),
             ("Explain", "⌘E", Box::new(Explain)),
@@ -2545,6 +2687,7 @@ impl Workspace {
             ("Copy Cells as Markdown", "", Box::new(CopyMarkdown)),
             ("Copy Cells as SQL Inserts", "", Box::new(CopySql)),
             ("Export Results…", "⇧⌘S", Box::new(ExportResults)),
+            ("Show Table Structure", "", Box::new(ToggleStructure)),
             ("Theme: Match System", "", Box::new(UseSystemTheme)),
             ("Theme: Light", "", Box::new(UseLightTheme)),
             ("Theme: Dark", "", Box::new(UseDarkTheme)),
@@ -2751,7 +2894,7 @@ impl Render for Workspace {
             .child(self.render_center(&theme, cx))
             .when(
                 self.show_inspector && self.active_session().is_some(),
-                |el| el.child(self.render_inspector(&theme)),
+                |el| el.child(self.render_inspector(&theme, cx)),
             );
 
         div()
@@ -2791,6 +2934,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyJson, _, cx| this.copy(Format::Json, cx)))
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy(Format::Markdown, cx)))
             .on_action(cx.listener(|this, _: &CopySql, _, cx| this.copy(Format::Sql, cx)))
+            .on_action(cx.listener(|this, _: &ToggleStructure, _, cx| this.toggle_structure(cx)))
             .on_action(cx.listener(|this, _: &ExportResults, _, cx| {
                 if this.active_tab().grid.is_some() {
                     this.export_menu = !this.export_menu;
@@ -3282,14 +3426,23 @@ impl Workspace {
             .when_some(tab.browse.as_ref(), |el, browse| {
                 el.child(self.render_filter_bar(browse, theme, cx))
             })
-            .child(self.render_results_bar(theme, cx))
-            .children(self.render_edit_bar(theme, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(self.render_results(theme, cx)),
-            )
+            .map(|el| match tab.browse.as_ref().filter(|b| b.structure) {
+                Some(browse) => el.child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .child(self.render_structure(browse, theme, cx)),
+                ),
+                None => el
+                    .child(self.render_results_bar(theme, cx))
+                    .children(self.render_edit_bar(theme, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .child(self.render_results(theme, cx)),
+                    ),
+            })
             .into_any_element()
     }
 
@@ -3395,7 +3548,7 @@ impl Workspace {
         browse: &Browse,
         theme: &Theme,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let sorted = browse.order.as_ref().map(|(column, direction)| {
             let arrow = match direction {
                 SortDirection::Ascending => "▲",
@@ -3404,8 +3557,25 @@ impl Workspace {
             format!("order by {column} {arrow}")
         });
         let active = sorted.is_some() || !browse.filter.read(cx).value().trim().is_empty();
+        let structure = browse.structure;
+        let this = cx.entity().downgrade();
+        let toggle = widgets::segmented(
+            theme,
+            "table-view",
+            vec![("Data", !structure), ("Structure", structure)],
+            move |ix, _, cx| {
+                this.update(cx, |this, cx| {
+                    if (*ix == 1) != structure {
+                        this.toggle_structure(cx);
+                    }
+                })
+                .ok();
+            },
+        )
+        .w(px(170.))
+        .flex_none();
 
-        div()
+        let bar = div()
             .h(px(44.))
             .flex_none()
             .flex()
@@ -3414,41 +3584,101 @@ impl Workspace {
             .px(px(8.))
             .border_b_1()
             .border_color(theme.line)
-            .child(
-                field(
-                    theme,
-                    Some(
-                        div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.5))
-                            .text_color(if self.field_focus.browse {
-                                theme.acc
-                            } else {
-                                theme.t3
-                            })
-                            .child("WHERE")
-                            .into_any_element(),
-                    ),
-                    &browse.filter,
-                    self.field_focus.browse,
+            .child(toggle);
+        if structure {
+            return bar
+                .child(div().flex_1())
+                .child(
+                    widgets::button(
+                        theme,
+                        "refresh-structure",
+                        "Refresh",
+                        ButtonKind::Ghost,
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.load_table_info(cx))),
                 )
-                .flex_1(),
-            )
-            .when_some(sorted, |el, sorted| {
-                el.child(
+                .into_any_element();
+        }
+        bar.child(
+            field(
+                theme,
+                Some(
                     div()
                         .font_family(MONO_FONT)
                         .text_size(px(10.5))
-                        .text_color(theme.t2)
-                        .child(sorted),
-                )
-            })
-            .when(active, |el| {
-                el.child(
-                    widgets::button(theme, "clear-filter", "Reset", ButtonKind::Ghost, true)
-                        .on_click(cx.listener(|this, _, w, cx| this.clear_browse_filter(w, cx))),
-                )
-            })
+                        .text_color(if self.field_focus.browse {
+                            theme.acc
+                        } else {
+                            theme.t3
+                        })
+                        .child("WHERE")
+                        .into_any_element(),
+                ),
+                &browse.filter,
+                self.field_focus.browse,
+            )
+            .flex_1(),
+        )
+        .when_some(sorted, |el, sorted| {
+            el.child(
+                div()
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.5))
+                    .text_color(theme.t2)
+                    .child(sorted),
+            )
+        })
+        .when(active, |el| {
+            el.child(
+                widgets::button(theme, "clear-filter", "Reset", ButtonKind::Ghost, true)
+                    .on_click(cx.listener(|this, _, w, cx| this.clear_browse_filter(w, cx))),
+            )
+        })
+        .into_any_element()
+    }
+
+    fn render_structure(
+        &self,
+        browse: &Browse,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(info) = &browse.info else {
+            return match &browse.info_error {
+                Some(error) => div()
+                    .p(px(16.))
+                    .text_size(px(12.))
+                    .text_color(theme.err)
+                    .child(error.clone())
+                    .into_any_element(),
+                None => centered_hint(theme, "Loading structure…"),
+            };
+        };
+        let Some(session) = self.active_session() else {
+            return centered_hint(theme, "Not connected.");
+        };
+        let is_view = session
+            .schemas
+            .iter()
+            .find(|s| s.name == browse.schema)
+            .and_then(|s| s.objects.iter().find(|o| o.name == browse.table))
+            .is_some_and(|o| o.kind == ObjectKind::View);
+        let conn = session.conn.clone();
+        let this = cx.entity().downgrade();
+        crate::structure::render(
+            crate::structure::View {
+                info,
+                table: &browse.table,
+                is_view,
+                ident: &|name| conn.ident(name),
+                open: Rc::new(move |schema, table, window, cx| {
+                    this.update(cx, |this, cx| this.open_table(schema, table, window, cx))
+                        .ok();
+                }),
+            },
+            theme,
+        )
     }
 
     /// The cell being edited: its column, its value, and what to do with it.
@@ -3893,6 +4123,13 @@ impl Workspace {
                             .ok();
                     }
                 }),
+                follow: Rc::new({
+                    let this = this.clone();
+                    move |row, column, window, cx| {
+                        this.update(cx, |this, cx| this.follow_key(row, column, window, cx))
+                            .ok();
+                    }
+                }),
                 resize_start: Rc::new({
                     let this = this.clone();
                     move |column, x, width, _, cx| {
@@ -3928,12 +4165,32 @@ impl Workspace {
                 }),
             };
 
+            let links: Vec<Option<SharedString>> = grid
+                .data
+                .columns
+                .iter()
+                .map(|column| {
+                    let browse = tab.browse.as_ref()?;
+                    Some(browse.key_for(&column.name)?.ref_table.clone().into())
+                })
+                .collect();
+            // Room for a foreign key's arrow and the table it points at.
+            let manual = tab.manual_widths(grid);
+            let mut widths = widths;
+            for (ix, link) in links.iter().enumerate() {
+                if let (Some(table), None) = (link, manual.get(ix).copied().flatten()) {
+                    let type_name = grid.data.columns[ix].type_name.as_deref().unwrap_or("");
+                    let header = (type_name.chars().count() + 3 + table.chars().count()) as f32;
+                    widths[ix] = (widths[ix] + 18.).max(header * 6. + 24.);
+                }
+            }
             let view = results::View {
                 grid,
                 widths,
                 selection: tab.selection,
                 sort,
                 edits: tab.edits.clone(),
+                links,
             };
             return div()
                 .id("results")
@@ -4021,7 +4278,7 @@ impl Workspace {
         }
     }
 
-    fn render_inspector(&self, theme: &Theme) -> impl IntoElement {
+    fn render_inspector(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         let mut panel = div()
             .w(px(INSPECTOR_WIDTH))
@@ -4067,37 +4324,75 @@ impl Workspace {
             .id("inspector-fields")
             .flex_1()
             .overflow_y_scroll()
-            .children(columns.iter().zip(row).map(|(column, (value, edited))| {
-                div()
-                    .px(px(12.))
-                    .py(px(8.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .border_b_1()
-                    .border_color(theme.line_2)
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.5))
-                    .child(
-                        div()
-                            .font_family(UI_FONT)
-                            .text_size(px(11.))
-                            .text_color(theme.t3)
-                            .child(SharedString::from(column.name.clone())),
-                    )
-                    .child(
-                        match value {
-                            None => div().italic().text_color(theme.t3).child("default"),
-                            Some(Value::Null) => div().italic().text_color(theme.t3).child("NULL"),
-                            Some(value) => {
-                                let text = value.display();
-                                let shown = pretty_json(&text).unwrap_or_else(|| text.into_owned());
-                                div().child(SharedString::from(shown))
+            .children(columns.iter().zip(row).enumerate().map(
+                |(col, (column, (value, edited)))| {
+                    // A foreign key with a value: a link to the row it points at.
+                    let target = tab
+                        .browse
+                        .as_ref()
+                        .and_then(|browse| browse.key_for(&column.name))
+                        .filter(|_| matches!(row_ref, RowRef::Existing(_)))
+                        .filter(|_| matches!(&value, Some(v) if !v.is_null()))
+                        .map(|key| key.ref_table.clone());
+                    div()
+                        .px(px(12.))
+                        .py(px(8.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .border_b_1()
+                        .border_color(theme.line_2)
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .font_family(UI_FONT)
+                                .text_size(px(11.))
+                                .text_color(theme.t3)
+                                .child(SharedString::from(column.name.clone()))
+                                .child(div().flex_1())
+                                .when_some(target, |el, table| {
+                                    el.child(
+                                        div()
+                                            .id(("follow", col))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(3.))
+                                            .cursor_pointer()
+                                            .text_color(theme.acc)
+                                            .hover(|el| el.underline())
+                                            .child(SharedString::from(format!("Open in {table}")))
+                                            .child(
+                                                gpui::svg()
+                                                    .path(assets::icon("arrow-up-right"))
+                                                    .size(px(11.))
+                                                    .text_color(theme.acc),
+                                            )
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.follow_key(ix, col, window, cx)
+                                            })),
+                                    )
+                                }),
+                        )
+                        .child(
+                            match value {
+                                None => div().italic().text_color(theme.t3).child("default"),
+                                Some(Value::Null) => {
+                                    div().italic().text_color(theme.t3).child("NULL")
+                                }
+                                Some(value) => {
+                                    let text = value.display();
+                                    let shown =
+                                        pretty_json(&text).unwrap_or_else(|| text.into_owned());
+                                    div().child(SharedString::from(shown))
+                                }
                             }
-                        }
-                        .when(edited, |el| el.text_color(theme.warn)),
-                    )
-            }));
+                            .when(edited, |el| el.text_color(theme.warn)),
+                        )
+                },
+            ));
         panel.child(fields)
     }
 

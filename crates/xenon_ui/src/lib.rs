@@ -15,6 +15,7 @@ mod palette;
 mod results;
 mod servers;
 mod settings;
+mod structure;
 pub mod theme;
 mod widgets;
 pub mod workspace;
@@ -64,6 +65,7 @@ actions!(
         CopyMarkdown,
         CopySql,
         ExportResults,
+        ToggleStructure,
         FocusEditor,
         OpenPalette,
         PaletteUp,
