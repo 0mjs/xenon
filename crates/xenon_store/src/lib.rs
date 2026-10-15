@@ -160,6 +160,8 @@ pub struct SavedConnection {
     pub target: Target,
     pub environment: Environment,
     pub read_only: bool,
+    /// A colour to tell it apart by (a name like `blue`; empty for none).
+    pub color: String,
 }
 
 impl SavedConnection {
@@ -286,6 +288,7 @@ impl Store {
             ("ssh_port", "integer"),
             ("ssh_user", "text not null default ''"),
             ("ssh_key", "text not null default ''"),
+            ("color", "text not null default ''"),
         ] {
             if !columns.iter().any(|c| c == column) {
                 conn.execute_batch(&format!(
@@ -347,7 +350,7 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
             "select id, name, kind, host, port, database, user, ssl, path, environment, read_only,
-                    ssh_host, ssh_port, ssh_user, ssh_key
+                    ssh_host, ssh_port, ssh_user, ssh_key, color
              from connections order by last_used desc, id desc",
         )?;
         let rows = stmt
@@ -385,6 +388,7 @@ impl Store {
                     target,
                     environment: Environment::parse(&row.get::<_, String>(9)?),
                     read_only: row.get(10)?,
+                    color: row.get(15)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -443,20 +447,20 @@ impl Store {
             conn.execute(
                 "insert into connections
                      (name, kind, host, port, database, user, ssl, path, environment, read_only, last_used,
-                      ssh_host, ssh_port, ssh_user, ssh_key)
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                      ssh_host, ssh_port, ssh_user, ssh_key, color)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?,
-                        ssh.host, ssh_port, ssh.user, ssh.key_file],
+                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color],
             )?;
             Ok(conn.last_insert_rowid())
         } else {
             conn.execute(
                 "update connections set name = ?1, kind = ?2, host = ?3, port = ?4, database = ?5,
                      user = ?6, ssl = ?7, path = ?8, environment = ?9, read_only = ?10, last_used = ?11,
-                     ssh_host = ?12, ssh_port = ?13, ssh_user = ?14, ssh_key = ?15
-                 where id = ?16",
+                     ssh_host = ?12, ssh_port = ?13, ssh_user = ?14, ssh_key = ?15, color = ?16
+                 where id = ?17",
                 params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?,
-                        ssh.host, ssh_port, ssh.user, ssh.key_file, id],
+                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color, id],
             )?;
             Ok(id)
         }
@@ -809,6 +813,25 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_keeps_its_colour() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store
+            .save_connection(&SavedConnection {
+                id: 0,
+                name: "Clients/Acme".into(),
+                target: Target::Sqlite {
+                    path: "/tmp/acme.db".into(),
+                },
+                environment: Environment::None,
+                read_only: false,
+                color: "blue".into(),
+            })
+            .unwrap();
+        let saved = store.connections().unwrap();
+        assert_eq!((saved[0].id, saved[0].color.as_str()), (id, "blue"));
+    }
+
+    #[test]
     fn saves_updates_and_deletes_connections() {
         let store = Store::open_in_memory().unwrap();
         let pg = SavedConnection {
@@ -825,6 +848,7 @@ mod tests {
             },
             environment: Environment::Production,
             read_only: true,
+            color: String::new(),
         };
         let id = store.save_connection(&pg).unwrap();
         let file = SavedConnection {
@@ -835,6 +859,7 @@ mod tests {
             },
             environment: Environment::None,
             read_only: false,
+            color: String::new(),
         };
         let file_id = store.save_connection(&file).unwrap();
         // Re-saving the same file doesn't duplicate it.
@@ -912,6 +937,7 @@ mod tests {
                 },
                 environment: Environment::Production,
                 read_only: true,
+                color: String::new(),
             })
             .unwrap();
         let saved = &store.connections().unwrap()[0];

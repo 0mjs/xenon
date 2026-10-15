@@ -53,10 +53,28 @@ impl Workspace {
         if !self.saved.is_empty() {
             list = list.child(div().mt(px(8.)).child(panel_label(theme, "Saved")));
             let current = self.active_session().and_then(|s| s.saved_id);
-            for saved in &self.saved {
-                let open = self.sessions.iter().any(|s| s.saved_id == Some(saved.id));
-                let active = current == Some(saved.id);
-                list = list.child(self.render_saved(saved, open, active, theme, cx));
+            for (folder, members) in crate::folders::group(&self.saved, |s| &s.name) {
+                let depth = usize::from(!folder.is_empty());
+                if !folder.is_empty() {
+                    let key = format!("connections/{folder}");
+                    let folded = self.folded_folders.contains(&key);
+                    list = list.child(self.render_folder(
+                        &folder,
+                        key,
+                        folded,
+                        members.len(),
+                        theme,
+                        cx,
+                    ));
+                    if folded {
+                        continue;
+                    }
+                }
+                for saved in members {
+                    let open = self.sessions.iter().any(|s| s.saved_id == Some(saved.id));
+                    let active = current == Some(saved.id);
+                    list = list.child(self.render_saved(saved, open, active, depth, theme, cx));
+                }
             }
         }
 
@@ -90,71 +108,73 @@ impl Workspace {
         let group = SharedString::from(format!("session-{id}"));
         // A filter shows every match, even in folded connections and schemas.
         let folded = session.collapsed && filter.is_empty();
-        let mut rows = vec![
-            tree_row(0, !self.classic())
-                .id(group.clone())
-                .group(group.clone())
-                .mt(px(2.))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.s3))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_session(id, cx)))
-                .child(div().w(px(12.)).text_color(theme.t3).child(if folded {
-                    "▸"
-                } else {
-                    "▾"
-                }))
-                .child(engine_logo(
-                    session.engine,
-                    13.,
-                    if active { theme.acc } else { theme.t3 },
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if active { theme.text } else { theme.t2 })
-                        .child(session.name.clone()),
-                )
-                .children(
-                    connection_tags(
-                        theme,
-                        session.environment,
-                        session.read_only,
-                        session.conn.is_local(),
+        let mut rows =
+            vec![
+                tree_row(0, !self.classic())
+                    .id(group.clone())
+                    .group(group.clone())
+                    .mt(px(2.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.s3))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_session(id, cx)))
+                    .child(div().w(px(12.)).text_color(theme.t3).child(if folded {
+                        "▸"
+                    } else {
+                        "▾"
+                    }))
+                    .child(engine_logo(
+                        session.engine,
+                        13.,
+                        crate::widgets::connection_color(&session.profile.color)
+                            .unwrap_or(if active { theme.acc } else { theme.t3 }),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(if active { theme.text } else { theme.t2 })
+                            .child(session.name.clone()),
                     )
-                    .into_iter()
-                    .map(|(label, color)| env_tag(label, color)),
-                )
-                .when(session.conn.tunnel().is_some(), |el| {
-                    el.child(env_tag("SSH", theme.t2))
-                })
-                .child(
-                    div()
-                        .id(("close-session", id))
-                        .size(px(22.))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.))
-                        .opacity(0.6)
-                        .group_hover(group, |s| s.opacity(1.))
-                        .hover(|s| s.bg(theme.raised))
-                        .tooltip(crate::widgets::tooltip("Disconnect", "⇧⌘W"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_session(id, window, cx);
-                        }))
-                        .child(
-                            svg()
-                                .path(assets::icon("unplug"))
-                                .size(px(13.))
-                                .text_color(theme.t2),
-                        ),
-                )
-                .into_any_element(),
-        ];
+                    .children(
+                        connection_tags(
+                            theme,
+                            session.environment,
+                            session.read_only,
+                            session.conn.is_local(),
+                        )
+                        .into_iter()
+                        .map(|(label, color)| env_tag(label, color)),
+                    )
+                    .when(session.conn.tunnel().is_some(), |el| {
+                        el.child(env_tag("SSH", theme.t2))
+                    })
+                    .child(
+                        div()
+                            .id(("close-session", id))
+                            .size(px(22.))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.))
+                            .opacity(0.6)
+                            .group_hover(group, |s| s.opacity(1.))
+                            .hover(|s| s.bg(theme.raised))
+                            .tooltip(crate::widgets::tooltip("Disconnect", "⇧⌘W"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_session(id, window, cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path(assets::icon("unplug"))
+                                    .size(px(13.))
+                                    .text_color(theme.t2),
+                            ),
+                    )
+                    .into_any_element(),
+            ];
         if folded {
             return (rows, 0);
         }
@@ -208,11 +228,50 @@ impl Workspace {
         (rows, shown)
     }
 
+    /// A folder of saved connections or queries, which folds.
+    pub(crate) fn render_folder(
+        &self,
+        folder: &str,
+        key: String,
+        folded: bool,
+        members: usize,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        tree_row(0, !self.classic())
+            .id(SharedString::from(format!("folder-{key}")))
+            .cursor_pointer()
+            .text_color(theme.t2)
+            .hover(|s| s.bg(theme.s3).text_color(theme.text))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.folded_folders.remove(&key) {
+                    this.folded_folders.insert(key.clone());
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w(px(12.))
+                    .text_color(theme.t3)
+                    .child(if folded { "▸" } else { "▾" }),
+            )
+            .child(
+                svg()
+                    .path(crate::assets::icon("folder"))
+                    .size(px(13.))
+                    .flex_none()
+                    .text_color(theme.t3),
+            )
+            .child(div().flex_1().truncate().child(folder.to_string()))
+            .child(count(theme, members))
+    }
+
     fn render_saved(
         &self,
         saved: &SavedConnection,
         open: bool,
         active: bool,
+        depth: usize,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -232,7 +291,8 @@ impl Workspace {
         let group = SharedString::from(format!("saved-{}", saved.id));
         let (connect, edit, forget) = (saved.clone(), saved.clone(), saved.clone());
 
-        tree_row(0, !self.classic())
+        let color = crate::widgets::connection_color(&saved.color);
+        tree_row(depth, !self.classic())
             .id(group.clone())
             .group(group.clone())
             .cursor_pointer()
@@ -247,9 +307,14 @@ impl Workspace {
             .child(div().w(px(18.)).flex().flex_none().child(engine_logo(
                 engine,
                 13.,
-                if open { theme.acc } else { theme.t3 },
+                color.unwrap_or(if open { theme.acc } else { theme.t3 }),
             )))
-            .child(div().flex_1().truncate().child(saved.name.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .truncate()
+                    .child(crate::folders::split(&saved.name).1.to_string()),
+            )
             .children(
                 connection_tags(theme, saved.environment, saved.read_only, local)
                     .into_iter()

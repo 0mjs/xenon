@@ -44,6 +44,8 @@ pub struct Request {
     pub name: String,
     pub environment: Environment,
     pub read_only: bool,
+    /// See [`widgets::CONNECTION_COLORS`]; empty for none.
+    pub color: String,
     pub save: bool,
     pub target: RequestTarget,
 }
@@ -94,6 +96,7 @@ pub struct ConnectDialog {
     ssh_password: Entity<InputState>,
     environment: Environment,
     read_only: bool,
+    color: String,
     save: bool,
     status: Status,
     _subscriptions: Vec<Subscription>,
@@ -185,7 +188,16 @@ impl ConnectDialog {
             }
         };
 
-        let name = field("e.g. acme production", saved_name, window, cx);
+        let color = match &subject {
+            Subject::Saved(saved, _, _) => saved.color.clone(),
+            _ => String::new(),
+        };
+        let name = field(
+            "e.g. Clients/Acme production (a slash files it in a folder)",
+            saved_name,
+            window,
+            cx,
+        );
         let url = field(servers::url_example(engine), String::new(), window, cx);
         let host = field("localhost", options.host.clone(), window, cx);
         let port = cx.new(|cx| {
@@ -274,6 +286,7 @@ impl ConnectDialog {
             ssl_chosen: id != 0,
             environment,
             read_only,
+            color,
             save: true,
             status: Status::Idle,
             ssh: options.ssh.is_some(),
@@ -401,6 +414,7 @@ impl ConnectDialog {
             id: self.id,
             name,
             environment: self.environment,
+            color: self.color.clone(),
             read_only: self.read_only,
             save: self.save || self.id != 0,
             target,
@@ -725,6 +739,53 @@ impl Render for ConnectDialog {
         body = body
             .child(div().h(px(1.)).my(px(2.)).bg(theme.line_2))
             .child(labelled("Name", &self.name, name_focused));
+        let swatch = |id: usize, color: Option<gpui::Rgba>, on: bool, name: &'static str| {
+            div()
+                .id(("color", id))
+                .size(px(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_2()
+                .border_color(if on {
+                    theme.text
+                } else {
+                    gpui::transparent_black().into()
+                })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.color = name.to_string();
+                    cx.notify();
+                }))
+                .child(match color {
+                    Some(color) => div().size(px(14.)).rounded_full().bg(color),
+                    // None: an empty ring.
+                    None => div()
+                        .size(px(14.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.t3),
+                })
+        };
+        let colors = div()
+            .flex()
+            .gap(px(4.))
+            .child(swatch(0, None, self.color.is_empty(), ""))
+            .children(
+                widgets::CONNECTION_COLORS
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, (name, _))| {
+                        swatch(
+                            ix + 1,
+                            widgets::connection_color(name),
+                            self.color == *name,
+                            name,
+                        )
+                    }),
+            );
+        body = body.child(section(&theme, "Colour", colors));
         body = body.child(
             div()
                 .flex()

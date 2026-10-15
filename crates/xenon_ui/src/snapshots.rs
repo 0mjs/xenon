@@ -255,17 +255,24 @@ fn seed_saved(store: &Store, shop: &Path) {
             database: db.into(),
             user: "app".into(),
             ssl: "require".into(),
-            ssh: (name == "Billing").then(|| xenon_store::SshTunnel {
+            ssh: (name == "Clients/Billing").then(|| xenon_store::SshTunnel {
                 host: "bastion.billing.internal".into(),
                 ..Default::default()
             }),
         },
         environment,
         read_only: false,
+        // Colours to tell them apart, and a folder for the client ones.
+        color: match name {
+            "Clients/Billing" => "orange",
+            "Staging" => "green",
+            _ => "",
+        }
+        .into(),
     };
     store
         .save_connection(&pg(
-            "Billing",
+            "Clients/Billing",
             "db.billing.internal",
             "billing",
             Environment::Production,
@@ -275,7 +282,7 @@ fn seed_saved(store: &Store, shop: &Path) {
         .save_connection(&SavedConnection {
             read_only: true,
             ..pg(
-                "Analytics replica",
+                "Clients/Analytics replica",
                 "replica.analytics.internal",
                 "warehouse",
                 Environment::Production,
@@ -299,6 +306,7 @@ fn seed_saved(store: &Store, shop: &Path) {
             },
             environment: Environment::None,
             read_only: false,
+            color: "blue".into(),
         })
         .unwrap();
 }

@@ -73,8 +73,10 @@ impl Workspace {
             None => tab.title.to_string(),
         };
         let tab_id = tab.id;
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Paid orders this week"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("e.g. Reports/Paid orders this week (a slash files it in a folder)")
+        });
         input.update(cx, |input, cx| {
             input.set_value(suggested, window, cx);
             input.focus(window, cx);
@@ -259,104 +261,114 @@ impl Workspace {
         }
         let now = now_ms();
         let open: Option<i64> = self.active_tab().saved_query;
-        let entries: Vec<AnyElement> = self
-            .saved_queries
-            .iter()
-            .map(|query| {
-                let preview: String = query
-                    .sql
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .chars()
-                    .take(160)
-                    .collect();
-                let (load, remove) = (query.clone(), query.clone());
-                let active = open == Some(query.id);
-                div()
-                    .id(SharedString::from(format!("saved-{}", query.id)))
-                    .group("saved-entry")
-                    .relative()
-                    .px(px(12.))
-                    .py(px(7.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .border_b_1()
-                    .border_color(theme.line_2)
-                    .cursor_pointer()
-                    .when(active, |el| el.bg(theme.acc_wash))
-                    .hover(|s| s.bg(theme.s3))
-                    .on_click(
-                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                            // Click opens the query; double-click runs it.
-                            this.open_saved_query(
-                                load.clone(),
-                                event.click_count() >= 2,
-                                window,
-                                cx,
-                            );
-                        }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(query.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(10.))
-                                    .text_color(theme.t3)
-                                    .child(ago(now - query.updated_at)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.5))
-                            .text_color(theme.t3)
-                            .truncate()
-                            .child(preview),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("delete-saved-{}", query.id)))
-                            .absolute()
-                            .top(px(6.))
-                            .right(px(6.))
-                            .size(px(22.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .bg(theme.s2)
-                            .invisible()
-                            .group_hover("saved-entry", |el| el.visible())
-                            .hover(|el| el.bg(theme.s3))
-                            .tooltip(widgets::tooltip("Delete", ""))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.delete_saved_query(&remove, window, cx)
-                            }))
-                            .child(
-                                svg()
-                                    .path(assets::icon("trash-2"))
-                                    .size(px(12.))
-                                    .text_color(theme.t2),
-                            ),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        let entry = |query: &xenon_store::SavedQuery, nested: bool, cx: &mut Context<Self>| {
+            let preview: String = query
+                .sql
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(160)
+                .collect();
+            let (load, remove) = (query.clone(), query.clone());
+            let active = open == Some(query.id);
+            div()
+                .id(SharedString::from(format!("saved-{}", query.id)))
+                .group("saved-entry")
+                .relative()
+                .pl(px(if nested { 30. } else { 12. }))
+                .pr(px(12.))
+                .py(px(7.))
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .border_b_1()
+                .border_color(theme.line_2)
+                .cursor_pointer()
+                .when(active, |el| el.bg(theme.acc_wash))
+                .hover(|s| s.bg(theme.s3))
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        // Click opens the query; double-click runs it.
+                        this.open_saved_query(load.clone(), event.click_count() >= 2, window, cx);
+                    }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .truncate()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(crate::folders::split(&query.name).1.to_string()),
+                        )
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.))
+                                .text_color(theme.t3)
+                                .child(ago(now - query.updated_at)),
+                        ),
+                )
+                .child(
+                    div()
+                        .font_family(MONO_FONT)
+                        .text_size(px(10.5))
+                        .text_color(theme.t3)
+                        .truncate()
+                        .child(preview),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("delete-saved-{}", query.id)))
+                        .absolute()
+                        .top(px(6.))
+                        .right(px(6.))
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .bg(theme.s2)
+                        .invisible()
+                        .group_hover("saved-entry", |el| el.visible())
+                        .hover(|el| el.bg(theme.s3))
+                        .tooltip(widgets::tooltip("Delete", ""))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.delete_saved_query(&remove, window, cx)
+                        }))
+                        .child(
+                            svg()
+                                .path(assets::icon("trash-2"))
+                                .size(px(12.))
+                                .text_color(theme.t2),
+                        ),
+                )
+                .into_any_element()
+        };
+        let mut entries: Vec<AnyElement> = Vec::new();
+        for (folder, members) in crate::folders::group(&self.saved_queries, |q| &q.name) {
+            let nested = !folder.is_empty();
+            if nested {
+                let key = format!("queries/{folder}");
+                let folded = self.folded_folders.contains(&key);
+                entries.push(
+                    self.render_folder(&folder, key, folded, members.len(), theme, cx)
+                        .into_any_element(),
+                );
+                if folded {
+                    continue;
+                }
+            }
+            for query in members {
+                entries.push(entry(query, nested, cx));
+            }
+        }
         panel
             .child(
                 div()

@@ -149,6 +149,8 @@ pub(crate) struct Profile {
     name: String,
     environment: Environment,
     read_only: bool,
+    /// Its colour (see `widgets::CONNECTION_COLORS`), or empty.
+    pub(crate) color: String,
     target: RequestTarget,
     /// Set from Settings for production connections when connecting.
     lock_timeout: Option<std::time::Duration>,
@@ -189,6 +191,7 @@ impl Profile {
             name: saved.name.clone(),
             environment: saved.environment,
             read_only: saved.read_only,
+            color: saved.color.clone(),
             target,
             lock_timeout: None,
         }
@@ -201,6 +204,7 @@ impl Profile {
             name: request.name,
             environment: request.environment,
             read_only: request.read_only,
+            color: request.color,
             target: request.target,
             lock_timeout: None,
         }
@@ -265,6 +269,7 @@ impl Profile {
             target: self.saved_target(),
             environment: self.environment,
             read_only: self.read_only,
+            color: self.color.clone(),
         })?;
         if let RequestTarget::Server(_, options) = &self.target {
             if !options.password.is_empty() {
@@ -595,6 +600,8 @@ pub struct Workspace {
     pub(crate) connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
     pub(crate) confirm: Option<(Entity<ConfirmDialog>, Subscription, Pending)>,
     pub(crate) saved: Vec<SavedConnection>,
+    /// Folders of saved connections or queries that are folded (`connections/Clients`).
+    pub(crate) folded_folders: HashSet<String>,
     pub(crate) explorer_filter: Entity<InputState>,
     show_side_panel: bool,
     /// The mouse went down on empty title bar space: moving it drags the window.
@@ -719,6 +726,7 @@ impl Workspace {
             connect_dialog: None,
             confirm: None,
             saved: Vec::new(),
+            folded_folders: HashSet::new(),
             explorer_filter,
             show_side_panel: true,
             titlebar_pressed: false,
@@ -1031,6 +1039,7 @@ impl Workspace {
                     .unwrap_or_else(|| path_text.clone()),
                 environment: Environment::None,
                 read_only: false,
+                color: String::new(),
                 target: RequestTarget::Sqlite(path_text),
                 lock_timeout: None,
             },
@@ -1059,6 +1068,7 @@ impl Workspace {
                     ),
                     environment: saved.as_ref().map_or(Environment::None, |s| s.environment),
                     read_only: saved.as_ref().is_some_and(|s| s.read_only),
+                    color: saved.as_ref().map(|s| s.color.clone()).unwrap_or_default(),
                     target: RequestTarget::Server(engine, options),
                     lock_timeout: None,
                 };
@@ -1324,6 +1334,7 @@ impl Workspace {
                     name: found.detail(),
                     environment: Environment::None,
                     read_only: false,
+                    color: String::new(),
                     target: RequestTarget::Server(*engine, options.clone()),
                     lock_timeout: None,
                 },
@@ -1538,6 +1549,7 @@ impl Workspace {
                 name,
                 environment: Environment::None,
                 read_only: false,
+                color: String::new(),
                 target: RequestTarget::Server(engine, options),
                 lock_timeout: None,
             },
@@ -4177,120 +4189,123 @@ impl Workspace {
         let inset = drag_area(cx).w(px(TRAFFIC_LIGHT_INSET)).flex_none();
         let spacer = drag_area(cx).flex_1();
         let classic = self.classic();
-        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
-            let active = index == self.active;
-            let running = matches!(tab.query, Query::Running { .. });
-            let session = tab.session.and_then(|id| self.session(id));
-            let production =
-                session.is_some_and(|session| session.environment == Environment::Production);
-            let mark = match session {
-                Some(session) => widgets::engine_logo(
-                    session.engine,
-                    12.,
-                    if active { theme.acc } else { theme.t3 },
-                ),
-                None => svg()
-                    .path(assets::icon("plus"))
-                    .size(px(12.))
-                    .flex_none()
-                    .text_color(if active { theme.acc } else { theme.t3 }),
-            };
-            div()
-                .id(("tab", tab.id))
-                .group("tab")
-                .max_w(px(TAB_MAX_WIDTH))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .relative()
-                .cursor_pointer()
-                // Classic: full-height tabs split by hairlines. Floating: pills.
-                .map(|el| {
-                    if classic {
-                        el.h_full()
-                            .pl(px(14.))
-                            .pr(px(8.))
-                            .border_r_1()
-                            .border_color(theme.line)
-                            .when(active, |el| el.bg(theme.s1))
-                    } else {
-                        el.h(px(28.))
-                            .pl(px(12.))
-                            .pr(px(6.))
-                            .rounded(px(8.))
-                            .when(active, |el| el.bg(theme.pill))
-                    }
-                })
-                .when(active, |el| el.text_color(theme.text))
-                .when(!active, |el| {
-                    el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.activate_tab(index, window, cx);
-                }))
-                .child(mark)
-                .child(
-                    div()
-                        .flex()
-                        .min_w(px(0.))
-                        .gap(px(5.))
-                        .child(div().flex_none().child(tab.title.clone()))
-                        // Which connection, once there's more than one to tell apart.
-                        .when_some(session.filter(|_| several), |el, session| {
-                            el.child(
-                                div()
-                                    .truncate()
-                                    .text_color(theme.t3)
-                                    .child(session.name.clone()),
-                            )
-                        }),
-                )
-                .when(running, |el| {
-                    el.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.acc))
-                })
-                .child(
-                    div()
-                        .id(("close-tab", tab.id))
-                        .size(px(18.))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.))
-                        // Hidden on inactive tabs until the tab is hovered.
-                        .when(!active, |el| {
-                            el.opacity(0.).group_hover("tab", |s| s.opacity(1.))
-                        })
-                        .hover(|s| s.bg(theme.s3))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_tab_at(index, window, cx);
-                        }))
-                        .child(
-                            svg()
-                                .path(assets::icon("x"))
-                                .size(px(12.))
-                                .text_color(theme.t2),
+        let tabs =
+            self.tabs.iter().enumerate().map(|(index, tab)| {
+                let active = index == self.active;
+                let running = matches!(tab.query, Query::Running { .. });
+                let session = tab.session.and_then(|id| self.session(id));
+                let production =
+                    session.is_some_and(|session| session.environment == Environment::Production);
+                let mark =
+                    match session {
+                        Some(session) => widgets::engine_logo(
+                            session.engine,
+                            12.,
+                            widgets::connection_color(&session.profile.color)
+                                .unwrap_or(if active { theme.acc } else { theme.t3 }),
                         ),
-                )
-                // The active tab is underlined (Classic) or ringed (Floating, production only);
-                // red on production.
-                .when(active && classic, |el| {
-                    el.child(
+                        None => svg()
+                            .path(assets::icon("plus"))
+                            .size(px(12.))
+                            .flex_none()
+                            .text_color(if active { theme.acc } else { theme.t3 }),
+                    };
+                div()
+                    .id(("tab", tab.id))
+                    .group("tab")
+                    .max_w(px(TAB_MAX_WIDTH))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .relative()
+                    .cursor_pointer()
+                    // Classic: full-height tabs split by hairlines. Floating: pills.
+                    .map(|el| {
+                        if classic {
+                            el.h_full()
+                                .pl(px(14.))
+                                .pr(px(8.))
+                                .border_r_1()
+                                .border_color(theme.line)
+                                .when(active, |el| el.bg(theme.s1))
+                        } else {
+                            el.h(px(28.))
+                                .pl(px(12.))
+                                .pr(px(6.))
+                                .rounded(px(8.))
+                                .when(active, |el| el.bg(theme.pill))
+                        }
+                    })
+                    .when(active, |el| el.text_color(theme.text))
+                    .when(!active, |el| {
+                        el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.activate_tab(index, window, cx);
+                    }))
+                    .child(mark)
+                    .child(
                         div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(2.))
-                            .bg(if production { theme.err } else { theme.acc }),
+                            .flex()
+                            .min_w(px(0.))
+                            .gap(px(5.))
+                            .child(div().flex_none().child(tab.title.clone()))
+                            // Which connection, once there's more than one to tell apart.
+                            .when_some(session.filter(|_| several), |el, session| {
+                                el.child(
+                                    div()
+                                        .truncate()
+                                        .text_color(theme.t3)
+                                        .child(session.name.clone()),
+                                )
+                            }),
                     )
-                })
-                .when(active && production && !classic, |el| {
-                    el.border_1().border_color(theme.err)
-                })
-        });
+                    .when(running, |el| {
+                        el.child(div().size(px(6.)).flex_none().rounded_full().bg(theme.acc))
+                    })
+                    .child(
+                        div()
+                            .id(("close-tab", tab.id))
+                            .size(px(18.))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            // Hidden on inactive tabs until the tab is hovered.
+                            .when(!active, |el| {
+                                el.opacity(0.).group_hover("tab", |s| s.opacity(1.))
+                            })
+                            .hover(|s| s.bg(theme.s3))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab_at(index, window, cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path(assets::icon("x"))
+                                    .size(px(12.))
+                                    .text_color(theme.t2),
+                            ),
+                    )
+                    // The active tab is underlined (Classic) or ringed (Floating, production only);
+                    // red on production.
+                    .when(active && classic, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(2.))
+                                .bg(if production { theme.err } else { theme.acc }),
+                        )
+                    })
+                    .when(active && production && !classic, |el| {
+                        el.border_1().border_color(theme.err)
+                    })
+            });
 
         div()
             .id("titlebar")

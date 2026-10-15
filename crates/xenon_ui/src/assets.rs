@@ -28,6 +28,7 @@ icons![
     "db-sqlite",
     "download",
     "eye",
+    "folder",
     "folder-search",
     "panel-left-close",
     "panel-left-open",

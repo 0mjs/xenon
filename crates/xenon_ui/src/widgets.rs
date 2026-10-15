@@ -647,6 +647,26 @@ pub fn pretty_json(text: &str) -> Option<String> {
     (depth == 0 && !in_string).then_some(out)
 }
 
+/// Colours a connection can be given, to tell it apart at a glance.
+pub const CONNECTION_COLORS: [(&str, u32); 8] = [
+    ("red", 0xe5484d),
+    ("orange", 0xf0883e),
+    ("yellow", 0xe2b93d),
+    ("green", 0x46a758),
+    ("teal", 0x12a594),
+    ("blue", 0x3e8ef7),
+    ("purple", 0x8e6ee6),
+    ("pink", 0xd6409f),
+];
+
+/// A connection's colour, by name; `None` for none (or one this Xenon doesn't know).
+pub fn connection_color(name: &str) -> Option<Rgba> {
+    CONNECTION_COLORS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, hex)| gpui::rgb(*hex))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
