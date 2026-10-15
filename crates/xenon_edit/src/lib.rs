@@ -722,16 +722,28 @@ mod live {
                  create trigger xenon_slow before update on {table}
                      for each row execute function xenon_slow()"
             ),
-            // `benchmark`, not `sleep`: a killed `sleep` returns instead of failing.
-            ServerEngine::Mysql => format!(
-                "create trigger xenon_slow_{port} before update on {table} for each row
-                     set @xenon = benchmark(2000000000, sha2('xenon', 256))"
-            ),
+            // MySQL won't let the test user create triggers with binary logging
+            // on: hold the row locked from another session instead (the case the
+            // limit is for).
+            ServerEngine::Mysql => String::new(),
             ServerEngine::SqlServer => format!(
                 "create trigger xenon_slow on {table} after update as waitfor delay '00:00:05'"
             ),
         };
-        conn.execute(&trigger, 0).unwrap();
+        let holder = match engine {
+            ServerEngine::Mysql => {
+                let holder = fleet(engine, port);
+                holder.execute("begin", 0).unwrap();
+                holder
+                    .execute(&format!("select * from {table} where id = 1 for update"), 1)
+                    .unwrap();
+                Some(holder)
+            }
+            _ => {
+                conn.execute(&trigger, 0).unwrap();
+                None
+            }
+        };
         let statements = [Statement {
             sql: format!("update {table} set n = 2 where id = 1"),
             exactly_one: true,
@@ -749,6 +761,9 @@ mod live {
             started.elapsed() < std::time::Duration::from_secs(4),
             "{engine:?} wasn't stopped at the limit"
         );
+        if let Some(holder) = holder {
+            holder.execute("rollback", 0).unwrap();
+        }
         let data = rows(conn, &format!("select n from {table} where id = 1"));
         assert_eq!(
             data.rows[0][0],
