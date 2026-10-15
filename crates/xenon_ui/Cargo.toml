@@ -10,6 +10,7 @@ chrono = { workspace = true, features = ["clock"] }
 lsp-types = { version = "0.97", features = ["proposed"] }
 gpui.workspace = true
 gpui-component.workspace = true
+gpui-base.workspace = true
 xenon_driver.workspace = true
 xenon_sqlite.workspace = true
 xenon_duckdb.workspace = true

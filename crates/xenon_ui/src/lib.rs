@@ -6,6 +6,7 @@ mod connect;
 mod detect;
 mod discover;
 mod editing;
+mod errors;
 // Saving staged edits lives in its own crate, so CI can test it against every engine.
 use xenon_edit as edits;
 mod explorer;

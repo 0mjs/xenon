@@ -558,6 +558,29 @@ fn snapshots() {
                     .all(|row| row[1].display() == "refunded")
             );
         });
+        // A misspelt column: pointed at, with the likely name and a fix.
+        shot.act(|w, window, cx| {
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |e, cx| {
+                e.set_value("select id, emial\nfrom customers;", window, cx)
+            });
+            w.run(RunScope::All, window, cx);
+        });
+        assert!(shot.settle(10, |w| !w.is_running()));
+        shot.act(|w, _, _| {
+            let hint = w.active_tab().error_hint.as_ref().expect("a hint");
+            assert_eq!(hint.suggestion.as_deref(), Some("email"));
+            assert_eq!(hint.at, Some(11..16));
+        });
+        shot.save(&format!("41-did-you-mean-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.fix_error(window, cx);
+            let text = w.active_tab().editor.read(cx).value().to_string();
+            assert_eq!(text, "select id, email\nfrom customers;");
+            w.run(RunScope::All, window, cx);
+        });
+        assert!(shot.settle(10, |w| !w.is_running()));
+        shot.act(|w, _, _| assert!(w.error_text().is_none(), "{:?}", w.error_text()));
         shot.act(|w, window, cx| {
             w.close_tab_at(w.active, window, cx);
             w.activate_tab(back_to, window, cx);

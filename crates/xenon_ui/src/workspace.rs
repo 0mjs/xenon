@@ -66,6 +66,15 @@ const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
+/// What a failed query got wrong: where, and what was likely meant.
+pub(crate) struct ErrorHint {
+    /// The range in the editor it points at, when it's known.
+    pub at: Option<std::ops::Range<usize>>,
+    pub message: SharedString,
+    /// The table or column most likely meant, for a misspelt one.
+    pub suggestion: Option<SharedString>,
+}
+
 /// Results kept from one script; later ones are left out.
 const MAX_RESULT_SETS: usize = 50;
 /// The space between the cards the window is laid out in.
@@ -421,6 +430,8 @@ pub(crate) struct Tab {
     /// Byte offset in the editor where the last run's SQL began, to place
     /// error positions; `None` when the SQL ran was rewritten (Explain).
     run_origin: Option<usize>,
+    /// What the last failed query got wrong, to point at and offer to fix.
+    pub(crate) error_hint: Option<ErrorHint>,
     /// Changes to the table's rows, not yet saved.
     pub(crate) edits: Rc<Edits>,
     /// The cell open in the edit bar.
@@ -542,7 +553,8 @@ pub struct Workspace {
     /// Where the last export was saved.
     export_dir: Option<std::path::PathBuf>,
     /// A failed query's error position, applied to the editor on the next frame.
-    pending_error_jump: Option<(usize, usize, usize)>,
+    /// A failed query's tab and the editor range to select and underline.
+    pending_error_jump: Option<(usize, std::ops::Range<usize>)>,
     first_frame_traced: bool,
     bench: Option<crate::bench::Bench>,
     bench_pending_sql: Option<String>,
@@ -825,6 +837,7 @@ impl Workspace {
             selection: None,
             column_widths: HashMap::new(),
             run_origin: None,
+            error_hint: None,
             edits: Rc::default(),
             editing: None,
             flash: None,
@@ -2215,6 +2228,17 @@ impl Workspace {
             return;
         };
         tab.run_origin = origin;
+        tab.error_hint = None;
+        let editor = tab.editor.clone();
+        editor.update(cx, |editor, cx| {
+            if let Some(diagnostics) = editor.diagnostics_mut() {
+                diagnostics.clear();
+            }
+            cx.notify();
+        });
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
         tab.timed_out = None;
         tab.flash = None;
         tab.fetched = 0;
@@ -2304,11 +2328,32 @@ impl Workspace {
             }
             Err(err) => {
                 tab.grid = None;
-                tab.query = Query::Failed(format!("{err:#}").into());
+                let message = format!("{err:#}");
+                tab.query = Query::Failed(message.clone().into());
+                // Point at the mistake, and name a likely fix for a misspelt name.
                 let position = err.downcast_ref::<QueryError>().and_then(|e| e.position);
-                if let (Some(position), Some(origin)) = (position, tab.run_origin) {
-                    self.pending_error_jump = Some((tab_id, origin, position));
+                let unknown = crate::errors::unknown_name(&message);
+                let suggestion = unknown.as_ref().and_then(|unknown| {
+                    let schemas = &self.sessions.iter().find(|s| s.id == session_id)?.schemas;
+                    crate::errors::did_you_mean(unknown, schemas)
+                });
+                let at = match (&tab.last_run, tab.run_origin) {
+                    (Some((sql, _)), Some(origin)) => crate::errors::locate(
+                        &tab.editor.read(cx).value(),
+                        origin..origin + sql.len(),
+                        position,
+                        unknown.as_ref().map(|u| u.name.as_str()),
+                    ),
+                    _ => None,
+                };
+                if let Some(at) = &at {
+                    self.pending_error_jump = Some((tab_id, at.clone()));
                 }
+                tab.error_hint = Some(ErrorHint {
+                    at,
+                    message: message.into(),
+                    suggestion: suggestion.map(Into::into),
+                });
             }
         }
         cx.notify();
@@ -2399,30 +2444,66 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Put the suggested name in place of the misspelt one.
+    pub(crate) fn fix_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = &mut self.tabs[self.active];
+        let Some(hint) = &mut tab.error_hint else {
+            return;
+        };
+        let (Some(at), Some(suggestion)) = (hint.at.clone(), hint.suggestion.take()) else {
+            return;
+        };
+        hint.at = None;
+        let editor = tab.editor.clone();
+        editor.update(cx, |editor, cx| {
+            if let Some(diagnostics) = editor.diagnostics_mut() {
+                diagnostics.clear();
+            }
+            editor.set_selected_range(at, cx);
+            editor.replace(suggestion.to_string(), window, cx);
+            editor.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     /// Put the editor's cursor on the word a failed statement points at.
     fn jump_to_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((tab_id, origin, position)) = self.pending_error_jump.take() else {
+        let Some((tab_id, at)) = self.pending_error_jump.take() else {
             return;
         };
         if self.active_tab().id != tab_id {
             return;
         }
-        let editor = self.active_tab().editor.clone();
+        let tab = self.active_tab();
+        let message = tab
+            .error_hint
+            .as_ref()
+            .map_or_else(Default::default, |hint| hint.message.clone());
+        let editor = tab.editor.clone();
         editor.update(cx, |editor, cx| {
             let text = editor.value().to_string();
-            let Some(tail) = text.get(origin..) else {
+            if text.get(at.clone()).is_none() {
                 return;
+            }
+            // Underline it, as an editor marks an error.
+            let position = |offset: usize| {
+                let before = &text[..offset];
+                let line = before.matches('\n').count() as u32;
+                let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+                let character = text[line_start..offset].encode_utf16().count() as u32;
+                gpui_component::input::Position { line, character }
             };
-            // Positions count characters from 1.
-            let Some((offset, _)) = tail.char_indices().nth(position.saturating_sub(1)) else {
-                return;
-            };
-            let start = origin + offset;
-            let end = start
-                + text[start..]
-                    .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .unwrap_or(text.len() - start);
-            editor.set_selected_range(start..end.max(start), cx);
+            if let Some(diagnostics) = editor.diagnostics_mut() {
+                diagnostics.clear();
+                diagnostics.push(
+                    gpui_base::input::Diagnostic::new(
+                        position(at.start)..position(at.end),
+                        message,
+                    )
+                    .with_severity(gpui_base::input::DiagnosticSeverity::Error),
+                );
+            }
+            editor.set_selected_range(at, cx);
             editor.focus(window, cx);
         });
     }
@@ -5512,41 +5593,81 @@ impl Workspace {
         }
 
         match &tab.query {
-            Query::Failed(message) => div()
-                .m(px(14.))
-                .px(px(14.))
-                .py(px(12.))
-                .flex()
-                .gap(px(10.))
-                .rounded(px(widgets::RADIUS_CARD))
-                .bg(Rgba {
-                    a: 0.08,
-                    ..theme.err
-                })
-                .border_1()
-                .border_color(Rgba {
-                    a: 0.3,
-                    ..theme.err
-                })
-                .child(
-                    svg()
-                        .path(assets::icon("triangle-alert"))
-                        .mt(px(1.))
-                        .size(px(15.))
-                        .flex_none()
-                        .text_color(theme.err),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
-                        .line_height(px(18.))
-                        .text_color(theme.text)
-                        .child(message.clone()),
-                )
-                .into_any_element(),
+            Query::Failed(message) => {
+                div()
+                    .m(px(14.))
+                    .px(px(14.))
+                    .py(px(12.))
+                    .flex()
+                    .gap(px(10.))
+                    .rounded(px(widgets::RADIUS_CARD))
+                    .bg(Rgba {
+                        a: 0.08,
+                        ..theme.err
+                    })
+                    .border_1()
+                    .border_color(Rgba {
+                        a: 0.3,
+                        ..theme.err
+                    })
+                    .child(
+                        svg()
+                            .path(assets::icon("triangle-alert"))
+                            .mt(px(1.))
+                            .size(px(15.))
+                            .flex_none()
+                            .text_color(theme.err),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.5))
+                                    .line_height(px(18.))
+                                    .text_color(theme.text)
+                                    .child(message.clone()),
+                            )
+                            .children(tab.error_hint.as_ref().and_then(|hint| {
+                                let suggestion = hint.suggestion.clone()?;
+                                Some(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(10.))
+                                        .child(div().text_color(theme.t2).child("Did you mean"))
+                                        .child(
+                                            div()
+                                                .font_family(MONO_FONT)
+                                                .text_color(theme.text)
+                                                .child(suggestion),
+                                        )
+                                        .when(hint.at.is_some(), |el| {
+                                            el.child(
+                                                widgets::button(
+                                                    theme,
+                                                    "fix-error",
+                                                    "Fix",
+                                                    ButtonKind::Secondary,
+                                                    true,
+                                                )
+                                                .h(px(24.))
+                                                .px(px(10.))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.fix_error(window, cx)
+                                                })),
+                                            )
+                                        }),
+                                )
+                            })),
+                    )
+                    .into_any_element()
+            }
             Query::Running { .. } => centered_hint(theme, "Running…"),
             Query::Done(_) => centered_hint(theme, "Done."),
             Query::Idle if self.active_session().is_some() => div()

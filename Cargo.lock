@@ -8981,6 +8981,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs 7.0.0",
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "gpui-pre-apple",
