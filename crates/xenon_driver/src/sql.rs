@@ -748,11 +748,28 @@ pub fn browse_table(
     limit: usize,
     top: bool,
 ) -> String {
+    browse_page(quote, schema, table, filter, order, limit, 0, top)
+}
+
+/// [`browse_table`] from row `offset` on: `limit … offset …`, or on SQL Server
+/// (`top`) `offset … rows fetch next … rows only`, which needs an `order by`.
+#[allow(clippy::too_many_arguments)]
+pub fn browse_page(
+    quote: impl Fn(&str) -> String,
+    schema: Option<&str>,
+    table: &str,
+    filter: &str,
+    order: Option<(&str, SortDirection)>,
+    limit: usize,
+    offset: usize,
+    top: bool,
+) -> String {
     let name = match schema {
         Some(schema) => format!("{}.{}", quote(schema), quote(table)),
         None => quote(table),
     };
-    let mut sql = if top {
+    let fetch = top && offset > 0;
+    let mut sql = if top && !fetch {
         format!("select top ({limit}) * from {name}")
     } else {
         format!("select * from {name}")
@@ -761,15 +778,26 @@ pub fn browse_table(
     if !filter.is_empty() {
         sql.push_str(&format!("\nwhere {filter}"));
     }
-    if let Some((column, direction)) = order {
-        let direction = match direction {
-            SortDirection::Ascending => "asc",
-            SortDirection::Descending => "desc",
-        };
-        sql.push_str(&format!("\norder by {} {direction}", quote(column)));
+    let direction = |d: SortDirection| match d {
+        SortDirection::Ascending => "asc",
+        SortDirection::Descending => "desc",
+    };
+    match order {
+        Some((column, d)) => {
+            sql.push_str(&format!("\norder by {} {}", quote(column), direction(d)));
+        }
+        // SQL Server pages only an ordered query: the query's own order.
+        None if fetch => sql.push_str("\norder by (select null)"),
+        None => {}
     }
-    if top {
+    if fetch {
+        sql.push_str(&format!(
+            "\noffset {offset} rows fetch next {limit} rows only;"
+        ));
+    } else if top {
         sql.push(';');
+    } else if offset > 0 {
+        sql.push_str(&format!("\nlimit {limit} offset {offset};"));
     } else {
         sql.push_str(&format!("\nlimit {limit};"));
     }
@@ -939,6 +967,37 @@ fn tokens(sql: &str, lexing: Lexing) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn later_pages_skip_the_earlier_rows() {
+        let quote = |i: &str| i.to_string();
+        assert_eq!(
+            browse_page(quote, None, "orders", "", None, 100, 200, false),
+            "select * from orders\nlimit 100 offset 200;"
+        );
+        assert_eq!(
+            browse_page(quote, None, "orders", "id > 5", None, 100, 200, true),
+            "select * from orders\nwhere id > 5\norder by (select null)\noffset 200 rows fetch next 100 rows only;"
+        );
+        assert_eq!(
+            browse_page(
+                quote,
+                None,
+                "orders",
+                "",
+                Some(("total", SortDirection::Ascending)),
+                100,
+                100,
+                true
+            ),
+            "select * from orders\norder by total asc\noffset 100 rows fetch next 100 rows only;"
+        );
+        // The first page on SQL Server keeps `top`.
+        assert_eq!(
+            browse_page(quote, None, "orders", "", None, 100, 0, true),
+            "select top (100) * from orders;"
+        );
+    }
 
     #[test]
     fn same_code_ignores_layout_but_nothing_else() {

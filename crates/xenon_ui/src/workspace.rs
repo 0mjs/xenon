@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use xenon_driver::export::{self, Format};
-use xenon_driver::sql::{Risk, SortDirection, assess, browse_table, statement_at};
+use xenon_driver::sql::{Risk, SortDirection, assess, statement_at};
 use xenon_driver::{
     CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema, TableInfo,
     Value,
@@ -388,7 +388,13 @@ pub(crate) struct Browse {
     order: Option<(String, SortDirection)>,
     _filter_enter: Subscription,
     /// The filter the rows were last loaded with.
-    applied: String,
+    pub(crate) applied: String,
+    /// Which page of rows is shown, from 0, and the filter and sort it's a page
+    /// of (a new one starts again at the first).
+    pub(crate) page: usize,
+    paged_for: Option<(String, Option<(String, SortDirection)>)>,
+    /// How many rows there are in all.
+    pub(crate) total: Option<crate::pages::Total>,
     /// Columns, keys and indexes, loaded when the tab opens.
     pub(crate) info: Option<Rc<TableInfo>>,
     /// The filter builder, when open.
@@ -828,6 +834,9 @@ impl Workspace {
                         order: None,
                         _filter_enter: filter_enter,
                         applied: String::new(),
+                        page: 0,
+                        paged_for: None,
+                        total: None,
                         info: None,
                         info_error: None,
                         structure: false,
@@ -2392,6 +2401,7 @@ impl Workspace {
                 });
             }
         }
+        self.find_total(tab_id, cx);
         cx.notify();
     }
 
@@ -2704,6 +2714,8 @@ impl Workspace {
                     }
                     Err(err) => browse.info_error = Some(format!("{err:#}").into()),
                 }
+                // Its size decides whether to count its rows.
+                this.find_total(tab_id, cx);
                 cx.notify();
             })
             .ok();
@@ -2783,10 +2795,14 @@ impl Workspace {
         };
         let conn = session.conn.clone();
         let filter = browse.filter.read(cx).value().to_string();
+        // A new filter or sort starts again at the first page, and is counted afresh.
+        let paged_for = Some((filter.trim().to_string(), browse.order.clone()));
+        let restart = browse.paged_for != paged_for;
+        let page = if restart { 0 } else { browse.page };
         // Leave out the schema names resolve to anyway: `from orders`, not `from "public"."orders"`.
         let schema = (conn.default_schema().as_deref() != Some(browse.schema.as_str()))
             .then_some(browse.schema.as_str());
-        let sql = browse_table(
+        let sql = xenon_driver::sql::browse_page(
             |ident| conn.ident(ident),
             schema,
             &browse.table,
@@ -2796,6 +2812,7 @@ impl Workspace {
                 .as_ref()
                 .map(|(column, dir)| (column.as_str(), *dir)),
             self.prefs.browse_limit,
+            page * self.prefs.browse_limit,
             conn.uses_top(),
         );
         let editor = self.active_tab().editor.clone();
@@ -2811,6 +2828,11 @@ impl Workspace {
         editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));
         if let Some(browse) = &mut self.tabs[self.active].browse {
             browse.applied = filter;
+            browse.page = page;
+            if restart {
+                browse.paged_for = paged_for;
+                browse.total = None;
+            }
         }
         self.run(RunScope::All, window, cx);
     }
@@ -5442,6 +5464,7 @@ impl Workspace {
             })
             .child(div().flex_1())
             .child(self.render_edit_status(theme, cx))
+            .children(self.render_pager(theme, cx))
             .when(can_export, |el| {
                 el.child(self.render_view_switch(theme, cx))
                     .child(self.render_export(theme, cx))

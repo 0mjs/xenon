@@ -410,6 +410,47 @@ fn snapshots() {
             assert!(text.contains("\"total\""));
             w.set_view(crate::views::ResultView::Grid, cx);
         });
+        // Pages of 500: the first, counted (600 in all), then the next.
+        shot.act(|w, window, cx| {
+            let prefs = crate::settings::Prefs {
+                browse_limit: 500,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx);
+            w.run_browse(window, cx);
+        });
+        assert!(shot.settle(10, |w| {
+            !w.is_running() && w.active_tab().browse.as_ref().unwrap().total.is_some()
+        }));
+        let mut total = 0;
+        shot.act(|w, _, _| {
+            let browse = w.active_tab().browse.as_ref().unwrap();
+            let Some(crate::pages::Total::Exact(n)) = browse.total else {
+                panic!("not counted: {:?}", browse.total);
+            };
+            // 600 rows, less any an earlier pass deleted.
+            assert!((501..=600).contains(&n), "{n}");
+            total = n as usize;
+            assert_eq!(w.active_tab().grid.as_ref().unwrap().data.rows.len(), 500);
+        });
+        shot.save(&format!("47-pages-{suffix}"));
+        shot.act(|w, window, cx| w.turn_page(true, window, cx));
+        assert!(shot.settle(10, |w| !w.is_running()));
+        shot.act(|w, window, cx| {
+            assert_eq!(w.active_tab().browse.as_ref().unwrap().page, 1);
+            assert_eq!(
+                w.active_tab().grid.as_ref().unwrap().data.rows.len(),
+                total - 500
+            );
+            assert!(w.last_run_sql().unwrap().contains("offset 500"));
+            let prefs = crate::settings::Prefs {
+                browse_limit: 1_000,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx);
+            w.turn_page(false, window, cx);
+        });
+        assert!(shot.settle(10, |w| !w.is_running()));
         // Columns: pin `status`, hide `note`, scroll sideways (status stays put).
         shot.act(|w, _, cx| {
             w.open_column_menu(3, gpui::point(px(900.), px(470.)), cx);

@@ -16,6 +16,7 @@ mod filter;
 pub mod fonts;
 mod history;
 mod launcher;
+mod pages;
 mod palette;
 mod params;
 mod reconnect;
