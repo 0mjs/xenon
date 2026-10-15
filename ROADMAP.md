@@ -118,7 +118,7 @@ so it can join the test fleet.
 | ✅ Click-through foreign keys: open the referenced row from the grid or inspector. Still to do: rows that reference this one | 0.3 |
 | ✅ Filter builder (column / operator / value, match all or any) that writes the WHERE field | 0.4 |
 | Pagination with exact counts (where cheap) or estimates | 0.5 |
-| Column visibility, pinning, reordering; remembered per table | 0.5 |
+| ✅ Column visibility, pinning, reordering (a header's right-click menu); kept across runs and remembered per table | 0.5 |
 | ✅ Show results as JSON / as records (which also shows a wide row transposed) | 0.5 |
 | ✅ Aggregates for a selection in the status bar (sum, avg, count, min, max), exact for decimals | 0.5 |
 | Geometry/PostGIS preview on a small map | Later |

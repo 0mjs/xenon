@@ -427,7 +427,7 @@ pub(crate) struct Tab {
     pub(crate) editor: Entity<EditorState>,
     query: Query,
     pub(crate) grid: Option<Grid>,
-    selection: Option<Selection>,
+    pub(crate) selection: Option<Selection>,
     /// Widths the user dragged, by column name; kept across re-runs.
     column_widths: HashMap<String, f32>,
     /// Byte offset in the editor where the last run's SQL began, to place
@@ -451,6 +451,8 @@ pub(crate) struct Tab {
     pub(crate) sets: Vec<Option<Grid>>,
     /// Which of `sets` is in `grid`.
     pub(crate) shown_set: usize,
+    /// The columns' arrangement (hidden, pinned, moved), kept across runs.
+    pub(crate) columns: Option<results::ColumnLayout>,
     /// Rows as a grid, as records, or as JSON.
     pub(crate) view: crate::views::ResultView,
     pub(crate) json: Option<crate::views::JsonView>,
@@ -544,6 +546,8 @@ pub struct Workspace {
     next_run: u64,
     /// A problem opening a database, shown on the Connect screen and in the explorer.
     pub(crate) notice: Option<SharedString>,
+    /// A header's right-click menu: which display column, and where.
+    pub(crate) column_menu: Option<(usize, gpui::Point<Pixels>)>,
     /// Totals for the selected cells, kept until the selection, rows or their
     /// order change: adding up a million cells every frame would be slow.
     selection_stats: RefCell<Option<(StatsKey, Option<crate::stats::Stats>)>>,
@@ -677,6 +681,7 @@ impl Workspace {
             notice: None,
             update: Default::default(),
             selection_stats: RefCell::new(None),
+            column_menu: None,
             connecting: None,
             store,
             history: Vec::new(),
@@ -858,6 +863,7 @@ impl Workspace {
             shown_set: 0,
             view: Default::default(),
             json: None,
+            columns: None,
             last_run: None,
             saved_query: None,
             timed_out: None,
@@ -2207,7 +2213,11 @@ impl Workspace {
                             .unwrap_or_else(|e| e.into_inner())
                             .take()
                         {
-                            tab.grid = Some(Grid::new(rows));
+                            let mut grid = Grid::new(rows);
+                            if let Some(layout) = &tab.columns {
+                                grid.apply_layout(layout);
+                            }
+                            tab.grid = Some(grid);
                             tab.selection = None;
                             tab.previewing = true;
                         }
@@ -2280,9 +2290,19 @@ impl Workspace {
             session.schemas = schemas;
         }
         self.reload_history(cx);
+        // A table's remembered arrangement, the first time its rows arrive.
+        let saved = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .filter(|tab| tab.columns.is_none())
+            .and_then(|_| self.saved_column_layout(tab_id));
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
+        if saved.is_some() {
+            tab.columns = saved;
+        }
         tab.selection = None;
         // New rows mean new row numbers: staged changes can't carry over.
         tab.edits = Rc::default();
@@ -2307,6 +2327,10 @@ impl Workspace {
                         && let Some(preview) = &tab.grid
                     {
                         grid.scroll = preview.scroll.clone();
+                        grid.h_scroll = preview.h_scroll.clone();
+                    }
+                    if let Some(layout) = &tab.columns {
+                        grid.apply_layout(layout);
                     }
                     tab.grid = Some(grid);
                     crate::trace("build results grid", started);
@@ -2473,7 +2497,10 @@ impl Workspace {
         let rows = selection.rows().start..selection.rows().end.min(grid.row_count());
         let columns = selection.columns();
         let stats = crate::stats::of(rows.flat_map(|row| {
-            grid.row(row)[columns.start..columns.end.min(grid.data.columns.len())].iter()
+            columns
+                .clone()
+                .filter(|&c| c < grid.columns().len())
+                .map(move |c| grid.cell(row, c))
         }));
         *self.selection_stats.borrow_mut() = Some((key, stats.clone()));
         stats
@@ -2979,7 +3006,12 @@ impl Workspace {
             }
         });
         let tab = &mut self.tabs[self.active];
-        tab.selection = Some(Selection::cell(ix, column));
+        let shown_at = tab
+            .grid
+            .as_ref()
+            .and_then(|g| g.display_of(column))
+            .unwrap_or(0);
+        tab.selection = Some(Selection::cell(ix, shown_at));
         tab.flash = None;
         tab.editing = Some(CellEditor {
             row,
@@ -3090,9 +3122,12 @@ impl Workspace {
     }
 
     fn edit_cell(&mut self, _: &EditCell, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selection) = self.active_tab().selection {
-            let (row, column) = selection.head;
-            self.begin_edit(row, column, window, cx);
+        let tab = self.active_tab();
+        if let (Some(selection), Some(grid)) = (tab.selection, &tab.grid) {
+            let (row, shown) = selection.head;
+            if let Some(column) = grid.column(shown) {
+                self.begin_edit(row, column, window, cx);
+            }
         }
     }
 
@@ -3429,7 +3464,7 @@ impl Workspace {
         let Some(grid) = &tab.grid else { return };
         let (rows, columns) = (
             grid.row_count() + tab.edits.inserted.len(),
-            grid.data.columns.len(),
+            grid.columns().len(),
         );
         if rows == 0 || columns == 0 {
             return;
@@ -3452,7 +3487,7 @@ impl Workspace {
         {
             tab.selection = Some(Selection {
                 anchor: (0, 0),
-                head: (grid.row_count() - 1, grid.data.columns.len() - 1),
+                head: (grid.row_count() - 1, grid.columns().len() - 1),
             });
             cx.notify();
         }
@@ -3463,10 +3498,12 @@ impl Workspace {
         let (Some(grid), Some(selection)) = (&tab.grid, tab.selection) else {
             return;
         };
-        let columns: Vec<_> = selection.columns().map(|c| &grid.data.columns[c]).collect();
+        // Selections are in display order: copy what's shown, as it's shown.
+        let shown: Vec<usize> = selection.columns().filter_map(|c| grid.column(c)).collect();
+        let columns: Vec<_> = shown.iter().map(|&c| &grid.data.columns[c]).collect();
         let rows: Vec<Vec<_>> = selection
             .rows()
-            .map(|r| selection.columns().map(|c| &grid.row(r)[c]).collect())
+            .map(|r| shown.iter().map(|&c| &grid.row(r)[c]).collect())
             .collect();
         let target = self.sql_target();
         let ident = |name: &str| {
@@ -4105,6 +4142,7 @@ impl Render for Workspace {
             })
             .children(self.render_naming(&theme, cx))
             .children(self.render_parameters(&theme, cx))
+            .children(self.render_column_menu(&theme, cx))
             .when_some(self.confirm.as_ref(), |el, (dialog, _, _)| {
                 el.child(dialog.clone())
             })
@@ -5581,6 +5619,13 @@ impl Workspace {
                             });
                         })
                         .ok();
+                    }
+                }),
+                column_menu: Rc::new({
+                    let this = this.clone();
+                    move |column, at, _, cx| {
+                        this.update(cx, |this, cx| this.open_column_menu(column, at, cx))
+                            .ok();
                     }
                 }),
                 autofit: Rc::new({

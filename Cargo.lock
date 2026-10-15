@@ -8991,6 +8991,7 @@ dependencies = [
  "lsp-types",
  "rusqlite",
  "rust_xlsxwriter",
+ "serde",
  "serde_json",
  "sqlformat",
  "ureq",

@@ -410,6 +410,46 @@ fn snapshots() {
             assert!(text.contains("\"total\""));
             w.set_view(crate::views::ResultView::Grid, cx);
         });
+        // Columns: pin `status`, hide `note`, scroll sideways (status stays put).
+        shot.act(|w, _, cx| {
+            w.open_column_menu(3, gpui::point(px(900.), px(470.)), cx);
+        });
+        shot.save(&format!("45-column-menu-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.column_action(crate::columns::ColumnAction::TogglePin, cx);
+            let grid = w.active_tab().grid.as_ref().unwrap();
+            grid.h_scroll.set_offset(gpui::point(px(-260.), px(0.)));
+        });
+        shot.save(&format!("46-pinned-{suffix}"));
+        shot.act(|w, _, cx| {
+            let grid = w.active_tab().grid.as_ref().unwrap();
+            grid.h_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            let note = grid.display_of(5).unwrap();
+            w.open_column_menu(note, gpui::point(px(900.), px(470.)), cx);
+            w.column_action(crate::columns::ColumnAction::Hide, cx);
+            let grid = w.active_tab().grid.as_ref().unwrap();
+            assert_eq!(grid.columns(), [3, 0, 1, 2, 4, 6]);
+            assert_eq!(grid.pinned, 1);
+            let saved = w
+                .saved_column_layout(w.active_tab().id)
+                .expect("remembered");
+            assert_eq!(saved.shown[0], "status");
+            assert_eq!(saved.hidden, ["note"]);
+        });
+        // A re-run keeps the arrangement.
+        shot.act(|w, window, cx| w.run_browse(window, cx));
+        assert!(shot.settle(10, |w| !w.is_running()));
+        shot.act(|w, _, cx| {
+            let grid = w.active_tab().grid.as_ref().unwrap();
+            assert_eq!(grid.columns(), [3, 0, 1, 2, 4, 6]);
+            grid.h_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            w.open_column_menu(0, gpui::point(px(900.), px(470.)), cx);
+            w.column_action(crate::columns::ColumnAction::ShowAll, cx);
+            assert_eq!(
+                w.active_tab().grid.as_ref().unwrap().columns(),
+                [0, 1, 2, 3, 4, 5, 6]
+            );
+        });
         shot.act(|w, window, cx| {
             w.select_cell(2, 2, false, window, cx);
             w.select_cell(5, 4, true, window, cx);
