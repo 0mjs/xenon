@@ -4122,12 +4122,16 @@ impl Workspace {
                 .into_any_element();
         }
         let tab = self.active_tab();
+        // The card clips square, so its painted corners round themselves.
+        let inner = px(CARD_RADIUS - 1.);
         let editor = div()
             .h(px(self.editor_height))
             .flex_none()
             .flex()
             .flex_col()
             .bg(theme.s2)
+            .rounded_tl(inner)
+            .when(!self.show_inspector, |el| el.rounded_tr(inner))
             .border_b_1()
             .border_color(theme.line)
             .child(self.render_toolbar(theme, cx))
@@ -4141,7 +4145,8 @@ impl Workspace {
                     .child(Editor::new(&tab.editor).h_full().appearance(false)),
             );
 
-        let results = div().flex_1().min_h(px(0.)).flex().flex_col();
+        // Room at the foot so highlighted rows stop short of the rounded corners.
+        let results = div().flex_1().min_h(px(0.)).pb(px(8.)).flex().flex_col();
         div()
             .flex_1()
             .min_w(px(0.))
