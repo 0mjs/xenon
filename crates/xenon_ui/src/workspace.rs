@@ -1170,6 +1170,11 @@ impl Workspace {
 
     /// Disconnect session `id` and close its tabs. With nothing left open, the
     /// window goes back to the Connect screen.
+    /// Whether queries on `session` go into the history (Settings → Data).
+    pub(crate) fn keeps_history(&self, session: &Session) -> bool {
+        session.environment != Environment::Production || self.prefs.production_history
+    }
+
     /// Commit or roll back the active connection's open transaction.
     pub(crate) fn end_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
         let Some(session) = self.active_session() else {
@@ -1623,7 +1628,7 @@ impl Workspace {
             return;
         };
         let conn = session.conn.clone();
-        let store = self.store.clone();
+        let store = self.store.clone().filter(|_| self.keeps_history(session));
         let cancel = conn.cancel_handle();
         // Production queries are stopped after the limit set in Settings → Safety.
         let limit = (session.environment == Environment::Production && self.prefs.query_limit > 0)
@@ -2562,7 +2567,9 @@ impl Workspace {
             return;
         };
         let conn = session.conn.clone();
-        let store = self.store.clone();
+        // As `keeps_history`, by field: `tab` holds `self.tabs` here.
+        let keep = session.environment != Environment::Production || self.prefs.production_history;
+        let store = self.store.clone().filter(|_| keep);
         tab.saving = true;
         tab.flash = None;
         cx.notify();

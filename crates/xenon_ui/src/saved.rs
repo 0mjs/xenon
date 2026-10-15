@@ -456,7 +456,12 @@ impl Workspace {
             .iter()
             .enumerate()
             .filter_map(|(index, tab)| {
-                let connection = self.session(tab.session?)?.saved_id?;
+                let session = self.session(tab.session?)?;
+                // Production SQL stays off disk when its history does.
+                if !self.keeps_history(session) {
+                    return None;
+                }
+                let connection = session.saved_id?;
                 Some(OpenTab {
                     connection,
                     title: tab.title.to_string(),

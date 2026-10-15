@@ -97,6 +97,8 @@ pub(crate) struct Prefs {
     pub query_limit: u64,
     /// On production: give up waiting for a lock after this many seconds (0: wait).
     pub lock_wait: u64,
+    /// Keep history (and reopened tabs) for production connections.
+    pub production_history: bool,
 }
 
 impl Default for Prefs {
@@ -111,6 +113,7 @@ impl Default for Prefs {
             restore_tabs: true,
             query_limit: 60,
             lock_wait: 5,
+            production_history: true,
         }
     }
 }
@@ -147,6 +150,9 @@ impl Prefs {
         if let Some(value) = get("lock_wait").and_then(|v| v.parse().ok()) {
             prefs.lock_wait = value;
         }
+        if let Some(value) = get("production_history") {
+            prefs.production_history = value != "false";
+        }
         prefs
     }
 
@@ -162,6 +168,7 @@ impl Prefs {
             ("restore_tabs", self.restore_tabs.to_string()),
             ("query_limit", self.query_limit.to_string()),
             ("lock_wait", self.lock_wait.to_string()),
+            ("production_history", self.production_history.to_string()),
         ];
         for (key, value) in values {
             if let Err(err) = store.set_setting(key, &value) {
@@ -507,6 +514,22 @@ impl Render for SettingsDialog {
                             this.change(cx, |p| p.restore_tabs = !p.restore_tabs)
                         }))
                         .child(widgets::checkbox(&theme, prefs.restore_tabs)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Keep history for production",
+                    Some(
+                        "Off: queries on production connections aren't recorded, and their tabs \
+                         aren't reopened, so their SQL never reaches this Mac's disk.",
+                    ),
+                    div()
+                        .id("production-history")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.change(cx, |p| p.production_history = !p.production_history)
+                        }))
+                        .child(widgets::checkbox(&theme, prefs.production_history)),
                 )
                 .into_any_element(),
                 row(
