@@ -44,6 +44,9 @@ fn main() {
                     window_min_size: Some(size(px(720.), px(480.))),
                     // Frosted glass: the desktop shows, blurred, through the frame.
                     window_background: gpui::WindowBackgroundAppearance::Blurred,
+                    // Only empty title bar space moves the window, so clicking a tab
+                    // with a slight drag never nudges it.
+                    app_owns_titlebar_drag: true,
                     ..Default::default()
                 },
                 |window, cx| {

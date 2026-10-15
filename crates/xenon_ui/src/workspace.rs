@@ -215,12 +215,9 @@ impl Profile {
         })
     }
 
-    /// Save (or update) this connection and its password. Runs on a background thread.
-    fn remember(&self, store: Option<&Store>) -> anyhow::Result<Option<i64>> {
-        let (Some(store), true) = (store, self.save) else {
-            return Ok(self.saved_id);
-        };
-        let target = match &self.target {
+    /// Where this connection goes, as it's saved.
+    fn saved_target(&self) -> Target {
+        match &self.target {
             RequestTarget::Sqlite(path) => Target::Sqlite { path: path.clone() },
             RequestTarget::Server(engine, options) => Target::Server {
                 engine: *engine,
@@ -231,11 +228,18 @@ impl Profile {
                 ssl: options.ssl.as_str().to_string(),
                 ssh: options.ssh.as_ref().map(servers::ssh_tunnel),
             },
+        }
+    }
+
+    /// Save (or update) this connection and its password. Runs on a background thread.
+    fn remember(&self, store: Option<&Store>) -> anyhow::Result<Option<i64>> {
+        let (Some(store), true) = (store, self.save) else {
+            return Ok(self.saved_id);
         };
         let id = store.save_connection(&SavedConnection {
             id: self.saved_id.unwrap_or(0),
             name: self.name.clone(),
-            target,
+            target: self.saved_target(),
             environment: self.environment,
             read_only: self.read_only,
         })?;
@@ -542,6 +546,8 @@ pub struct Workspace {
     pub(crate) saved: Vec<SavedConnection>,
     pub(crate) explorer_filter: Entity<InputState>,
     show_side_panel: bool,
+    /// The mouse went down on empty title bar space: moving it drags the window.
+    titlebar_pressed: bool,
     /// When the side panel last opened or closed, to slide it.
     side_panel_since: Option<std::time::Instant>,
     show_inspector: bool,
@@ -657,6 +663,7 @@ impl Workspace {
             saved: Vec::new(),
             explorer_filter,
             show_side_panel: true,
+            titlebar_pressed: false,
             side_panel_since: None,
             show_inspector: true,
             _subscriptions: vec![
@@ -1037,6 +1044,9 @@ impl Workspace {
             .map(|s| s.id)
         {
             self.connect_dialog = None;
+            if profile.save {
+                self.update_open(id, profile, cx);
+            }
             self.attach(id, true, window, cx);
             return;
         }
@@ -1372,6 +1382,42 @@ impl Workspace {
                         Err(err) => dialog.set_error(format!("{err:#}").into(), cx),
                     });
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Save edits to a connection that's already open. A new name applies at once;
+    /// anything else waits until it reconnects.
+    fn update_open(&mut self, session_id: usize, profile: Profile, cx: &mut Context<Self>) {
+        let reconnect = self
+            .saved
+            .iter()
+            .find(|saved| Some(saved.id) == profile.saved_id)
+            .is_none_or(|saved| {
+                saved.target != profile.saved_target()
+                    || saved.environment != profile.environment
+                    || saved.read_only != profile.read_only
+            });
+        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            session.name = profile.name.clone();
+        }
+        let store = self.store.clone();
+        let task = cx.background_spawn(async move { profile.remember(store.as_deref()) });
+        cx.spawn(async move |this, cx| {
+            let saved = task.await;
+            this.update(cx, |this, cx| {
+                this.reload_saved();
+                match saved {
+                    Err(err) => this.notice = Some(format!("{err:#}").into()),
+                    Ok(_) if reconnect => {
+                        this.notice =
+                            Some("Saved. Disconnect and reconnect to use the new settings.".into())
+                    }
+                    Ok(_) => {}
+                }
+                cx.notify();
             })
             .ok();
         })
@@ -3775,6 +3821,8 @@ impl Render for Workspace {
 impl Workspace {
     fn render_titlebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let several = self.sessions.len() > 1;
+        let inset = drag_area(cx).w(px(TRAFFIC_LIGHT_INSET)).flex_none();
+        let spacer = drag_area(cx).flex_1();
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
             let active = index == self.active;
             let running = matches!(tab.query, Query::Running { .. });
@@ -3873,13 +3921,25 @@ impl Workspace {
             .flex_row()
             .items_center()
             .gap(px(4.))
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, _| {
+                    if this.titlebar_pressed && event.dragging() {
+                        this.titlebar_pressed = false;
+                        window.start_window_move();
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.titlebar_pressed = false),
+            )
             // Double-clicking empty title bar space zooms the window, like any Mac app.
             .on_click(|event: &ClickEvent, window, _| {
                 if event.click_count() == 2 {
                     window.titlebar_double_click();
                 }
             })
-            .child(div().w(px(TRAFFIC_LIGHT_INSET)).flex_none().h_full())
+            .child(inset)
             .child(
                 div()
                     .id("toggle-side-panel")
@@ -3945,7 +4005,7 @@ impl Workspace {
                         ),
                 )
             })
-            .child(div().flex_1().h_full())
+            .child(spacer)
             .child(
                 div()
                     .id("go-to-anything")
@@ -5515,4 +5575,12 @@ fn card(theme: &Theme) -> gpui::Div {
         .border_color(theme.card_line)
         .overflow_hidden()
         .shadow_sm()
+}
+
+/// Empty title bar space, which drags the window.
+fn drag_area(cx: &mut Context<Workspace>) -> gpui::Div {
+    div().h_full().on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|this, _, _, _| this.titlebar_pressed = true),
+    )
 }
