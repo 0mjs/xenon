@@ -6,15 +6,75 @@
 
 use std::ops::Range;
 
+/// How to read quotes and comments. Standard SQL (and Postgres, SQL Server,
+/// SQLite, DuckDB) or MySQL's: `#` comments, backslash escapes in strings,
+/// `--` only as a comment when a space follows, and `/*! … */` run as code.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lexing {
+    Standard,
+    Mysql,
+}
+
 /// Byte ranges of each statement in `sql`, trimmed of surrounding whitespace and
 /// excluding the terminating `;`. Statements containing only comments or
 /// whitespace are dropped.
 pub fn split_statements(sql: &str) -> Vec<Range<usize>> {
-    segments(sql)
+    split_as(sql, Lexing::Standard)
+}
+
+fn split_as(sql: &str, lexing: Lexing) -> Vec<Range<usize>> {
+    segments(sql, lexing)
         .into_iter()
         .filter_map(|segment| trim(sql, segment))
-        .filter(|range| has_code(&sql[range.clone()]))
+        .filter(|range| has_code(&sql[range.clone()], lexing))
         .collect()
+}
+
+/// Where a comment starting at `i` ends, or `None` when there's no comment
+/// there (as `lexing` reads it).
+fn comment_end(bytes: &[u8], i: usize, lexing: Lexing) -> Option<usize> {
+    let line_end = |from: usize| {
+        bytes[from..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |p| from + p + 1)
+    };
+    match (bytes[i], bytes.get(i + 1), lexing) {
+        // MySQL needs whitespace after `--`; `1--1` is arithmetic there.
+        (b'-', Some(b'-'), Lexing::Standard) => Some(line_end(i)),
+        (b'-', Some(b'-'), Lexing::Mysql)
+            if bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace()) =>
+        {
+            Some(line_end(i))
+        }
+        (b'#', _, Lexing::Mysql) => Some(line_end(i)),
+        // MySQL runs what's inside `/*! … */`: it's code, not a comment.
+        (b'/', Some(b'*'), Lexing::Mysql) if bytes.get(i + 2) == Some(&b'!') => None,
+        (b'/', Some(b'*'), _) => Some(skip_block_comment(bytes, i)),
+        _ => None,
+    }
+}
+
+/// Step past the opening of a MySQL executable comment (`/*!` and its version
+/// number) at `i`, so what follows is read as code.
+fn executable_comment_start(bytes: &[u8], i: usize, lexing: Lexing) -> Option<usize> {
+    if lexing != Lexing::Mysql || !bytes[i..].starts_with(b"/*!") {
+        return None;
+    }
+    let mut j = i + 3;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Whether a quote at `i` takes backslash escapes, as `lexing` reads it.
+fn backslash_escapes(sql: &str, i: usize, lexing: Lexing) -> bool {
+    let quote = sql.as_bytes()[i];
+    match lexing {
+        Lexing::Mysql => quote == b'\'' || quote == b'"',
+        Lexing::Standard => quote == b'\'' && is_escape_string(sql, i),
+    }
 }
 
 /// The statement to run for a cursor at byte `offset`: the one the cursor is in,
@@ -41,24 +101,24 @@ pub fn statement_at(sql: &str, offset: usize) -> Option<Range<usize>> {
 }
 
 /// Raw segments between top-level semicolons (the `;` itself excluded).
-fn segments(sql: &str) -> Vec<Range<usize>> {
+fn segments(sql: &str, lexing: Lexing) -> Vec<Range<usize>> {
     let bytes = sql.as_bytes();
     let mut segments = Vec::new();
     let mut start = 0;
     let mut i = 0;
 
     while i < bytes.len() {
+        if let Some(code) = executable_comment_start(bytes, i, lexing) {
+            i = code;
+            continue;
+        }
+        if let Some(end) = comment_end(bytes, i, lexing) {
+            i = end;
+            continue;
+        }
         match bytes[i] {
-            b'\'' => i = skip_quoted(bytes, i, is_escape_string(sql, i)),
-            b'"' | b'`' => i = skip_quoted(bytes, i, false),
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = bytes[i..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(bytes.len(), |p| i + p + 1);
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
-            b'$' => i = skip_dollar_quoted(sql, i),
+            b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i, backslash_escapes(sql, i, lexing)),
+            b'$' if lexing == Lexing::Standard => i = skip_dollar_quoted(sql, i),
             b';' => {
                 segments.push(start..i);
                 i += 1;
@@ -157,21 +217,22 @@ fn trim(sql: &str, range: Range<usize>) -> Option<Range<usize>> {
 }
 
 /// True if `text` contains something other than whitespace and comments.
-fn has_code(text: &str) -> bool {
+fn has_code(text: &str, lexing: Lexing) -> bool {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            b if b.is_ascii_whitespace() => i += 1,
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = bytes[i..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(bytes.len(), |p| i + p + 1);
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
-            _ => return true,
+        if executable_comment_start(bytes, i, lexing).is_some() {
+            return true;
         }
+        if let Some(end) = comment_end(bytes, i, lexing) {
+            i = end;
+            continue;
+        }
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        return true;
     }
     false
 }
@@ -188,26 +249,100 @@ pub enum Risk {
 }
 
 /// The riskiest statement in `sql`, with a short description such as
-/// `"delete from orders without where"`. `None` for read-only scripts.
+/// `"DELETE on orders with no WHERE"`. `None` for read-only scripts.
+///
+/// Deny by default: only statements known to read (`select`, `show`,
+/// `explain`, transaction control…) pass, and only when no data-changing verb
+/// appears in them. The script is read both as standard SQL and as MySQL reads
+/// it (where `#`, backslashes and `/*! … */` mean something else), and the
+/// worse reading counts, so quoting tricks can't hide a write.
 pub fn assess(sql: &str) -> Option<(Risk, String)> {
-    split_statements(sql)
+    [Lexing::Standard, Lexing::Mysql]
         .into_iter()
-        .filter_map(|range| assess_statement(&sql[range]))
+        .flat_map(|lexing| {
+            split_as(sql, lexing)
+                .into_iter()
+                .filter_map(move |range| assess_statement(&sql[range], lexing))
+        })
         .max_by_key(|(risk, _)| *risk)
 }
 
-fn assess_statement(statement: &str) -> Option<(Risk, String)> {
-    let words = words_outside_literals(statement);
+/// Statements that only read, or only manage the session or transaction.
+const READS: &[&str] = &[
+    "abort",
+    "begin",
+    "close",
+    "commit",
+    "deallocate",
+    "declare",
+    "desc",
+    "describe",
+    "discard",
+    "end",
+    "explain",
+    "fetch",
+    "listen",
+    "pragma",
+    "print",
+    "release",
+    "reset",
+    "rollback",
+    "savepoint",
+    "select",
+    "set",
+    "show",
+    "start",
+    "table",
+    "unlisten",
+    "use",
+    "values",
+    "waitfor",
+    "with",
+];
+
+/// Verbs that change data or schema, wherever they appear in a statement.
+const WRITE_VERBS: &[&str] = &[
+    "insert", "update", "delete", "merge", "upsert", "replace", "drop", "truncate", "alter",
+    "create", "rename", "grant", "revoke", "exec", "execute", "call", "copy",
+];
+
+fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
+    let words = words_outside_literals(statement, lexing);
     let first = words.first()?.as_str();
     let has = |word: &str| words.iter().any(|w| w == word);
-    // `explain analyze` really runs the statement it explains.
-    let analyzed = first == "explain" && (has("analyze") || has("analyse"));
-    // `with … delete/update/insert` writes too.
-    let verb = if first == "with" || analyzed {
-        ["delete", "update", "insert", "merge"]
-            .into_iter()
-            .find(|verb| has(verb))
-            .unwrap_or("with")
+    // A write verb somewhere in the statement; `for update` / `for no key update`
+    // and `on duplicate key update` lock or belong to an insert, not a write.
+    let hidden = || {
+        words.iter().enumerate().find_map(|(ix, word)| {
+            let lock =
+                word == "update" && ix > 0 && matches!(words[ix - 1].as_str(), "for" | "key");
+            (WRITE_VERBS.contains(&word.as_str()) && !lock).then_some(word.as_str())
+        })
+    };
+    let verb = if READS.contains(&first) {
+        match first {
+            // Plain `explain` only plans; `explain analyze` runs the statement.
+            "explain" if !(has("analyze") || has("analyse")) => return None,
+            "select" if has("into") => return Some((Risk::Write, "SELECT INTO".into())),
+            // Changing who you are or the server's settings is a write.
+            "set"
+                if [
+                    "role",
+                    "authorization",
+                    "global",
+                    "persist",
+                    "persist_only",
+                    "password",
+                ]
+                .iter()
+                .any(|w| has(w)) =>
+            {
+                return Some((Risk::Write, "SET".into()));
+            }
+            // `pragma name = value` writes; `pragma name` / `pragma name(arg)` reads.
+            "pragma" if statement.contains('=') => return Some((Risk::Write, "PRAGMA".into())),
+            _ => hidden()?,
+        }
     } else {
         first
     };
@@ -216,7 +351,7 @@ fn assess_statement(statement: &str) -> Option<(Risk, String)> {
         words.get(ix + 1).cloned()
     };
     let summary = match (verb, words.get(1)) {
-        ("drop" | "truncate" | "alter" | "create", Some(object)) => {
+        ("drop" | "truncate" | "alter" | "create", Some(object)) if verb == first => {
             format!("{} {}", verb.to_uppercase(), object.to_uppercase())
         }
         _ => verb.to_uppercase(),
@@ -227,7 +362,10 @@ fn assess_statement(statement: &str) -> Option<(Risk, String)> {
             let table = if verb == "delete" {
                 target("from")
             } else {
-                words.get(1).cloned()
+                words
+                    .iter()
+                    .position(|w| w == "update")
+                    .and_then(|ix| words.get(ix + 1).cloned())
             };
             let on = table.map(|t| format!(" on {t}")).unwrap_or_default();
             Some((
@@ -235,15 +373,8 @@ fn assess_statement(statement: &str) -> Option<(Risk, String)> {
                 format!("{}{on} with no WHERE", verb.to_uppercase()),
             ))
         }
-        "delete" | "update" | "insert" | "merge" | "create" | "grant" | "revoke" | "copy"
-        | "comment" | "reindex" | "vacuum" | "cluster" | "refresh" | "replace" | "upsert" => {
-            Some((Risk::Write, summary))
-        }
-        // Procedures and anonymous blocks can do anything.
-        "exec" | "execute" | "call" | "do" => Some((Risk::Write, summary)),
-        // `select … into new_table` creates a table (Postgres, SQL Server).
-        "select" if has("into") => Some((Risk::Write, "SELECT INTO".into())),
-        _ => None,
+        // Anything else that isn't a known read: a write until shown otherwise.
+        _ => Some((Risk::Write, summary)),
     }
 }
 
@@ -255,16 +386,13 @@ pub fn writes(sql: &str) -> bool {
 /// True when `sql` manages a transaction itself (`begin`, `commit`,
 /// `savepoint`…), so it shouldn't be wrapped in another.
 pub fn controls_transaction(sql: &str) -> bool {
-    split_statements(sql).into_iter().any(|range| {
-        let words = words_outside_literals(&sql[range]);
-        match words.first().map(String::as_str) {
-            Some(
-                "begin" | "start" | "commit" | "rollback" | "end" | "savepoint" | "release"
-                | "abort" | "prepare",
-            ) => true,
-            Some("set") => words.get(1).is_some_and(|w| w == "transaction"),
-            _ => false,
-        }
+    statements_both_ways(sql).any(|words| match words.first().map(String::as_str) {
+        Some(
+            "begin" | "start" | "commit" | "rollback" | "end" | "savepoint" | "release" | "abort"
+            | "prepare",
+        ) => true,
+        Some("set") => words.get(1).is_some_and(|w| w == "transaction"),
+        _ => false,
     })
 }
 
@@ -272,43 +400,57 @@ pub fn controls_transaction(sql: &str) -> bool {
 /// one (`set transaction read write`, `begin read write`,
 /// `set default_transaction_read_only = off`…).
 pub fn lifts_read_only(sql: &str) -> bool {
-    split_statements(sql).into_iter().any(|range| {
-        let words = words_outside_literals(&sql[range]);
+    statements_both_ways(sql).any(|words| {
         words
             .windows(2)
             .any(|pair| pair[0] == "read" && pair[1] == "write")
+            // Also as `@@session.transaction_read_only`.
             || words.iter().any(|word| {
-                matches!(
-                    word.as_str(),
-                    "transaction_read_only" | "default_transaction_read_only" | "tx_read_only"
-                )
+                word.rsplit('.').next().is_some_and(|name| {
+                    matches!(
+                        name,
+                        "transaction_read_only" | "default_transaction_read_only" | "tx_read_only"
+                    )
+                })
             })
     })
 }
 
+/// Each statement's words, read as standard SQL and again as MySQL reads it.
+fn statements_both_ways(sql: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+    [Lexing::Standard, Lexing::Mysql]
+        .into_iter()
+        .flat_map(move |lexing| {
+            split_as(sql, lexing)
+                .into_iter()
+                .map(move |range| words_outside_literals(&sql[range], lexing))
+        })
+}
+
 /// Lowercased words of a statement, skipping comments, string literals and
 /// quoted identifiers (so `where` inside a string doesn't count).
-fn words_outside_literals(statement: &str) -> Vec<String> {
+fn words_outside_literals(statement: &str, lexing: Lexing) -> Vec<String> {
     let bytes = statement.as_bytes();
     let mut words = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        if let Some(code) = executable_comment_start(bytes, i, lexing) {
+            i = code;
+            continue;
+        }
+        if let Some(end) = comment_end(bytes, i, lexing) {
+            i = end;
+            continue;
+        }
         match bytes[i] {
-            b'\'' => i = skip_quoted(bytes, i, is_escape_string(statement, i)),
+            b'\'' => i = skip_quoted(bytes, i, backslash_escapes(statement, i, lexing)),
             b'"' | b'`' => {
                 // Keep a quoted identifier as one word, without quotes.
-                let end = skip_quoted(bytes, i, false);
+                let end = skip_quoted(bytes, i, backslash_escapes(statement, i, lexing));
                 words.push(statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase());
                 i = end;
             }
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                i = bytes[i..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(bytes.len(), |p| i + p + 1);
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block_comment(bytes, i),
-            b'$' => i = skip_dollar_quoted(statement, i),
+            b'$' if lexing == Lexing::Standard => i = skip_dollar_quoted(statement, i),
             b if b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80 => {
                 let start = i;
                 while i < bytes.len()
@@ -548,6 +690,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mysql_quoting_tricks_cant_hide_a_write() {
+        for sql in [
+            // MySQL runs the inside of `/*! … */`.
+            "/*!50000 DROP TABLE orders */",
+            "select 1 /*! ; delete from orders */",
+            // MySQL's backslash escape keeps the string open in standard SQL's reading,
+            // and closes it in MySQL's: the drop is code there.
+            r"select '\''; drop table orders; -- '",
+            r#"select "\""; drop table orders; -- ""#,
+            // `--1` isn't a comment to MySQL.
+            "select 1--1; drop table orders",
+        ] {
+            assert!(
+                assess(sql).is_some_and(|(risk, _)| risk >= Risk::EveryRow),
+                "{sql}: {:?}",
+                assess(sql)
+            );
+        }
+    }
+
+    #[test]
+    fn anything_not_known_to_read_counts_as_a_write() {
+        for sql in [
+            "lock table orders in exclusive mode",
+            "attach database 'other.db' as other",
+            "load data infile '/tmp/x' into table orders",
+            "vacuum",
+            "analyze orders",
+            "install plugin x soname 'x.so'",
+            "kill 42",
+            "set role admin",
+            "set global max_connections = 1",
+            "pragma foreign_keys = off",
+            "begin insert into orders values (1) end",
+            "notify channel",
+        ] {
+            assert_eq!(assess(sql).map(|r| r.0), Some(Risk::Write), "{sql}");
+        }
+        for sql in [
+            "select * from orders for update",
+            "select * from orders for no key update",
+            "set search_path = shop",
+            "begin",
+            "use shop",
+            "pragma foreign_keys",
+            "pragma table_info(orders)",
+            "declare @n int",
+            "explain delete from orders",
+            "values (1), (2)",
+        ] {
+            assert_eq!(assess(sql), None, "{sql}");
+        }
+    }
+
+    #[test]
     fn procedures_blocks_and_select_into_are_writes() {
         for sql in [
             "exec dbo.purge_old",
@@ -589,6 +786,8 @@ mod tests {
             "set session characteristics as transaction read write",
             "set default_transaction_read_only = off",
             "select 1; SET SESSION transaction_read_only = 0",
+            "set @@session.transaction_read_only = 0",
+            "set transaction read /* sneaky */ write",
         ] {
             assert!(lifts_read_only(sql), "{sql}");
         }
