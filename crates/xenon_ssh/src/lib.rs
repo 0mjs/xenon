@@ -210,6 +210,10 @@ impl Drop for Tunnel {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        ports_in_use()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.local_port);
     }
 }
 
@@ -255,8 +259,22 @@ fn suffix(log: &str) -> String {
 }
 
 /// A port nobody is listening on right now.
+/// Local ports handed to open tunnels: two tunnels opened at once must never
+/// share one, or one would take the other's listener for its own.
+fn ports_in_use() -> &'static Mutex<std::collections::HashSet<u16>> {
+    static PORTS: std::sync::OnceLock<Mutex<std::collections::HashSet<u16>>> =
+        std::sync::OnceLock::new();
+    PORTS.get_or_init(Default::default)
+}
+
 fn free_port() -> Result<u16> {
-    Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
+    let mut taken = ports_in_use().lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        if taken.insert(port) {
+            return Ok(port);
+        }
+    }
 }
 
 /// Apps opened from the Finder get a minimal PATH; ssh is always at /usr/bin/ssh on macOS.
@@ -350,6 +368,12 @@ mod tests {
 mod live {
     use super::*;
 
+    /// Tunnels to one bastion: one test at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn known_hosts() -> PathBuf {
         std::env::temp_dir().join(format!("xenon-test-known-hosts-{}", std::process::id()))
     }
@@ -386,6 +410,7 @@ mod live {
     #[test]
     #[ignore]
     fn key_login() {
+        let _serial = serial();
         let tunnel = Tunnel::open(
             &SshOptions {
                 key_file: key(),
@@ -402,6 +427,7 @@ mod live {
     #[test]
     #[ignore]
     fn password_login() {
+        let _serial = serial();
         let tunnel = Tunnel::open(
             &SshOptions {
                 password: "xenon".into(),
@@ -418,6 +444,7 @@ mod live {
     #[test]
     #[ignore]
     fn wrong_password_is_explained() {
+        let _serial = serial();
         let err = Tunnel::open(
             &SshOptions {
                 password: "nope".into(),
@@ -438,6 +465,7 @@ mod live {
     #[test]
     #[ignore]
     fn a_new_host_key_is_recorded_and_a_changed_one_refused() {
+        let _serial = serial();
         let known =
             std::env::temp_dir().join(format!("xenon-test-host-keys-{}", std::process::id()));
         let _ = std::fs::remove_file(&known);
@@ -447,8 +475,16 @@ mod live {
         };
         // First visit: accepted, and the key is written down.
         drop(Tunnel::open(&options, "postgres", 5432, &known).unwrap());
-        let recorded = std::fs::read_to_string(&known).unwrap();
-        assert!(recorded.contains("[127.0.0.1]:52222"), "{recorded}");
+        // (Found with ssh-keygen: ssh may store host names hashed.)
+        let found = std::process::Command::new("ssh-keygen")
+            .args(["-F", "[127.0.0.1]:52222", "-f"])
+            .arg(&known)
+            .output()
+            .unwrap();
+        assert!(
+            found.status.success() && !found.stdout.is_empty(),
+            "the key wasn't recorded"
+        );
         // Someone else answers as the bastion: a different key is refused.
         let impostor =
             std::env::temp_dir().join(format!("xenon-test-impostor-{}", std::process::id()));
@@ -478,6 +514,7 @@ mod live {
     #[test]
     #[ignore]
     fn closing_the_tunnel_stops_ssh() {
+        let _serial = serial();
         let tunnel = Tunnel::open(
             &SshOptions {
                 key_file: key(),
