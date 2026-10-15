@@ -414,6 +414,13 @@ fn snapshots() {
             w.run(crate::workspace::RunScope::All, window, cx);
         });
         shot.save(&format!("28-transaction-open-{suffix}"));
+        // Quitting now asks, since quitting would roll it back.
+        shot.act(|w, window, cx| assert!(!w.may_quit(window, cx)));
+        shot.save(&format!("30-quit-with-transaction-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.confirm = None;
+            cx.notify();
+        });
         shot.act(|w, _, cx| {
             assert!(w.active_session().unwrap().in_transaction);
             w.end_transaction(false, cx);

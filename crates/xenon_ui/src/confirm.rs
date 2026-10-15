@@ -168,7 +168,8 @@ impl Render for ConfirmDialog {
             .gap(px(16.))
             .p(px(20.))
             .child(header)
-            .child(preview)
+            // Prompts about an action (quit, disconnect) have no SQL to show.
+            .when(!self.preview.trim().is_empty(), |el| el.child(preview))
             .when_some(self.require.clone(), |el, text| {
                 el.child(
                     div()

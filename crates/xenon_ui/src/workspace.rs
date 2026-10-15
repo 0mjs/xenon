@@ -297,6 +297,10 @@ pub(crate) enum Pending {
         tab_id: usize,
         column: usize,
     },
+    /// Cancel a SQL Server query, rolling back its open transaction.
+    Cancel(usize),
+    /// Quit with a transaction open.
+    Quit,
     /// Save a tab's staged changes.
     Save {
         tab_id: usize,
@@ -639,6 +643,13 @@ impl Workspace {
             None => {}
         }
         this.watch_tabs(cx);
+        // Closing the window quits: ask first when a transaction is open.
+        let workspace = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            workspace
+                .update(cx, |this, cx| this.may_quit(window, cx))
+                .unwrap_or(true)
+        });
         this
     }
 
@@ -1455,6 +1466,14 @@ impl Workspace {
                         this.disconnect(id, window, cx);
                         return;
                     }
+                    Pending::Cancel(tab_id) => {
+                        if let Some(Query::Running { cancel, .. }) =
+                            this.tabs.iter().find(|t| t.id == tab_id).map(|t| &t.query)
+                        {
+                            cancel.cancel();
+                        }
+                    }
+                    Pending::Quit => cx.quit(),
                     Pending::Sort { tab_id, column } => {
                         if let Some(index) = this.tabs.iter().position(|t| t.id == tab_id) {
                             this.active = index;
@@ -1967,10 +1986,56 @@ impl Workspace {
         });
     }
 
-    fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, _: &mut Context<Self>) {
+    fn cancel_query(&mut self, _: &CancelQuery, window: &mut Window, cx: &mut Context<Self>) {
+        // SQL Server cancels by ending the session, which rolls back an open
+        // transaction too: say so first.
+        if let Some(session) = self.active_session()
+            && session.engine == Engine::SqlServer
+            && session.in_transaction
+            && matches!(self.active_tab().query, Query::Running { .. })
+        {
+            let body = "SQL Server stops a query by ending its session, so the open transaction \
+                        is rolled back too: everything it changed is undone."
+                .to_string();
+            let tab_id = self.active_tab().id;
+            let dialog = cx.new(|cx| {
+                ConfirmDialog::new("Cancel and roll back?", body, "", None, window, cx)
+                    .action("Cancel and roll back", true)
+            });
+            self.show_confirm(dialog, Pending::Cancel(tab_id), window, cx);
+            return;
+        }
         if let Query::Running { cancel, .. } = &self.active_tab().query {
             cancel.cancel();
         }
+    }
+
+    /// Names of connections with a transaction open.
+    fn open_transactions(&self) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|s| s.in_transaction)
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    /// Quit, asking first when a transaction is open (quitting rolls it back).
+    /// Returns whether Xenon may close now.
+    pub(crate) fn may_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let open = self.open_transactions();
+        if open.is_empty() {
+            return true;
+        }
+        let body = format!(
+            "A transaction is open on {}. Quitting rolls back everything it changed.",
+            open.join(", ")
+        );
+        let dialog = cx.new(|cx| {
+            ConfirmDialog::new("Roll back and quit?", body, "", None, window, cx)
+                .action("Roll back and quit", true)
+        });
+        self.show_confirm(dialog, Pending::Quit, window, cx);
+        false
     }
 
     /// Show a table's rows, in the tab already browsing it or in a new one.
@@ -3211,6 +3276,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy(Format::Markdown, cx)))
             .on_action(cx.listener(|this, _: &CopySql, _, cx| this.copy(Format::Sql, cx)))
             .on_action(cx.listener(|this, _: &ToggleStructure, _, cx| this.toggle_structure(cx)))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                if this.may_quit(window, cx) {
+                    cx.quit();
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &SaveQueryAs, window, cx| this.save_query(true, window, cx)),
             )
