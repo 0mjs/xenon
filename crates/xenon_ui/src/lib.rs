@@ -9,6 +9,7 @@ mod discover;
 use xenon_edit as edits;
 mod explorer;
 mod export;
+mod filter;
 pub mod fonts;
 mod history;
 mod launcher;

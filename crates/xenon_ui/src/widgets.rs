@@ -97,7 +97,8 @@ pub fn tooltip(
                 .items_center()
                 .gap(px(8.))
                 .child(label)
-                .child(kbd(&theme, keys))
+                // No keycap when there's no shortcut.
+                .when(!keys.is_empty(), |el| el.child(kbd(&theme, keys)))
         })
         .build(window, cx)
     }

@@ -324,6 +324,24 @@ fn snapshots() {
             w.select_cell(5, 4, true, window, cx);
         });
         shot.save(&format!("03-browse-{suffix}"));
+        // The filter builder: status = paid, and total ≥ 300.
+        shot.act(|w, window, cx| {
+            w.toggle_filter_builder(window, cx);
+            w.add_filter_row(window, cx);
+            w.pick_filter(0, crate::filter::Menu::Column, 3, cx);
+            w.set_filter_value(0, "paid", window, cx);
+            w.pick_filter(1, crate::filter::Menu::Column, 2, cx);
+            w.pick_filter(1, crate::filter::Menu::Op, 5, cx);
+            w.set_filter_value(1, "300", window, cx);
+        });
+        shot.save(&format!("34-filter-builder-{suffix}"));
+        shot.act(|w, window, cx| w.apply_filter_builder(window, cx));
+        shot.act(|w, window, cx| {
+            assert_eq!(w.filter_text(cx), "status = 'paid' and total >= 300");
+            let error = w.error_text();
+            assert!(error.is_none(), "{error:?}");
+            w.clear_filter_for_test(window, cx);
+        });
         shot.act(|w, _, cx| {
             w.export_menu = true;
             cx.notify();

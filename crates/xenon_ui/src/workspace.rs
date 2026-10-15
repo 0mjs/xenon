@@ -356,7 +356,9 @@ pub(crate) struct Browse {
     order: Option<(String, SortDirection)>,
     _filter_enter: Subscription,
     /// Columns, keys and indexes, loaded when the tab opens.
-    info: Option<Rc<TableInfo>>,
+    pub(crate) info: Option<Rc<TableInfo>>,
+    /// The filter builder, when open.
+    pub(crate) builder: Option<crate::filter::Builder>,
     info_error: Option<SharedString>,
     /// Show the table's structure instead of its rows.
     pub(crate) structure: bool,
@@ -454,6 +456,17 @@ struct CellEditor {
 }
 
 impl Tab {
+    /// The result's columns: name and type as reported.
+    pub(crate) fn grid_columns(&self) -> Vec<(String, Option<String>)> {
+        self.grid.as_ref().map_or_else(Vec::new, |grid| {
+            grid.data
+                .columns
+                .iter()
+                .map(|c| (c.name.clone(), c.type_name.clone()))
+                .collect()
+        })
+    }
+
     fn manual_widths(&self, grid: &Grid) -> Vec<Option<f32>> {
         grid.data
             .columns
@@ -746,6 +759,7 @@ impl Workspace {
                         info: None,
                         info_error: None,
                         structure: false,
+                        builder: None,
                     }),
                 )
             }
@@ -1674,6 +1688,11 @@ impl Workspace {
         {
             cancel.cancel();
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_filter_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_browse_filter(window, cx);
     }
 
     #[cfg(test)]
@@ -4116,6 +4135,12 @@ impl Workspace {
             .when_some(tab.browse.as_ref(), |el, browse| {
                 el.child(self.render_filter_bar(browse, theme, cx))
             })
+            .children(
+                tab.browse
+                    .as_ref()
+                    .filter(|b| !b.structure)
+                    .and_then(|_| self.render_filter_builder(theme, cx)),
+            )
             .map(|el| match tab.browse.as_ref().filter(|b| b.structure) {
                 Some(browse) => el.child(
                     div()
@@ -4310,6 +4335,25 @@ impl Workspace {
                 .into_any_element();
         }
         bar.child(
+            widgets::button(
+                theme,
+                "filter-builder",
+                "+ Filter",
+                if browse.builder.is_some() {
+                    ButtonKind::Secondary
+                } else {
+                    ButtonKind::Ghost
+                },
+                true,
+            )
+            .h(px(30.))
+            .tooltip(widgets::tooltip(
+                "Build a filter: column, condition, value",
+                "",
+            ))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_filter_builder(window, cx))),
+        )
+        .child(
             field(
                 theme,
                 Some(

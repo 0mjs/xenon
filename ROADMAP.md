@@ -114,9 +114,9 @@ so it can join the test fleet.
 | ✅ Virtualized grid, keyboard selection, copy TSV/CSV/JSON, sort, WHERE filter, inspector | 0.1 |
 | ✅ Stream results (first rows at once, live count); "No limit" setting and Fetch all; cancel keeps rows read so far. Still to do: full fetch to a file | 0.3 |
 | ✅ **Inline editing:** edit cells, add rows, delete; changes staged, SQL previewed, applied in one transaction (duplicating rows still to do) | 0.3 |
-| Value editors per type: JSON tree, long text, dates, enums (dropdown), booleans, bytea (hex/image), arrays | 0.4 |
+| ✅ Value editors per type: JSON (highlighted, checked), long text, dates (with Now), enums (pick a value), booleans. Still to do: a JSON tree, bytea (hex/image), arrays | 0.4 |
 | ✅ Click-through foreign keys: open the referenced row from the grid or inspector. Still to do: rows that reference this one | 0.3 |
-| Filter builder (column / operator / value chips) alongside the raw WHERE field | 0.4 |
+| ✅ Filter builder (column / operator / value, match all or any) that writes the WHERE field | 0.4 |
 | Pagination with exact counts (where cheap) or estimates | 0.4 |
 | Column visibility, pinning, reordering; remembered per table | 0.5 |
 | Show results as JSON / as records; transpose a single row | 0.5 |
