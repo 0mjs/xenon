@@ -91,8 +91,13 @@ impl Connection for Tunneled {
     fn server_version(&self) -> String {
         self.inner.server_version()
     }
-    fn execute(&self, sql: &str, row_limit: usize) -> anyhow::Result<xenon_driver::QueryResult> {
-        self.inner.execute(sql, row_limit)
+    fn execute_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(xenon_driver::Progress),
+    ) -> anyhow::Result<xenon_driver::QueryResult> {
+        self.inner.execute_streaming(sql, row_limit, progress)
     }
     fn introspect(&self) -> anyhow::Result<Vec<xenon_driver::Schema>> {
         self.inner.introspect()

@@ -12,6 +12,7 @@ use mysql::consts::{ColumnFlags, ColumnType};
 use mysql::prelude::Queryable as _;
 use mysql::{Conn, Opts, OptsBuilder, SslOpts};
 use xenon_driver::{
+    Feed, Progress,
     CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
     QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
@@ -123,10 +124,19 @@ pub struct MysqlConnection {
 struct MyCancel {
     opts: Opts,
     connection_id: u32,
+    /// Set when the user cancels (not the row limit), so the rows read so far are kept.
+    user: std::sync::atomic::AtomicBool,
 }
 
 impl CancelHandle for MyCancel {
     fn cancel(&self) {
+        self.user.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stop();
+    }
+}
+
+impl MyCancel {
+    fn stop(&self) {
         let opts = self.opts.clone();
         let id = self.connection_id;
         std::thread::spawn(move || {
@@ -235,6 +245,7 @@ impl MysqlConnection {
             cancel: Arc::new(MyCancel {
                 opts,
                 connection_id: conn.connection_id(),
+                user: Default::default(),
             }),
             conn: Mutex::new(conn),
             name,
@@ -266,7 +277,12 @@ impl Connection for MysqlConnection {
         self.version.clone()
     }
 
-    fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult> {
+    fn execute_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult> {
         // MySQL's read-only transactions stop DML but not DDL, which commits on
         // its own; refuse schema changes here so read-only means read-only.
         if self.read_only
@@ -285,6 +301,9 @@ impl Connection for MysqlConnection {
         }
 
         let started = Instant::now();
+        let mut feed = Feed::new(progress);
+        let mut cancelled = false;
+        self.cancel.user.store(false, std::sync::atomic::Ordering::SeqCst);
         let mut conn = self.lock();
         let mut result = conn
             .query_iter(sql)
@@ -311,12 +330,23 @@ impl Connection for MysqlConnection {
                     .collect(),
                 ..Default::default()
             };
+            feed.next_set();
             for row in set {
                 let row = match row {
                     Ok(row) => row,
                     Err(mysql::Error::MySqlError(err))
                         if cancelled_for_limit && err.code == ER_QUERY_INTERRUPTED =>
                     {
+                        break;
+                    }
+                    // Stopped by the user while reading rows: keep what arrived.
+                    Err(mysql::Error::MySqlError(err))
+                        if err.code == ER_QUERY_INTERRUPTED
+                            && self.cancel.user.load(std::sync::atomic::Ordering::SeqCst)
+                            && !rows.rows.is_empty() =>
+                    {
+                        cancelled = true;
+                        rows.truncated = true;
                         break;
                     }
                     Err(err) => return Err(locate(describe_error(err), sql)),
@@ -326,7 +356,7 @@ impl Connection for MysqlConnection {
                         // Stop the server instead of reading rows we'd discard.
                         rows.truncated = true;
                         cancelled_for_limit = true;
-                        self.cancel.cancel();
+                        self.cancel.stop();
                     }
                     continue;
                 }
@@ -337,8 +367,12 @@ impl Connection for MysqlConnection {
                         .map(|(value, column)| convert(value, column))
                         .collect(),
                 );
+                feed.read(&rows, |_| {});
             }
             outcome = Some(QueryOutcome::Rows(rows));
+            if cancelled {
+                break;
+            }
         }
         drop(result);
         let outcome = outcome.ok_or_else(|| anyhow!("nothing to run"))?;
@@ -346,6 +380,7 @@ impl Connection for MysqlConnection {
             outcome,
             statements,
             elapsed: started.elapsed(),
+            cancelled,
         })
     }
 

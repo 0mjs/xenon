@@ -112,7 +112,7 @@ so it can join the test fleet.
 | Feature | Target |
 |---|---|
 | ✅ Virtualized grid, keyboard selection, copy TSV/CSV/JSON, sort, WHERE filter, inspector | 0.1 |
-| Stream results in batches; lift the 100k cap; "load more" or full fetch to a file | 0.3 |
+| ✅ Stream results (first rows at once, live count); "No limit" setting and Fetch all; cancel keeps rows read so far. Still to do: full fetch to a file | 0.3 |
 | ✅ **Inline editing:** edit cells, add rows, delete; changes staged, SQL previewed, applied in one transaction (duplicating rows still to do) | 0.3 |
 | Value editors per type: JSON tree, long text, dates, enums (dropdown), booleans, bytea (hex/image), arrays | 0.3 |
 | Click-through foreign keys: open the referenced row, or see rows that reference this one | 0.3 |

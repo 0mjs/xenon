@@ -91,9 +91,10 @@ pub trait Connection: Send + Sync {
 }
 ```
 
-Results are collected in full, capped at 100,000 rows; past the cap Postgres queries are cancelled
-server-side and the result is flagged as truncated. Streaming in **batches** so the first rows
-render immediately is still to do.
+Results stream: drivers report the first 200 rows as a preview and a running count every 2,000
+rows, so the grid fills while the rest load. Results are capped at the row limit (100,000 by
+default, or none); past the cap the query is cancelled server-side and the result is flagged as
+truncated, with **Fetch all** to run it again uncapped. Cancelling keeps the rows already read.
 
 ## Milestones
 

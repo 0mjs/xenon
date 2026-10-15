@@ -91,6 +91,63 @@ pub struct QueryResult {
     /// How many statements ran.
     pub statements: usize,
     pub elapsed: Duration,
+    /// Stopped by the user (cancel) part-way through reading rows; the rows
+    /// read so far are kept.
+    pub cancelled: bool,
+}
+
+/// What a running query reports before it finishes.
+#[derive(Debug)]
+pub enum Progress {
+    /// The first rows of the result being read, to show while the rest arrive.
+    Preview(ResultSet),
+    /// Rows read so far from the result being read.
+    Rows(usize),
+}
+
+/// Rows in the early preview of a result.
+pub const PREVIEW_ROWS: usize = 200;
+/// How often (in rows) a running query reports its count.
+pub const PROGRESS_EVERY: usize = 2_000;
+
+/// Reports progress as a driver reads rows: call [`Feed::read`] after each row.
+pub struct Feed<'a> {
+    progress: &'a mut dyn FnMut(Progress),
+    previewed: bool,
+}
+
+impl<'a> Feed<'a> {
+    pub fn new(progress: &'a mut dyn FnMut(Progress)) -> Self {
+        Self {
+            progress,
+            previewed: false,
+        }
+    }
+
+    /// After a row lands in `rows`: hands over a preview once it has
+    /// [`PREVIEW_ROWS`] rows (through `shape`, e.g. to apply column types), and
+    /// a count every [`PROGRESS_EVERY`].
+    pub fn read(&mut self, rows: &ResultSet, shape: impl FnOnce(&mut ResultSet)) {
+        let n = rows.rows.len();
+        if !self.previewed && n == PREVIEW_ROWS {
+            self.previewed = true;
+            let mut preview = ResultSet {
+                columns: rows.columns.clone(),
+                rows: rows.rows.clone(),
+                truncated: false,
+            };
+            shape(&mut preview);
+            (self.progress)(Progress::Preview(preview));
+        }
+        if n.is_multiple_of(PROGRESS_EVERY) {
+            (self.progress)(Progress::Rows(n));
+        }
+    }
+
+    /// A new result set started (in a multi-statement script): preview it too.
+    pub fn next_set(&mut self) {
+        self.previewed = false;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,7 +275,18 @@ pub trait Connection: Send + Sync {
 
     /// Run one or more statements and return the outcome of the last.
     /// At most `row_limit` rows are kept from a result set.
-    fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult>;
+    fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult> {
+        self.execute_streaming(sql, row_limit, &mut |_| {})
+    }
+
+    /// [`Connection::execute`], reporting rows as they arrive so the first
+    /// can be shown at once. A cancel part-way through keeps the rows read.
+    fn execute_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult>;
 
     fn introspect(&self) -> Result<Vec<Schema>>;
 

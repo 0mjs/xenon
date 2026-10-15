@@ -83,6 +83,43 @@ fn keycaps(keys: &str, color: Rgba, background: Rgba, border: Rgba) -> gpui::Div
         }))
 }
 
+/// A tooltip: a label and its shortcut as keycaps (the UI and code fonts have
+/// no ⌘ ⇧ ↵ glyphs, so shortcuts are never written into plain text).
+pub fn tooltip(
+    label: &'static str,
+    keys: &'static str,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |window, cx| {
+        gpui_component::tooltip::Tooltip::element(move |_, cx| {
+            let theme = crate::theme::ActiveTheme::theme(cx).clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(label)
+                .child(kbd(&theme, keys))
+        })
+        .build(window, cx)
+    }
+}
+
+/// Words with keycaps among them: `[("Press", None), ("⌘↵", Some(())), …]`
+/// draws "Press [⌘][↵] …". Pairs are (text, is a shortcut).
+pub fn with_keys(theme: &Theme, parts: &[(&'static str, bool)]) -> gpui::Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(5.))
+        .children(parts.iter().map(|(text, is_keys)| {
+            if *is_keys {
+                kbd(theme, text).into_any_element()
+            } else {
+                div().child(*text).into_any_element()
+            }
+        }))
+}
+
 /// "⇧⌘↵" → ["⇧", "⌘", "↵"]; "⌘Tab" → ["⌘", "Tab"]. Modifiers get a cap each,
 /// whatever follows them is one key.
 fn split_keys(keys: &str) -> Vec<String> {

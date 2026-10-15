@@ -57,10 +57,11 @@ impl ThemeChoice {
 }
 
 /// Rows kept from one result set.
-const ROW_LIMITS: [(usize, &str); 3] = [
+const ROW_LIMITS: [(usize, &str); 4] = [
     (10_000, "10,000"),
     (100_000, "100,000"),
     (1_000_000, "1,000,000"),
+    (usize::MAX, "No limit"),
 ];
 /// Rows fetched when a table is opened from the explorer.
 const BROWSE_LIMITS: [(usize, &str); 4] = [

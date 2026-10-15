@@ -303,8 +303,11 @@ pub(crate) enum SidePanel {
 enum Query {
     Idle,
     Running {
+        /// Which run this is, so a slow poller can't touch a newer one.
+        run: u64,
         cancel: Arc<dyn CancelHandle>,
         _task: Task<()>,
+        _poll: Task<()>,
     },
     Failed(SharedString),
     Done(Arc<QueryResult>),
@@ -349,6 +352,20 @@ pub(crate) struct Tab {
     /// A short note in the results bar (saved, or why something can't happen), and whether it's an error.
     flash: Option<(SharedString, bool)>,
     saving: bool,
+    /// Rows read so far by the running query.
+    fetched: usize,
+    /// The grid shows the running query's first rows.
+    previewing: bool,
+    /// The last SQL run here and where it began in the editor, for "Fetch all".
+    last_run: Option<(String, Option<usize>)>,
+}
+
+/// What a running query has read so far, shared with the thread running it.
+#[derive(Default)]
+struct Live {
+    preview: std::sync::Mutex<Option<xenon_driver::ResultSet>>,
+    rows: std::sync::atomic::AtomicUsize,
+    done: std::sync::atomic::AtomicBool,
 }
 
 /// The edit bar's cell and its text field.
@@ -390,6 +407,7 @@ pub struct Workspace {
     next_tab_id: usize,
     pub(crate) sessions: Vec<Session>,
     next_session_id: usize,
+    next_run: u64,
     /// A problem opening a database, shown on the Connect screen and in the explorer.
     pub(crate) notice: Option<SharedString>,
     /// The connection being opened, while it opens.
@@ -487,6 +505,7 @@ impl Workspace {
             next_tab_id: 0,
             sessions: Vec::new(),
             next_session_id: 0,
+            next_run: 0,
             notice: None,
             connecting: None,
             store,
@@ -575,7 +594,7 @@ impl Workspace {
             EditorState::new(window, cx)
                 .language("sql")
                 .line_number(true)
-                .placeholder("-- write SQL here: ⌘↵ runs the statement, ⇧⌘↵ runs all")
+                .placeholder("-- Write SQL here")
         });
         let (title, browse) = match browse {
             Some((schema, table)) => {
@@ -627,6 +646,9 @@ impl Workspace {
             editing: None,
             flash: None,
             saving: false,
+            fetched: 0,
+            previewing: false,
+            last_run: None,
         });
         self.active = self.tabs.len() - 1;
         self.hook_completions(self.active, cx);
@@ -1300,7 +1322,7 @@ impl Workspace {
             return;
         }
         let Some(session) = self.active_session() else {
-            self.notice = Some("Open a database first (⌘O or ⌘N).".into());
+            self.notice = Some("Open a database first.".into());
             cx.notify();
             return;
         };
@@ -1385,6 +1407,29 @@ impl Workspace {
         origin: Option<usize>,
         cx: &mut Context<Self>,
     ) {
+        let limit = self.prefs.row_limit;
+        self.execute_with_limit(tab_id, sql, origin, limit, cx);
+    }
+
+    /// Run again what the active tab last ran, keeping every row.
+    fn fetch_all(&mut self, cx: &mut Context<Self>) {
+        let tab = self.active_tab();
+        if let Some((sql, origin)) = tab.last_run.clone() {
+            let id = tab.id;
+            self.execute_with_limit(id, sql, origin, usize::MAX, cx);
+        }
+    }
+
+    /// Run `sql` for a tab in the background, showing its first rows as soon as
+    /// they arrive, and record it in the history.
+    fn execute_with_limit(
+        &mut self,
+        tab_id: usize,
+        sql: String,
+        origin: Option<usize>,
+        row_limit: usize,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session_id) = self
             .tabs
             .iter()
@@ -1398,11 +1443,21 @@ impl Workspace {
         };
         let conn = session.conn.clone();
         let store = self.store.clone();
-        let row_limit = self.prefs.row_limit;
         let cancel = conn.cancel_handle();
+        let live = Arc::new(Live::default());
+        let feed = live.clone();
+        let last_sql = sql.clone();
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
-            let result = conn.execute(&sql, row_limit);
+            let result = conn.execute_streaming(&sql, row_limit, &mut |progress| match progress {
+                xenon_driver::Progress::Preview(rows) => {
+                    *feed.preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
+                }
+                xenon_driver::Progress::Rows(n) => {
+                    feed.rows.store(n, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            feed.done.store(true, std::sync::atomic::Ordering::SeqCst);
             crate::trace("execute query", started);
             if let Some(store) = store {
                 let (rows, error) = match &result {
@@ -1443,13 +1498,49 @@ impl Workspace {
             })
             .ok();
         });
+        // Show the first rows, and how many have arrived, while the rest load.
+        self.next_run += 1;
+        let run = self.next_run;
+        let poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let done = live.done.load(std::sync::atomic::Ordering::SeqCst);
+                let alive = this
+                    .update(cx, |this, cx| {
+                        let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                            return;
+                        };
+                        if !matches!(tab.query, Query::Running { run: r, .. } if r == run) {
+                            return;
+                        }
+                        if let Some(rows) = live.preview.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                            tab.grid = Some(Grid::new(rows));
+                            tab.selection = None;
+                            tab.previewing = true;
+                        }
+                        tab.fetched = live.rows.load(std::sync::atomic::Ordering::Relaxed);
+                        cx.notify();
+                    })
+                    .is_ok();
+                if done || !alive {
+                    break;
+                }
+            }
+        });
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
         tab.run_origin = origin;
+        tab.fetched = 0;
+        tab.previewing = false;
+        tab.last_run = Some((last_sql, origin));
         tab.query = Query::Running {
+            run,
             cancel,
             _task: task,
+            _poll: poll,
         };
         cx.notify();
     }
@@ -1479,7 +1570,14 @@ impl Workspace {
             Ok(mut result) => {
                 if let QueryOutcome::Rows(rows) = &mut result.outcome {
                     let started = std::time::Instant::now();
-                    tab.grid = Some(Grid::new(std::mem::take(rows)));
+                    let mut grid = Grid::new(std::mem::take(rows));
+                    // Keep where the reader had scrolled in the preview.
+                    if tab.previewing
+                        && let Some(preview) = &tab.grid
+                    {
+                        grid.scroll = preview.scroll.clone();
+                    }
+                    tab.grid = Some(grid);
                     crate::trace("build results grid", started);
                     result.outcome = QueryOutcome::Rows(Default::default());
                 } else {
@@ -1704,6 +1802,9 @@ impl Workspace {
         let Some(grid) = &tab.grid else {
             return Err("Nothing loaded yet.");
         };
+        if matches!(tab.query, Query::Running { .. }) {
+            return Err("Still loading.");
+        }
         let object = session
             .schemas
             .iter()
@@ -2918,9 +3019,7 @@ impl Workspace {
                     .cursor_pointer()
                     .rounded(px(6.))
                     .hover(|s| s.bg(theme.s3))
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new("Settings  ⌘,").build(window, cx)
-                    })
+                    .tooltip(widgets::tooltip("Settings", "⌘,"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_settings(&OpenSettings, window, cx)
                     }))
@@ -3428,8 +3527,20 @@ impl Workspace {
         // A status dot and word, then quieter facts about the result.
         let (dot, status): (Rgba, SharedString) = match &tab.query {
             Query::Idle => (theme.t3, "No results".into()),
+            Query::Running { .. } if tab.fetched > 0 => (
+                theme.acc,
+                format!("{} rows so far…", group_digits(tab.fetched)).into(),
+            ),
             Query::Running { .. } => (theme.acc, "Running…".into()),
             Query::Failed(_) => (theme.err, "Error".into()),
+            Query::Done(result) if result.cancelled => (
+                theme.warn,
+                match &tab.grid {
+                    Some(grid) => format!("Stopped at {} rows", group_digits(grid.data.rows.len())),
+                    None => "Stopped".into(),
+                }
+                .into(),
+            ),
             Query::Done(result) => (
                 theme.ok,
                 match (&result.outcome, &tab.grid) {
@@ -3461,9 +3572,11 @@ impl Workspace {
                 facts.push(format!("{} statements", result.statements).into());
             }
         }
-        if let Query::Running { .. } = &tab.query {
-            facts.push("⌘. to cancel".into());
-        }
+        // A capped query result can be run again keeping every row.
+        let can_fetch_all = tab.browse.is_none()
+            && tab.last_run.is_some()
+            && matches!(&tab.query, Query::Done(result) if !result.cancelled)
+            && tab.grid.as_ref().is_some_and(|grid| grid.data.truncated);
 
         div()
             .h(px(32.))
@@ -3494,6 +3607,21 @@ impl Workspace {
                     .text_color(theme.t3)
                     .child(fact)
             }))
+            .when(matches!(tab.query, Query::Running { .. }), |el| {
+                el.child(
+                    widgets::with_keys(theme, &[("⌘.", true), ("to cancel", false)])
+                        .text_size(px(11.))
+                        .text_color(theme.t3),
+                )
+            })
+            .when(can_fetch_all, |el| {
+                el.child(
+                    widgets::button(theme, "fetch-all", "Fetch all", ButtonKind::Ghost, true)
+                        .h(px(22.))
+                        .px(px(8.))
+                        .on_click(cx.listener(|this, _, _, cx| this.fetch_all(cx))),
+                )
+            })
             .child(div().flex_1())
             .child(self.render_edit_status(theme, cx))
     }
@@ -3631,10 +3759,23 @@ impl Workspace {
                 .into_any_element(),
             Query::Running { .. } => centered_hint(theme, "Running…"),
             Query::Done(_) => centered_hint(theme, "Done."),
-            Query::Idle if self.active_session().is_some() => centered_hint(
-                theme,
-                "⌘↵ runs the statement under the cursor, ⇧⌘↵ runs everything.",
-            ),
+            Query::Idle if self.active_session().is_some() => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .text_color(theme.t3)
+                .child(widgets::with_keys(
+                    theme,
+                    &[("⌘↵", true), ("runs the statement under the cursor", false)],
+                ))
+                .child(widgets::with_keys(
+                    theme,
+                    &[("⇧⌘↵", true), ("runs everything", false)],
+                ))
+                .into_any_element(),
             Query::Idle => div()
                 .size_full()
                 .flex()
@@ -3651,7 +3792,7 @@ impl Workspace {
                 .child(
                     div()
                         .text_color(theme.t3)
-                        .child("Open a SQLite file (⌘O) or connect to Postgres (⌘N)."),
+                        .child("Open a database to get started."),
                 )
                 .into_any_element(),
         }

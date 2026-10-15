@@ -16,6 +16,7 @@ use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::Type;
 use tokio_postgres::{CancelToken, Client, Config, SimpleQueryMessage};
 use xenon_driver::{
+    Feed, Progress,
     CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
     QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
@@ -73,10 +74,20 @@ pub struct PostgresConnection {
 struct PgCancel {
     token: CancelToken,
     tls: MakeTlsConnector,
+    /// Set when the user cancels (not the row limit), so the rows read so far are kept.
+    user: std::sync::atomic::AtomicBool,
 }
 
 impl CancelHandle for PgCancel {
     fn cancel(&self) {
+        self.user.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stop();
+    }
+}
+
+impl PgCancel {
+    /// Ask the server to stop the running query.
+    fn stop(&self) {
         let token = self.token.clone();
         let tls = self.tls.clone();
         runtime().spawn(async move {
@@ -216,14 +227,22 @@ impl PostgresConnection {
                 cancel: Arc::new(PgCancel {
                     token: client.cancel_token(),
                     tls,
+                    user: Default::default(),
                 }),
                 client,
             })
         })
     }
 
-    async fn run(&self, sql: &str, row_limit: usize) -> Result<QueryResult> {
+    async fn run(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult> {
         let started = Instant::now();
+        self.cancel.user.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut feed = Feed::new(progress);
         // Prepare only to learn column types; multi-statement scripts can't be prepared.
         let types: Option<Vec<Type>> = self
             .client
@@ -243,6 +262,7 @@ impl PostgresConnection {
         let mut outcome = None;
         let mut current: Option<ResultSet> = None;
         let mut cancelled_for_limit = false;
+        let mut cancelled = false;
 
         while let Some(message) = stream.next().await {
             let message = match message {
@@ -252,10 +272,23 @@ impl PostgresConnection {
                 {
                     break;
                 }
+                // Stopped by the user while reading rows: keep what arrived.
+                Err(err)
+                    if err.code() == Some(&SqlState::QUERY_CANCELED)
+                        && self.cancel.user.load(std::sync::atomic::Ordering::SeqCst)
+                        && current.as_ref().is_some_and(|r| !r.rows.is_empty()) =>
+                {
+                    cancelled = true;
+                    if let Some(rows) = &mut current {
+                        rows.truncated = true;
+                    }
+                    break;
+                }
                 Err(err) => return Err(describe_error(err)),
             };
             match message {
                 SimpleQueryMessage::RowDescription(columns) => {
+                    feed.next_set();
                     current = Some(ResultSet {
                         columns: columns
                             .iter()
@@ -274,7 +307,7 @@ impl PostgresConnection {
                             // Stop the server instead of streaming rows we'd discard.
                             result.truncated = true;
                             cancelled_for_limit = true;
-                            self.cancel.cancel();
+                            self.cancel.stop();
                         }
                         continue;
                     }
@@ -283,6 +316,11 @@ impl PostgresConnection {
                             .map(|ix| row.get(ix).map_or(Value::Null, |v| Value::Text(v.into())))
                             .collect(),
                     );
+                    feed.read(result, |preview| {
+                        if let Some(types) = types.as_ref().filter(|t| t.len() == preview.columns.len()) {
+                            apply_types(preview, types);
+                        }
+                    });
                 }
                 SimpleQueryMessage::CommandComplete(count) => {
                     statements += 1;
@@ -311,6 +349,7 @@ impl PostgresConnection {
             outcome,
             statements,
             elapsed: started.elapsed(),
+            cancelled,
         })
     }
 }
@@ -328,8 +367,13 @@ impl Connection for PostgresConnection {
         self.version.clone()
     }
 
-    fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult> {
-        runtime().block_on(self.run(sql, row_limit))
+    fn execute_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult> {
+        runtime().block_on(self.run(sql, row_limit, progress))
     }
 
     fn introspect(&self) -> Result<Vec<Schema>> {

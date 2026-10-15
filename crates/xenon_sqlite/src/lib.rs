@@ -9,6 +9,7 @@ use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
 use xenon_driver::{
+    Feed, Progress,
     CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryOutcome, QueryResult,
     ResultSet, Schema, SchemaObject, Value,
 };
@@ -97,9 +98,16 @@ impl Connection for SqliteConnection {
         format!("sqlite {}", rusqlite::version())
     }
 
-    fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult> {
+    fn execute_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult> {
         let conn = self.lock()?;
         let started = Instant::now();
+        let mut feed = Feed::new(progress);
+        let mut cancelled = false;
         let mut batch = Batch::new(&conn, sql);
         let mut outcome = None;
         let mut statements = 0;
@@ -124,8 +132,23 @@ impl Connection for SqliteConnection {
                 columns,
                 ..Default::default()
             };
+            feed.next_set();
             let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
+            loop {
+                let row = match rows.next() {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    // Interrupted (cancel) while reading: keep the rows read.
+                    Err(rusqlite::Error::SqliteFailure(err, _))
+                        if err.code == rusqlite::ErrorCode::OperationInterrupted
+                            && !result.rows.is_empty() =>
+                    {
+                        cancelled = true;
+                        result.truncated = true;
+                        break;
+                    }
+                    Err(err) => return Err(err.into()),
+                };
                 if result.rows.len() == row_limit {
                     result.truncated = true;
                     break;
@@ -135,14 +158,19 @@ impl Connection for SqliteConnection {
                     values.push(to_value(row.get_ref(ix)?));
                 }
                 result.rows.push(values);
+                feed.read(&result, |_| {});
             }
             outcome = Some(QueryOutcome::Rows(result));
+            if cancelled {
+                break;
+            }
         }
 
         Ok(QueryResult {
             outcome: outcome.ok_or_else(|| anyhow!("nothing to run"))?,
             statements,
             elapsed: started.elapsed(),
+            cancelled,
         })
     }
 
@@ -242,6 +270,24 @@ mod tests {
             QueryOutcome::Rows(rows) => rows,
             other => panic!("expected rows, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn streaming_previews_first_rows_then_counts() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        let sql = "with recursive n(i) as (select 1 union all select i + 1 from n where i < 5000) select i from n";
+        let mut previews = Vec::new();
+        let mut counts = Vec::new();
+        let result = db
+            .execute_streaming(sql, 100_000, &mut |progress| match progress {
+                xenon_driver::Progress::Preview(rows) => previews.push(rows.rows.len()),
+                xenon_driver::Progress::Rows(n) => counts.push(n),
+            })
+            .unwrap();
+        assert_eq!(previews, vec![xenon_driver::PREVIEW_ROWS]);
+        assert!(counts.contains(&4_000));
+        assert!(!result.cancelled);
+        assert_eq!(rows(result).rows.len(), 5000);
     }
 
     #[test]

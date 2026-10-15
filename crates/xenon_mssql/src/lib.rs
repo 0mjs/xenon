@@ -17,6 +17,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt as _};
 use xenon_driver::{
+    Feed, Progress,
     CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
     QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
@@ -334,18 +335,40 @@ impl MssqlConnection {
         })
     }
 
+    /// Returns the outcome, statements run, whether the session must be
+    /// replaced (rows were left unread), and whether a cancel stopped it.
     async fn run(
         client: &mut Tds,
         sql: &str,
         row_limit: usize,
-    ) -> Result<(QueryOutcome, usize, bool)> {
+        feed: &mut Feed<'_>,
+        killed: &std::sync::atomic::AtomicBool,
+    ) -> Result<(QueryOutcome, usize, bool, bool)> {
         let mut stream = client.simple_query(sql).await.map_err(describe)?;
         let mut sets: Vec<ResultSet> = Vec::new();
         let mut types: Vec<ColumnType> = Vec::new();
         let mut over_limit = false;
-        while let Some(item) = stream.try_next().await.map_err(describe)? {
+        let mut cancelled = false;
+        loop {
+            let item = match stream.try_next().await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                // Killed by a cancel while reading rows: keep what arrived.
+                Err(_)
+                    if killed.load(std::sync::atomic::Ordering::SeqCst)
+                        && sets.last().is_some_and(|s| !s.rows.is_empty()) =>
+                {
+                    if let Some(set) = sets.last_mut() {
+                        set.truncated = true;
+                    }
+                    cancelled = true;
+                    break;
+                }
+                Err(err) => return Err(describe(err)),
+            };
             match item {
                 QueryItem::Metadata(meta) => {
+                    feed.next_set();
                     types = meta.columns().iter().map(|c| c.column_type()).collect();
                     sets.push(ResultSet {
                         columns: meta
@@ -372,10 +395,15 @@ impl MssqlConnection {
                             .map(|(data, ty)| convert(data, *ty))
                             .collect(),
                     );
+                    feed.read(set, |_| {});
                 }
             }
         }
         let statements = sets.len().max(1);
+        if cancelled {
+            let rows = sets.pop().expect("checked above");
+            return Ok((QueryOutcome::Rows(rows), statements, true, true));
+        }
         let outcome = match sets.pop() {
             Some(rows) => QueryOutcome::Rows(rows),
             None => {
@@ -393,7 +421,7 @@ impl MssqlConnection {
                 QueryOutcome::Affected(count.max(0) as u64)
             }
         };
-        Ok((outcome, statements, over_limit))
+        Ok((outcome, statements, over_limit, false))
     }
 }
 
@@ -410,8 +438,14 @@ impl Connection for MssqlConnection {
         self.version.clone()
     }
 
-    fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult> {
+    fn execute_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult> {
         let started = Instant::now();
+        let mut feed = Feed::new(progress);
         let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
         let killed = || {
             self.cancel
@@ -452,7 +486,7 @@ impl Connection for MssqlConnection {
                     .into_results()
                     .await
                     .map_err(describe)?;
-                let plan = Self::run(client, statement, row_limit).await;
+                let plan = Self::run(client, statement, row_limit, &mut feed, &self.cancel.killed).await;
                 client
                     .simple_query("set showplan_text off")
                     .await
@@ -462,19 +496,24 @@ impl Connection for MssqlConnection {
                     .map_err(describe)?;
                 plan
             } else {
-                Self::run(client, sql, row_limit).await
+                Self::run(client, sql, row_limit, &mut feed, &self.cancel.killed).await
             }
         });
         match result {
-            Ok((outcome, statements, over_limit)) => {
+            Ok((outcome, statements, over_limit, cancelled)) => {
                 if over_limit {
-                    // Unread rows would block the connection: end the session.
+                    // Unread rows would block the connection (or a cancel ended
+                    // the session): start a new one next time.
                     *guard = None;
+                }
+                if cancelled {
+                    killed();
                 }
                 Ok(QueryResult {
                     outcome,
                     statements,
                     elapsed: started.elapsed(),
+                    cancelled,
                 })
             }
             Err(_) if killed() => {

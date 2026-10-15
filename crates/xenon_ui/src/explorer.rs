@@ -141,10 +141,7 @@ impl Workspace {
                         .opacity(0.6)
                         .group_hover(group, |s| s.opacity(1.))
                         .hover(|s| s.bg(theme.raised))
-                        .tooltip(|window, cx| {
-                            gpui_component::tooltip::Tooltip::new("Disconnect  ⇧⌘W")
-                                .build(window, cx)
-                        })
+                        .tooltip(crate::widgets::tooltip("Disconnect", "⇧⌘W"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.close_session(id, window, cx);
