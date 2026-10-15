@@ -341,12 +341,13 @@ impl SqliteConnection {
         let mut cancelled = false;
         let mut batch = Batch::new(&conn, sql);
         let mut outcome = None;
+        let mut earlier = Vec::new();
         let mut statements = 0;
 
         while let Some(mut stmt) = batch.next()? {
             statements += 1;
             if stmt.column_count() == 0 {
-                outcome = Some(QueryOutcome::Affected(stmt.execute([])? as u64));
+                earlier.extend(outcome.replace(QueryOutcome::Affected(stmt.execute([])? as u64)));
                 continue;
             }
 
@@ -395,7 +396,7 @@ impl SqliteConnection {
                 result.rows.push(values);
                 feed.read(&result, |_| {});
             }
-            outcome = Some(QueryOutcome::Rows(result));
+            earlier.extend(outcome.replace(QueryOutcome::Rows(result)));
             if cancelled {
                 break;
             }
@@ -403,6 +404,7 @@ impl SqliteConnection {
 
         Ok(QueryResult {
             outcome: outcome.ok_or_else(|| anyhow!("nothing to run"))?,
+            earlier,
             statements,
             elapsed: started.elapsed(),
             cancelled,

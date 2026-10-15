@@ -458,6 +458,48 @@ fn snapshots() {
             );
         });
         shot.save(&format!("38-reconnected-{suffix}"));
+        // A script of two queries: a tab for each result, the last one shown.
+        let mut back_to = 0;
+        shot.act(|w, window, cx| {
+            back_to = w.active;
+            let session = w.active_tab().session;
+            w.add_tab(None, session, window, cx);
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(
+                    "select status, count(*) as orders from orders group by status order by 1;\n\
+                     select id, total from orders order by total desc limit 5;",
+                    window,
+                    cx,
+                )
+            });
+            w.run(RunScope::All, window, cx);
+        });
+        assert!(shot.settle(10, |w| !w.is_running()));
+        shot.act(|w, _, cx| {
+            let tab = w.active_tab();
+            assert_eq!(tab.sets.len(), 2, "{:?}", w.error_text());
+            assert_eq!(tab.shown_set, 1);
+            let columns = |w: &Workspace| {
+                w.active_tab()
+                    .grid
+                    .as_ref()
+                    .unwrap()
+                    .data
+                    .columns
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(columns(w), ["id", "total"]);
+            w.show_set(0, cx);
+            assert_eq!(columns(w), ["status", "orders"]);
+        });
+        shot.save(&format!("39-result-sets-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.close_tab_at(w.active, window, cx);
+            w.activate_tab(back_to, window, cx);
+        });
         // The Classic layout, solid: the original edge-to-edge design.
         shot.act(|w, window, cx| {
             let prefs = crate::settings::Prefs {

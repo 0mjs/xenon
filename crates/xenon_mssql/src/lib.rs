@@ -353,7 +353,7 @@ impl MssqlConnection {
         row_limit: usize,
         feed: &mut Feed<'_>,
         killed: &std::sync::atomic::AtomicBool,
-    ) -> Result<(QueryOutcome, usize, bool, bool)> {
+    ) -> Result<(QueryOutcome, Vec<QueryOutcome>, usize, bool, bool)> {
         // Stopping at the row limit ends the session, which would roll back a
         // transaction the user has open: then the rest is read and dropped instead.
         let in_transaction = client
@@ -431,9 +431,12 @@ impl MssqlConnection {
         let statements = sets.len().max(1);
         if cancelled {
             let rows = sets.pop().expect("checked above");
-            return Ok((QueryOutcome::Rows(rows), statements, true, true));
+            let earlier = sets.into_iter().map(QueryOutcome::Rows).collect();
+            return Ok((QueryOutcome::Rows(rows), earlier, statements, true, true));
         }
-        let outcome = match sets.pop() {
+        let last = sets.pop();
+        let earlier = sets.into_iter().map(QueryOutcome::Rows).collect();
+        let outcome = match last {
             Some(rows) => QueryOutcome::Rows(rows),
             None => {
                 drop(stream);
@@ -452,7 +455,7 @@ impl MssqlConnection {
                 QueryOutcome::Affected(count.max(0) as u64)
             }
         };
-        Ok((outcome, statements, over_limit, false))
+        Ok((outcome, earlier, statements, over_limit, false))
     }
 }
 
@@ -543,7 +546,7 @@ impl Connection for MssqlConnection {
             }
         });
         match result {
-            Ok((outcome, statements, over_limit, cancelled)) => {
+            Ok((outcome, earlier, statements, over_limit, cancelled)) => {
                 if over_limit {
                     // Unread rows would block the connection (or a cancel ended
                     // the session): start a new one next time.
@@ -554,6 +557,7 @@ impl Connection for MssqlConnection {
                 }
                 Ok(QueryResult {
                     outcome,
+                    earlier,
                     statements,
                     elapsed: started.elapsed(),
                     cancelled,

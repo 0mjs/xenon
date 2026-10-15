@@ -66,6 +66,8 @@ const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
+/// Results kept from one script; later ones are left out.
+const MAX_RESULT_SETS: usize = 50;
 /// The space between the cards the window is laid out in.
 const CARD_GAP: f32 = 8.;
 const CARD_RADIUS: f32 = 12.;
@@ -412,7 +414,7 @@ pub(crate) struct Tab {
     pub(crate) saved_query: Option<i64>,
     pub(crate) editor: Entity<EditorState>,
     query: Query,
-    grid: Option<Grid>,
+    pub(crate) grid: Option<Grid>,
     selection: Option<Selection>,
     /// Widths the user dragged, by column name; kept across re-runs.
     column_widths: HashMap<String, f32>,
@@ -430,6 +432,11 @@ pub(crate) struct Tab {
     fetched: usize,
     /// The grid shows the running query's first rows.
     previewing: bool,
+    /// Every result with rows from the last script, when it returned several:
+    /// one slot each, empty for the one in `grid`.
+    pub(crate) sets: Vec<Option<Grid>>,
+    /// Which of `sets` is in `grid`.
+    pub(crate) shown_set: usize,
     /// Set when the production time limit stopped the running query.
     timed_out: Option<std::time::Duration>,
     /// The last SQL run here and where it began in the editor, for "Fetch all".
@@ -819,6 +826,8 @@ impl Workspace {
             saving: false,
             fetched: 0,
             previewing: false,
+            sets: Vec::new(),
+            shown_set: 0,
             last_run: None,
             saved_query: None,
             timed_out: None,
@@ -904,7 +913,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // A tab's query stops with it, except on SQL Server inside a transaction,
         // where stopping it would end the session and roll the transaction back.
         let ends_session = self.tabs[index]
@@ -2169,6 +2183,7 @@ impl Workspace {
         tab.flash = None;
         tab.fetched = 0;
         tab.previewing = false;
+        tab.sets.clear();
         tab.last_run = Some((last_sql, origin));
         tab.query = Query::Running {
             run,
@@ -2202,6 +2217,16 @@ impl Workspace {
         tab.editing = None;
         match result {
             Ok(mut result) => {
+                // A script with several results: each set of rows gets a tab.
+                let mut earlier: Vec<Grid> = std::mem::take(&mut result.earlier)
+                    .into_iter()
+                    .filter_map(|outcome| match outcome {
+                        QueryOutcome::Rows(rows) => Some(Grid::new(rows)),
+                        QueryOutcome::Affected(_) => None,
+                    })
+                    .take(MAX_RESULT_SETS - 1)
+                    .collect();
+                tab.sets.clear();
                 if let QueryOutcome::Rows(rows) = &mut result.outcome {
                     let started = std::time::Instant::now();
                     let mut grid = Grid::new(std::mem::take(rows));
@@ -2214,8 +2239,17 @@ impl Workspace {
                     tab.grid = Some(grid);
                     crate::trace("build results grid", started);
                     result.outcome = QueryOutcome::Rows(Default::default());
+                    if !earlier.is_empty() {
+                        tab.shown_set = earlier.len();
+                        tab.sets = earlier.into_iter().map(Some).chain([None]).collect();
+                    }
                 } else {
-                    tab.grid = None;
+                    // Ended with a statement that changes rows: show the last rows.
+                    tab.grid = earlier.pop();
+                    if !earlier.is_empty() {
+                        tab.shown_set = earlier.len();
+                        tab.sets = earlier.into_iter().map(Some).chain([None]).collect();
+                    }
                 }
                 if result.cancelled && tab.timed_out.is_some() {
                     tab.flash = Some((time_limit_note(tab.timed_out).into(), true));
@@ -4412,6 +4446,7 @@ impl Workspace {
                         ),
                         None => el
                             .child(self.render_results_bar(theme, cx))
+                            .children(self.render_result_sets(theme, cx))
                             .children(self.render_edit_bar(theme, cx))
                             .child(
                                 div()
@@ -4699,6 +4734,81 @@ impl Workspace {
 
     /// The cell being edited: its column, its value in the editor its type
     /// calls for, and what to do with it.
+    /// Tabs for each result of a script that returned several.
+    fn render_result_sets(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tab = self.active_tab();
+        if tab.sets.len() < 2 {
+            return None;
+        }
+        let rows = |ix: usize| {
+            let grid = if ix == tab.shown_set {
+                tab.grid.as_ref()
+            } else {
+                tab.sets[ix].as_ref()
+            };
+            grid.map_or(0, |g| g.data.rows.len())
+        };
+        Some(
+            div()
+                .id("result-sets")
+                .flex()
+                .flex_none()
+                .gap(px(4.))
+                .px(px(10.))
+                .py(px(6.))
+                .overflow_x_scroll()
+                .border_b_1()
+                .border_color(theme.line_2)
+                .children((0..tab.sets.len()).map(|ix| {
+                    let on = ix == tab.shown_set;
+                    let count = rows(ix);
+                    div()
+                        .id(("result-set", ix))
+                        .flex_none()
+                        .h(px(24.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .rounded(px(RADIUS_CONTROL))
+                        .cursor_pointer()
+                        .when(on, |el| el.bg(theme.s3).text_color(theme.text))
+                        .when(!on, |el| {
+                            el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| this.show_set(ix, cx)))
+                        .child(format!("Result {}", ix + 1))
+                        .child(
+                            div()
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.5))
+                                .text_color(theme.t3)
+                                .child(format!(
+                                    "{} {}",
+                                    group_digits(count),
+                                    if count == 1 { "row" } else { "rows" }
+                                )),
+                        )
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Show another of the last script's results.
+    pub(crate) fn show_set(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let tab = &mut self.tabs[self.active];
+        if ix == tab.shown_set || ix >= tab.sets.len() || !tab.edits.is_empty() {
+            return;
+        }
+        let shown = tab.shown_set;
+        tab.sets[shown] = tab.grid.take();
+        tab.grid = tab.sets[ix].take();
+        tab.shown_set = ix;
+        tab.selection = None;
+        tab.editing = None;
+        cx.notify();
+    }
+
     fn render_edit_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::value_editor::ValueKind;
         let tab = self.active_tab();
@@ -5052,7 +5162,7 @@ impl Workspace {
             Query::Done(result) => (
                 theme.ok,
                 match (&result.outcome, &tab.grid) {
-                    (QueryOutcome::Rows(_), Some(grid)) => {
+                    (_, Some(grid)) => {
                         let count = group_digits(grid.data.rows.len());
                         let noun = if grid.data.rows.len() == 1 {
                             "row"

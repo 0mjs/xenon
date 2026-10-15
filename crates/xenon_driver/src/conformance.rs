@@ -36,7 +36,7 @@ type Check = fn(&dyn Connection, &Dialect) -> Result<()>;
 
 /// Run every check, then fail with the list of those that didn't pass.
 pub fn run(conn: &dyn Connection, dialect: &Dialect) {
-    let checks: [(&str, Check); 13] = [
+    let checks: [(&str, Check); 14] = [
         (
             "a read-only transaction refuses writes",
             read_only_transaction,
@@ -58,6 +58,10 @@ pub fn run(conn: &dyn Connection, dialect: &Dialect) {
         (
             "a refused statement doesn't count as a lost connection",
             alive_after_errors,
+        ),
+        (
+            "each statement of a script keeps its result",
+            several_results,
         ),
     ];
     let mut failed = Vec::new();
@@ -529,6 +533,39 @@ fn introspect(conn: &dyn Connection, d: &Dialect) -> Result<()> {
     let columns: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
     ensure!(columns == ["id", "name"], "columns: {columns:?}");
     ensure!(table.columns[0].primary_key, "id isn't marked primary");
+    Ok(())
+}
+
+/// A script of several queries returns every result, in order, not just the last.
+fn several_results(conn: &dyn Connection, _: &Dialect) -> Result<()> {
+    let done = conn.execute("select 1 as a; select 2 as b, 3 as c", 100)?;
+    let first = match done.earlier.as_slice() {
+        [QueryOutcome::Rows(first)] => first,
+        other => bail!("expected one earlier result, got {other:?}"),
+    };
+    let QueryOutcome::Rows(last) = &done.outcome else {
+        bail!("expected rows last, got {:?}", done.outcome);
+    };
+    let names = |set: &ResultSet| {
+        set.columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>()
+    };
+    ensure!(
+        names(first) == ["a"],
+        "first result's columns: {:?}",
+        names(first)
+    );
+    ensure!(
+        names(last) == ["b", "c"],
+        "last result's columns: {:?}",
+        names(last)
+    );
+    ensure!(
+        first.rows.len() == 1 && last.rows.len() == 1,
+        "one row each"
+    );
     Ok(())
 }
 

@@ -89,6 +89,8 @@ pub enum QueryOutcome {
 pub struct QueryResult {
     /// Outcome of the last statement executed.
     pub outcome: QueryOutcome,
+    /// Outcomes of the statements before it, in order (a script of several).
+    pub earlier: Vec<QueryOutcome>,
     /// How many statements ran.
     pub statements: usize,
     pub elapsed: Duration,

@@ -284,6 +284,7 @@ impl PostgresConnection {
 
         let mut statements = 0;
         let mut outcome = None;
+        let mut earlier = Vec::new();
         let mut current: Option<ResultSet> = None;
         let mut cancelled_for_limit = false;
         let mut limit_stop = None;
@@ -365,10 +366,10 @@ impl PostgresConnection {
                 }
                 SimpleQueryMessage::CommandComplete(count) => {
                     statements += 1;
-                    outcome = Some(match current.take() {
+                    earlier.extend(outcome.replace(match current.take() {
                         Some(rows) => QueryOutcome::Rows(rows),
                         None => QueryOutcome::Affected(count),
-                    });
+                    }));
                 }
                 _ => {}
             }
@@ -386,7 +387,7 @@ impl PostgresConnection {
         if let Some(rows) = current.take() {
             // Cut short by the row limit: no CommandComplete arrives.
             statements += 1;
-            outcome = Some(QueryOutcome::Rows(rows));
+            earlier.extend(outcome.replace(QueryOutcome::Rows(rows)));
         }
 
         let mut outcome = outcome.ok_or_else(|| anyhow!("nothing to run"))?;
@@ -398,6 +399,7 @@ impl PostgresConnection {
 
         Ok(QueryResult {
             outcome,
+            earlier,
             statements,
             elapsed: started.elapsed(),
             cancelled,

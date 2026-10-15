@@ -174,6 +174,7 @@ impl DuckDbConnection {
         let mut feed = Feed::new(progress);
         let writes = xenon_driver::sql::writes(sql);
         let mut outcome = None;
+        let mut earlier = Vec::new();
         let mut statements = 0;
         let mut cancelled = false;
 
@@ -203,7 +204,7 @@ impl DuckDbConnection {
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if width == 0 {
-                outcome = Some(QueryOutcome::Affected(0));
+                earlier.extend(outcome.replace(QueryOutcome::Affected(0)));
                 continue;
             }
             if width == 1
@@ -217,7 +218,7 @@ impl DuckDbConnection {
                     },
                     None => 0,
                 };
-                outcome = Some(QueryOutcome::Affected(count));
+                earlier.extend(outcome.replace(QueryOutcome::Affected(count)));
                 continue;
             }
 
@@ -254,13 +255,14 @@ impl DuckDbConnection {
                 result.rows.push(values);
                 feed.read(&result, |_| {});
             }
-            outcome = Some(QueryOutcome::Rows(result));
+            earlier.extend(outcome.replace(QueryOutcome::Rows(result)));
             if cancelled {
                 break;
             }
         }
         Ok(QueryResult {
             outcome: outcome.ok_or_else(|| anyhow!("no statement to run"))?,
+            earlier,
             statements,
             elapsed: started.elapsed(),
             cancelled,

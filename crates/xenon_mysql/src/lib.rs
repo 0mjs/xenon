@@ -343,13 +343,14 @@ impl Connection for MysqlConnection {
 
         let mut statements = 0;
         let mut outcome = None;
+        let mut earlier = Vec::new();
         let mut cancelled_for_limit = false;
         while let Some(set) = result.iter() {
             statements += 1;
             let columns: Vec<mysql::Column> = set.columns().as_ref().to_vec();
             let affected = set.affected_rows();
             if columns.is_empty() {
-                outcome = Some(QueryOutcome::Affected(affected));
+                earlier.extend(outcome.replace(QueryOutcome::Affected(affected)));
                 continue;
             }
             let mut rows = ResultSet {
@@ -405,7 +406,7 @@ impl Connection for MysqlConnection {
                 );
                 feed.read(&rows, |_| {});
             }
-            outcome = Some(QueryOutcome::Rows(rows));
+            earlier.extend(outcome.replace(QueryOutcome::Rows(rows)));
             if cancelled {
                 break;
             }
@@ -435,6 +436,7 @@ impl Connection for MysqlConnection {
         let cancelled = cancelled || self.cancel.user.load(std::sync::atomic::Ordering::SeqCst);
         Ok(QueryResult {
             outcome,
+            earlier,
             statements,
             elapsed: started.elapsed(),
             cancelled,
