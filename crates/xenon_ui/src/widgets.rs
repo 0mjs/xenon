@@ -512,8 +512,10 @@ pub fn engine_badge(theme: &Theme, engine: Engine, available: bool) -> gpui::Div
 pub fn tree_row(depth: usize) -> gpui::Div {
     div()
         .h(px(24.))
-        .pl(px(12. + depth as f32 * 12.))
-        .pr(px(12.))
+        .mx(px(6.))
+        .rounded(px(6.))
+        .pl(px(6. + depth as f32 * 12.))
+        .pr(px(6.))
         .flex()
         .flex_row()
         .items_center()

@@ -67,6 +67,8 @@ const MIN_RESULTS_HEIGHT: f32 = 180.;
 /// The space between the cards the window is laid out in.
 const CARD_GAP: f32 = 8.;
 const CARD_RADIUS: f32 = 12.;
+/// Seconds the side panel takes to slide open or shut.
+const SIDE_PANEL_SLIDE: f32 = 0.18;
 const TAB_MAX_WIDTH: f32 = 240.;
 /// Rows from which sorting by an unindexed column asks first.
 const LARGE_TABLE: u64 = 1_000_000;
@@ -540,6 +542,8 @@ pub struct Workspace {
     pub(crate) saved: Vec<SavedConnection>,
     pub(crate) explorer_filter: Entity<InputState>,
     show_side_panel: bool,
+    /// When the side panel last opened or closed, to slide it.
+    side_panel_since: Option<std::time::Instant>,
     show_inspector: bool,
     pub(crate) _subscriptions: Vec<Subscription>,
     /// The Saved panel: queries matching its filter.
@@ -653,6 +657,7 @@ impl Workspace {
             saved: Vec::new(),
             explorer_filter,
             show_side_panel: true,
+            side_panel_since: None,
             show_inspector: true,
             _subscriptions: vec![
                 appearance,
@@ -3506,9 +3511,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.show_side_panel && self.side_panel == panel {
-            self.show_side_panel = false;
+            self.set_side_panel(false);
         } else {
-            self.show_side_panel = true;
+            self.set_side_panel(true);
             self.side_panel = panel;
             if panel == SidePanel::History {
                 self.reload_history(cx);
@@ -3533,8 +3538,31 @@ impl Workspace {
     }
 
     fn toggle_explorer(&mut self, _: &ToggleExplorer, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_side_panel = !self.show_side_panel;
+        self.set_side_panel(!self.show_side_panel);
         cx.notify();
+    }
+
+    fn set_side_panel(&mut self, show: bool) {
+        if show != self.show_side_panel {
+            self.show_side_panel = show;
+            self.side_panel_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// How far open the side panel is, from 0 to 1, easing as it slides.
+    fn side_panel_open(&self, window: &Window) -> f32 {
+        let progress = self.side_panel_since.map_or(1., |since| {
+            (since.elapsed().as_secs_f32() / SIDE_PANEL_SLIDE).min(1.)
+        });
+        if progress < 1. {
+            window.request_animation_frame();
+        }
+        let eased = 1. - (1. - progress).powi(3);
+        if self.show_side_panel {
+            eased
+        } else {
+            1. - eased
+        }
     }
 
     fn toggle_inspector(&mut self, _: &ToggleInspector, _: &mut Window, cx: &mut Context<Self>) {
@@ -3580,20 +3608,33 @@ impl Render for Workspace {
         };
         let theme = cx.theme().clone();
 
+        let open = self.side_panel_open(window);
         let body = div()
             .flex()
             .flex_row()
             .flex_1()
             .min_h(px(0.))
-            .gap(px(CARD_GAP))
             .pr(px(CARD_GAP))
             .pb(px(CARD_GAP))
             .child(self.render_rail(&theme, cx))
-            .when(self.show_side_panel, |el| {
-                el.child(self.render_side_panel(&theme, cx))
+            .when(open > 0., |el| {
+                let panel = self.render_side_panel(&theme, cx);
+                el.child(if open < 1. {
+                    // Sliding: clip the panel at its full width as the space grows.
+                    div()
+                        .w(px((self.side_panel_width + CARD_GAP) * open))
+                        .flex_none()
+                        .overflow_hidden()
+                        .opacity(open)
+                        .child(panel)
+                        .into_any_element()
+                } else {
+                    panel.into_any_element()
+                })
             })
             .child(
                 card(&theme)
+                    .when(open >= 1., |el| el.ml(px(CARD_GAP)))
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
@@ -3842,8 +3883,9 @@ impl Workspace {
             .child(
                 div()
                     .id("toggle-side-panel")
-                    .h_full()
-                    .px(px(10.))
+                    .size(px(28.))
+                    .mr(px(4.))
+                    .justify_center()
                     .flex()
                     .flex_none()
                     .items_center()
@@ -3872,6 +3914,8 @@ impl Workspace {
                         .h_full()
                         .flex()
                         .flex_row()
+                        .items_center()
+                        .gap(px(2.))
                         .min_w(px(0.))
                         .overflow_x_scroll()
                         .children(tabs),
