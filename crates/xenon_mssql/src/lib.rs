@@ -17,9 +17,8 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt as _};
 use xenon_driver::{
-    Feed, Progress,
-    CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
-    QueryResult, ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, Connection, Feed, ObjectColumn, ObjectKind, Progress, QueryError,
+    QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -486,7 +485,8 @@ impl Connection for MssqlConnection {
                     .into_results()
                     .await
                     .map_err(describe)?;
-                let plan = Self::run(client, statement, row_limit, &mut feed, &self.cancel.killed).await;
+                let plan =
+                    Self::run(client, statement, row_limit, &mut feed, &self.cancel.killed).await;
                 client
                     .simple_query("set showplan_text off")
                     .await

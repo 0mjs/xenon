@@ -44,12 +44,12 @@ use crate::widgets::{
     pretty_json,
 };
 use crate::{
-    AddRow, CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, DeleteRows,
-    DiscardEdits, EditCell, Explain, ExtendDown, ExtendLeft, ExtendRight, ExtendUp, FocusEditor,
-    MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection, NewTab, NextTab, OpenFile, OpenPalette,
-    OpenSettings, PrevTab, Quit, RunAll, RunQuery, SaveEdits, SelectAllCells, ShowConnections,
-    ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme,
-    UseSystemTheme,
+    AddRow, CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopyMarkdown, CopySelection,
+    CopySql, DeleteRows, DiscardEdits, EditCell, Explain, ExportResults, ExtendDown, ExtendLeft,
+    ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection,
+    NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab, Quit, RunAll, RunQuery,
+    SaveEdits, SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer,
+    ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -418,6 +418,10 @@ pub struct Workspace {
     side_panel: SidePanel,
     grid_focus: FocusHandle,
     drag: Option<Drag>,
+    /// The Export format menu is open.
+    pub(crate) export_menu: bool,
+    /// Where the last export was saved.
+    export_dir: Option<std::path::PathBuf>,
     /// A failed query's error position, applied to the editor on the next frame.
     pending_error_jump: Option<(usize, usize, usize)>,
     first_frame_traced: bool,
@@ -514,6 +518,8 @@ impl Workspace {
             side_panel: SidePanel::Explorer,
             grid_focus: cx.focus_handle(),
             drag: None,
+            export_menu: false,
+            export_dir: None,
             pending_error_jump: None,
             first_frame_traced: false,
             bench_pending_sql: None,
@@ -1515,7 +1521,12 @@ impl Workspace {
                         if !matches!(tab.query, Query::Running { run: r, .. } if r == run) {
                             return;
                         }
-                        if let Some(rows) = live.preview.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        if let Some(rows) = live
+                            .preview
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take()
+                        {
                             tab.grid = Some(Grid::new(rows));
                             tab.selection = None;
                             tab.previewing = true;
@@ -2320,9 +2331,105 @@ impl Workspace {
             .rows()
             .map(|r| selection.columns().map(|c| &grid.row(r)[c]).collect())
             .collect();
-        cx.write_to_clipboard(ClipboardItem::new_string(export::render(
-            format, &columns, &rows,
+        let target = self.sql_target();
+        let ident = |name: &str| {
+            target
+                .as_ref()
+                .map_or(name.to_string(), |(_, c)| c.ident(name))
+        };
+        let literal = |value: &xenon_driver::Value| {
+            target
+                .as_ref()
+                .map_or_else(|| value.display().into_owned(), |(_, c)| c.literal(value))
+        };
+        let sql = target.as_ref().map(|(table, _)| export::Sql {
+            table: table.clone(),
+            ident: &ident,
+            literal: &literal,
+        });
+        cx.write_to_clipboard(ClipboardItem::new_string(export::render_sql(
+            format,
+            &columns,
+            &rows,
+            sql.as_ref(),
         )));
+    }
+
+    /// The table SQL inserts from the active tab go into, quoted for its
+    /// connection, and that connection. Query results go into `results`.
+    fn sql_target(&self) -> Option<(String, Arc<dyn xenon_driver::Connection>)> {
+        let conn = self.active_session()?.conn.clone();
+        let table = match &self.active_tab().browse {
+            Some(browse) => {
+                let table = conn.ident(&browse.table);
+                if conn.default_schema().as_deref() == Some(browse.schema.as_str()) {
+                    table
+                } else {
+                    format!("{}.{table}", conn.ident(&browse.schema))
+                }
+            }
+            None => "results".to_string(),
+        };
+        Some((table, conn))
+    }
+
+    /// Save the active tab's whole result, in the order shown, to a file the user picks.
+    fn export(&mut self, format: crate::export::FileFormat, cx: &mut Context<Self>) {
+        self.export_menu = false;
+        let tab = self.active_tab();
+        let Some(grid) = &tab.grid else { return };
+        let tab_id = tab.id;
+        let name = tab
+            .browse
+            .as_ref()
+            .map_or("results".to_string(), |browse| browse.table.clone());
+        let job = crate::export::Job {
+            data: grid.data.clone(),
+            order: grid.order(),
+            sql: self.sql_target(),
+        };
+        let truncated = grid.data.truncated;
+        let dir = self
+            .export_dir
+            .clone()
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| "/".into());
+        let picked = cx.prompt_for_new_path(&dir, Some(&format!("{name}.{}", format.extension())));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = picked.await else {
+                return;
+            };
+            let target = path.clone();
+            let saved = cx
+                .background_spawn(async move { crate::export::save(&job, format, &target) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.export_dir = path.parent().map(Into::into);
+                let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id) else {
+                    return;
+                };
+                let file = path
+                    .file_name()
+                    .map_or_else(Default::default, |f| f.to_string_lossy());
+                tab.flash = Some(match saved {
+                    Ok(rows) => {
+                        let noun = if rows == 1 { "row" } else { "rows" };
+                        let first = if truncated { "the first " } else { "" };
+                        (
+                            format!("Exported {first}{} {noun} to {file}", group_digits(rows))
+                                .into(),
+                            false,
+                        )
+                    }
+                    Err(err) => (format!("{err:#}").into(), true),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     fn drag_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2412,7 +2519,7 @@ impl Workspace {
         }
         // Keys are listed here rather than looked up: several bindings only
         // apply inside the editor or grid, which the palette's focus isn't.
-        let commands: [(&str, &str, Box<dyn gpui::Action>); 27] = [
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 30] = [
             ("Run Statement", "⌘↵", Box::new(RunQuery)),
             ("Run All", "⇧⌘↵", Box::new(RunAll)),
             ("Explain", "⌘E", Box::new(Explain)),
@@ -2435,6 +2542,9 @@ impl Workspace {
             ("Toggle Inspector", "⌘I", Box::new(ToggleInspector)),
             ("Copy Cells as CSV", "⇧⌘C", Box::new(CopyCsv)),
             ("Copy Cells as JSON", "⌥⌘C", Box::new(CopyJson)),
+            ("Copy Cells as Markdown", "", Box::new(CopyMarkdown)),
+            ("Copy Cells as SQL Inserts", "", Box::new(CopySql)),
+            ("Export Results…", "⇧⌘S", Box::new(ExportResults)),
             ("Theme: Match System", "", Box::new(UseSystemTheme)),
             ("Theme: Light", "", Box::new(UseLightTheme)),
             ("Theme: Dark", "", Box::new(UseDarkTheme)),
@@ -2679,6 +2789,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy(Format::Tsv, cx)))
             .on_action(cx.listener(|this, _: &CopyCsv, _, cx| this.copy(Format::Csv, cx)))
             .on_action(cx.listener(|this, _: &CopyJson, _, cx| this.copy(Format::Json, cx)))
+            .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy(Format::Markdown, cx)))
+            .on_action(cx.listener(|this, _: &CopySql, _, cx| this.copy(Format::Sql, cx)))
+            .on_action(cx.listener(|this, _: &ExportResults, _, cx| {
+                if this.active_tab().grid.is_some() {
+                    this.export_menu = !this.export_menu;
+                    cx.notify();
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &FocusEditor, window, cx| this.focus_editor(window, cx)),
             )
@@ -3572,6 +3690,11 @@ impl Workspace {
                 facts.push(format!("{} statements", result.statements).into());
             }
         }
+        let can_export = matches!(tab.query, Query::Done(_) | Query::Idle)
+            && tab
+                .grid
+                .as_ref()
+                .is_some_and(|grid| !grid.data.columns.is_empty());
         // A capped query result can be run again keeping every row.
         let can_fetch_all = tab.browse.is_none()
             && tab.last_run.is_some()
@@ -3624,6 +3747,106 @@ impl Workspace {
             })
             .child(div().flex_1())
             .child(self.render_edit_status(theme, cx))
+            .when(can_export, |el| el.child(self.render_export(theme, cx)))
+    }
+
+    /// The Export button and, when open, its menu of formats.
+    fn render_export(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let truncated = self
+            .active_tab()
+            .grid
+            .as_ref()
+            .is_some_and(|grid| grid.data.truncated);
+        let menu = widgets::overlay_panel(theme)
+            .id("export-menu")
+            .occlude()
+            .w(px(200.))
+            .p(px(4.))
+            .text_size(px(12.5))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.export_menu = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .px(px(8.))
+                    .pt(px(4.))
+                    .pb(px(6.))
+                    .text_size(px(11.))
+                    .text_color(theme.t3)
+                    .child("Export results as"),
+            )
+            .children(crate::export::FORMATS.iter().map(|&(format, label)| {
+                div()
+                    .id(label)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(26.))
+                    .px(px(8.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_color(theme.text)
+                    .hover(|el| el.bg(theme.s2))
+                    .child(label)
+                    .child(
+                        div()
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.))
+                            .text_color(theme.t3)
+                            .child(format!(".{}", format.extension())),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.export(format, cx)))
+            }))
+            .when(truncated, |el| {
+                el.child(
+                    div()
+                        .mt(px(4.))
+                        .px(px(8.))
+                        .py(px(6.))
+                        .border_t_1()
+                        .border_color(theme.line)
+                        .text_size(px(11.))
+                        .text_color(theme.t3)
+                        .child("Only the rows loaded are exported. Fetch all first to export every row."),
+                )
+            });
+        div()
+            .relative()
+            .child(
+                div()
+                    .id("export")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(22.))
+                    .px(px(8.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .text_color(theme.t2)
+                    .hover(|el| el.bg(theme.s2).text_color(theme.text))
+                    .when(self.export_menu, |el| {
+                        el.bg(theme.s2).text_color(theme.text)
+                    })
+                    .child(
+                        gpui::svg()
+                            .path(assets::icon("download"))
+                            .size(px(13.))
+                            .text_color(theme.t2),
+                    )
+                    .child("Export")
+                    .tooltip(|window, cx| widgets::tooltip("Export results", "⇧⌘S")(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.export_menu = !this.export_menu;
+                        cx.notify();
+                    })),
+            )
+            .when(self.export_menu, |el| {
+                el.child(gpui::deferred(
+                    div().absolute().top(px(26.)).right_0().child(menu),
+                ))
+            })
     }
 
     fn render_results(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {

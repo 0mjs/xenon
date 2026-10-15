@@ -12,9 +12,8 @@ use mysql::consts::{ColumnFlags, ColumnType};
 use mysql::prelude::Queryable as _;
 use mysql::{Conn, Opts, OptsBuilder, SslOpts};
 use xenon_driver::{
-    Feed, Progress,
-    CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
-    QueryResult, ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, Connection, Feed, ObjectColumn, ObjectKind, Progress, QueryError,
+    QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -303,7 +302,9 @@ impl Connection for MysqlConnection {
         let started = Instant::now();
         let mut feed = Feed::new(progress);
         let mut cancelled = false;
-        self.cancel.user.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cancel
+            .user
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut conn = self.lock();
         let mut result = conn
             .query_iter(sql)

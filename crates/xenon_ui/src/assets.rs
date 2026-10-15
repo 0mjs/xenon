@@ -24,6 +24,7 @@ icons![
     "db-mysql",
     "db-postgresql",
     "db-sqlite",
+    "download",
     "eye",
     "folder-search",
     "panel-left-close",

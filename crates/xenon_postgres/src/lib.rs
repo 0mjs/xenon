@@ -16,9 +16,8 @@ use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::Type;
 use tokio_postgres::{CancelToken, Client, Config, SimpleQueryMessage};
 use xenon_driver::{
-    Feed, Progress,
-    CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryError, QueryOutcome,
-    QueryResult, ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, Connection, Feed, ObjectColumn, ObjectKind, Progress, QueryError,
+    QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -241,7 +240,9 @@ impl PostgresConnection {
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
         let started = Instant::now();
-        self.cancel.user.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cancel
+            .user
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut feed = Feed::new(progress);
         // Prepare only to learn column types; multi-statement scripts can't be prepared.
         let types: Option<Vec<Type>> = self
@@ -317,7 +318,9 @@ impl PostgresConnection {
                             .collect(),
                     );
                     feed.read(result, |preview| {
-                        if let Some(types) = types.as_ref().filter(|t| t.len() == preview.columns.len()) {
+                        if let Some(types) =
+                            types.as_ref().filter(|t| t.len() == preview.columns.len())
+                        {
                             apply_types(preview, types);
                         }
                     });

@@ -9,9 +9,8 @@ use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
 use xenon_driver::{
-    Feed, Progress,
-    CancelHandle, Column, Connection, ObjectColumn, ObjectKind, QueryOutcome, QueryResult,
-    ResultSet, Schema, SchemaObject, Value,
+    CancelHandle, Column, Connection, Feed, ObjectColumn, ObjectKind, Progress, QueryOutcome,
+    QueryResult, ResultSet, Schema, SchemaObject, Value,
 };
 
 pub struct SqliteConnection {

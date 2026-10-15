@@ -1,4 +1,6 @@
-//! Turning a block of result cells into text for the clipboard.
+//! Turning result cells into text: for the clipboard, or a whole result for a file.
+
+use std::io::{self, Write};
 
 use crate::{Column, Value};
 
@@ -10,16 +12,110 @@ pub enum Format {
     Csv,
     /// An array of objects keyed by column name.
     Json,
+    /// A GitHub-flavoured Markdown table.
+    Markdown,
+    /// `insert` statements, see [`Sql`].
+    Sql,
 }
+
+impl Format {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::Tsv => "tsv",
+            Format::Csv => "csv",
+            Format::Json => "json",
+            Format::Markdown => "md",
+            Format::Sql => "sql",
+        }
+    }
+}
+
+/// How to spell a table, its columns and its values as SQL, for [`Format::Sql`].
+pub struct Sql<'a> {
+    pub table: String,
+    pub ident: &'a dyn Fn(&str) -> String,
+    pub literal: &'a dyn Fn(&Value) -> String,
+}
+
+/// Rows per `insert` statement: few enough for every engine (SQL Server allows 1,000).
+const INSERT_BATCH: usize = 100;
 
 /// Render `rows` (each limited to `columns`) in `format`. Headers are included
 /// for CSV and multi-cell TSV.
 pub fn render(format: Format, columns: &[&Column], rows: &[Vec<&Value>]) -> String {
+    render_sql(format, columns, rows, None)
+}
+
+/// [`render`], with what [`Format::Sql`] needs to spell statements.
+pub fn render_sql(
+    format: Format,
+    columns: &[&Column],
+    rows: &[Vec<&Value>],
+    sql: Option<&Sql>,
+) -> String {
+    if format == Format::Tsv && columns.len() == 1 && rows.len() == 1 {
+        return plain(rows[0][0]);
+    }
+    let mut out = Vec::new();
+    write(
+        format,
+        columns,
+        rows.iter().map(|row| row.iter().copied()),
+        sql,
+        &mut out,
+    )
+    .expect("writing to memory");
+    String::from_utf8(out).expect("rendered text is UTF-8")
+}
+
+/// Write every row in `format` to `out`. [`Format::Sql`] needs `sql`; without it
+/// the statements name the table `results`.
+pub fn write<'v, R, C>(
+    format: Format,
+    columns: &[&Column],
+    rows: R,
+    sql: Option<&Sql>,
+    out: &mut dyn Write,
+) -> io::Result<()>
+where
+    R: IntoIterator<Item = C>,
+    C: IntoIterator<Item = &'v Value>,
+{
     match format {
-        Format::Tsv if columns.len() == 1 && rows.len() == 1 => plain(rows[0][0]),
-        Format::Tsv => delimited(columns, rows, '\t'),
-        Format::Csv => delimited(columns, rows, ','),
-        Format::Json => json(columns, rows),
+        Format::Tsv => delimited(columns, rows, '\t', out),
+        Format::Csv => delimited(columns, rows, ',', out),
+        Format::Json => json(columns, rows, out),
+        Format::Markdown => markdown(columns, rows, out),
+        Format::Sql => match sql {
+            Some(sql) => inserts(columns, rows, sql, out),
+            None => {
+                let fallback = Sql {
+                    table: "results".into(),
+                    ident: &|name| {
+                        if crate::sql::is_plain_ident(name) {
+                            name.to_string()
+                        } else {
+                            format!("\"{}\"", name.replace('"', "\"\""))
+                        }
+                    },
+                    literal: &ansi_literal,
+                };
+                inserts(columns, rows, &fallback, out)
+            }
+        },
+    }
+}
+
+/// A standard SQL literal, for when no connection says how its engine spells one.
+fn ansi_literal(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Integer(v) => v.to_string(),
+        Value::Real(v) if v.is_finite() => v.to_string(),
+        Value::Decimal(v) if is_json_number(v) => v.clone(),
+        Value::Real(_) => format!("'{value}'", value = value.display()),
+        Value::Decimal(v) | Value::Text(v) => format!("'{}'", v.replace('\'', "''")),
+        Value::Blob(bytes) => format!("X'{}'", &hex(bytes)[2..]),
     }
 }
 
@@ -31,18 +127,32 @@ fn plain(value: &Value) -> String {
     }
 }
 
-fn delimited(columns: &[&Column], rows: &[Vec<&Value>], separator: char) -> String {
-    let mut out = String::new();
-    let mut line = |cells: &mut dyn Iterator<Item = String>| {
-        let cells: Vec<String> = cells.map(|cell| quote(&cell, separator)).collect();
-        out.push_str(&cells.join(&separator.to_string()));
-        out.push('\n');
+fn delimited<'v, R, C>(
+    columns: &[&Column],
+    rows: R,
+    separator: char,
+    out: &mut dyn Write,
+) -> io::Result<()>
+where
+    R: IntoIterator<Item = C>,
+    C: IntoIterator<Item = &'v Value>,
+{
+    let mut sep = [0; 4];
+    let sep = separator.encode_utf8(&mut sep).as_bytes();
+    let mut line = |cells: &mut dyn Iterator<Item = String>| -> io::Result<()> {
+        for (i, cell) in cells.enumerate() {
+            if i > 0 {
+                out.write_all(sep)?;
+            }
+            out.write_all(quote(&cell, separator).as_bytes())?;
+        }
+        out.write_all(b"\n")
     };
-    line(&mut columns.iter().map(|c| c.name.clone()));
+    line(&mut columns.iter().map(|c| c.name.clone()))?;
     for row in rows {
-        line(&mut row.iter().map(|value| plain(value)));
+        line(&mut row.into_iter().map(plain))?;
     }
-    out
+    Ok(())
 }
 
 /// RFC 4180 quoting: wrap in quotes when the cell holds the separator, a quote
@@ -55,26 +165,78 @@ fn quote(cell: &str, separator: char) -> String {
     }
 }
 
-fn json(columns: &[&Column], rows: &[Vec<&Value>]) -> String {
-    let mut out = String::from("[\n");
-    for (i, row) in rows.iter().enumerate() {
-        out.push_str("  {");
+fn json<'v, R, C>(columns: &[&Column], rows: R, out: &mut dyn Write) -> io::Result<()>
+where
+    R: IntoIterator<Item = C>,
+    C: IntoIterator<Item = &'v Value>,
+{
+    out.write_all(b"[")?;
+    let mut any = false;
+    for row in rows {
+        out.write_all(if any { b",\n  {" } else { b"\n  {" })?;
+        any = true;
         for (j, (column, value)) in columns.iter().zip(row).enumerate() {
             if j > 0 {
-                out.push_str(", ");
+                out.write_all(b", ")?;
             }
-            out.push_str(&json_string(&column.name));
-            out.push_str(": ");
-            out.push_str(&json_value(value));
+            out.write_all(json_string(&column.name).as_bytes())?;
+            out.write_all(b": ")?;
+            out.write_all(json_value(value).as_bytes())?;
         }
-        out.push('}');
-        if i + 1 < rows.len() {
-            out.push(',');
-        }
-        out.push('\n');
+        out.write_all(b"}")?;
     }
-    out.push(']');
-    out
+    out.write_all(b"\n]")
+}
+
+fn markdown<'v, R, C>(columns: &[&Column], rows: R, out: &mut dyn Write) -> io::Result<()>
+where
+    R: IntoIterator<Item = C>,
+    C: IntoIterator<Item = &'v Value>,
+{
+    // Pipes would end the cell and line breaks the row.
+    let cell = |text: &str| {
+        text.replace('|', "\\|")
+            .replace("\r\n", "<br>")
+            .replace('\n', "<br>")
+    };
+    let names: Vec<String> = columns.iter().map(|c| cell(&c.name)).collect();
+    writeln!(out, "| {} |", names.join(" | "))?;
+    writeln!(out, "|{}", " --- |".repeat(columns.len()))?;
+    for row in rows {
+        let cells: Vec<String> = row
+            .into_iter()
+            .map(|value| match value {
+                Value::Null => "NULL".into(),
+                other => cell(&plain(other)),
+            })
+            .collect();
+        writeln!(out, "| {} |", cells.join(" | "))?;
+    }
+    Ok(())
+}
+
+fn inserts<'v, R, C>(columns: &[&Column], rows: R, sql: &Sql, out: &mut dyn Write) -> io::Result<()>
+where
+    R: IntoIterator<Item = C>,
+    C: IntoIterator<Item = &'v Value>,
+{
+    let names: Vec<String> = columns.iter().map(|c| (sql.ident)(&c.name)).collect();
+    let head = format!("insert into {} ({}) values", sql.table, names.join(", "));
+    let mut in_batch = 0;
+    for row in rows {
+        out.write_all(if in_batch == 0 { head.as_bytes() } else { b"," })?;
+        let values: Vec<String> = row.into_iter().map(|v| (sql.literal)(v)).collect();
+        write!(out, "\n  ({})", values.join(", "))?;
+        in_batch += 1;
+        if in_batch == INSERT_BATCH {
+            out.write_all(b";\n")?;
+            in_batch = 0;
+        }
+    }
+    if in_batch > 0 {
+        out.write_all(b";\n")?;
+    }
+    Ok(())
 }
 
 fn json_value(value: &Value) -> String {
@@ -205,6 +367,33 @@ mod tests {
         for no in ["", "-", "01", "1.", ".5", "1e5", "$1", "NaN", "1,000"] {
             assert!(!is_json_number(no), "{no}");
         }
+    }
+
+    #[test]
+    fn markdown_escapes_pipes_and_breaks() {
+        let (a, b) = (col("id"), col("note"));
+        let rows = vec![
+            vec![Value::Integer(1), Value::Text("a|b\nc".into())],
+            vec![Value::Integer(2), Value::Null],
+        ];
+        assert_eq!(
+            render(Format::Markdown, &[&a, &b], &refs(&rows)),
+            "| id | note |\n| --- | --- |\n| 1 | a\\|b<br>c |\n| 2 | NULL |\n"
+        );
+    }
+
+    #[test]
+    fn sql_batches_inserts() {
+        let (a, b) = (col("id"), col("name"));
+        let rows: Vec<Vec<Value>> = (0..101)
+            .map(|i| vec![Value::Integer(i), Value::Text(format!("it's {i}"))])
+            .collect();
+        let text = render(Format::Sql, &[&a, &b], &refs(&rows));
+        assert!(
+            text.starts_with("insert into results (id, name) values\n  (0, 'it''s 0'),\n  (1, ")
+        );
+        assert_eq!(text.matches("insert into").count(), 2);
+        assert!(text.ends_with("values\n  (100, 'it''s 100');\n"));
     }
 
     #[test]

@@ -85,6 +85,11 @@ impl Grid {
         self.order.len()
     }
 
+    /// Data row indexes in display order.
+    pub fn order(&self) -> Arc<Vec<usize>> {
+        self.order.clone()
+    }
+
     /// The data row shown at display position `ix`.
     pub fn row(&self, ix: usize) -> &[Value] {
         &self.data.rows[self.order[ix]]

@@ -19,6 +19,7 @@ xenon_ssh.workspace = true
 xenon_store.workspace = true
 libc = "0.2"
 dirs.workspace = true
+rust_xlsxwriter = { version = "0.99.1", default-features = false, features = ["constant_memory"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

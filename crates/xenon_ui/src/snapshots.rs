@@ -261,6 +261,15 @@ fn snapshots() {
             w.select_cell(5, 4, true, window, cx);
         });
         shot.save(&format!("03-browse-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.export_menu = true;
+            cx.notify();
+        });
+        shot.save(&format!("21-export-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.export_menu = false;
+            cx.notify();
+        });
 
         // Editing: change a status, delete a row, add one; review; save.
         shot.act(|w, window, cx| {

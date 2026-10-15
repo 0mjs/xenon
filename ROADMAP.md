@@ -142,7 +142,7 @@ so it can join the test fleet.
 
 | Feature | Target |
 |---|---|
-| Export a result or table to CSV, TSV, JSON, NDJSON, Excel, Markdown, SQL `INSERT`s, Parquet | 0.8 |
+| ✅ Export a result to CSV, TSV, JSON, Excel, Markdown or SQL `INSERT`s (⇧⌘S); copy cells as any of them. Still to do: NDJSON, Parquet, export a whole table without loading it | 0.8 |
 | Import CSV / Excel / JSON into a new or existing table: column mapping, type inference, preview, batch inserts | 0.8 |
 | Copy a table between connections (same or different engines) | 0.8 |
 | Backup and restore, wrapping `pg_dump`/`pg_restore`, `mysqldump`, `sqlite3 .backup` with progress | 0.8 |

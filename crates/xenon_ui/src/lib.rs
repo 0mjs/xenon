@@ -7,6 +7,7 @@ mod detect;
 mod discover;
 mod edits;
 mod explorer;
+mod export;
 pub mod fonts;
 mod history;
 mod launcher;
@@ -60,6 +61,9 @@ actions!(
         CopySelection,
         CopyCsv,
         CopyJson,
+        CopyMarkdown,
+        CopySql,
+        ExportResults,
         FocusEditor,
         OpenPalette,
         PaletteUp,
@@ -152,6 +156,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-c", CopySelection, Some(GRID_CONTEXT)),
         KeyBinding::new("cmd-shift-c", CopyCsv, Some(GRID_CONTEXT)),
         KeyBinding::new("cmd-alt-c", CopyJson, Some(GRID_CONTEXT)),
+        KeyBinding::new("cmd-shift-s", ExportResults, Some("Workspace")),
         KeyBinding::new("escape", FocusEditor, Some(GRID_CONTEXT)),
         KeyBinding::new("cmd-k", OpenPalette, None),
         KeyBinding::new("cmd-p", OpenPalette, None),
