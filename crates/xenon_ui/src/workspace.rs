@@ -3713,7 +3713,8 @@ impl Render for Workspace {
                         .w(px((self.side_panel_width + gap) * open))
                         .flex_none()
                         .overflow_hidden()
-                        .opacity(open)
+                        // Fading a solid panel would show the darker frame through it.
+                        .when(!self.classic(), |el| el.opacity(open))
                         .child(panel)
                         .into_any_element()
                 } else {
