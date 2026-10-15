@@ -363,7 +363,9 @@ impl MssqlConnection {
             .into_row()
             .await
             .map_err(describe)?
-            .and_then(|row| row.get::<i32, _>(0))
+            // `try_get`, not `get`: under `showplan_text` this comes back as plan
+            // text rather than a number, and `get` would panic.
+            .and_then(|row| row.try_get::<i32, _>(0).ok().flatten())
             .is_some_and(|count| count > 0);
         let mut stream = client.simple_query(sql).await.map_err(describe)?;
         let mut sets: Vec<ResultSet> = Vec::new();
@@ -443,7 +445,9 @@ impl MssqlConnection {
                     .into_row()
                     .await
                     .map_err(describe)?
-                    .and_then(|row| row.get::<i32, _>(0))
+                    // `try_get`, not `get`: under `showplan_text` this comes back as plan
+                    // text rather than a number, and `get` would panic.
+                    .and_then(|row| row.try_get::<i32, _>(0).ok().flatten())
                     .unwrap_or(0);
                 QueryOutcome::Affected(count.max(0) as u64)
             }
@@ -793,7 +797,9 @@ impl Connection for MssqlConnection {
                     .into_row()
                     .await
                     .ok()?
-                    .and_then(|row| row.get::<i32, _>(0))
+                    // `try_get`, not `get`: under `showplan_text` this comes back as plan
+                    // text rather than a number, and `get` would panic.
+                    .and_then(|row| row.try_get::<i32, _>(0).ok().flatten())
             })
             .map(|count| count > 0)
     }
