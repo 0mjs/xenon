@@ -113,7 +113,7 @@ so it can join the test fleet.
 |---|---|
 | ✅ Virtualized grid, keyboard selection, copy TSV/CSV/JSON, sort, WHERE filter, inspector | 0.1 |
 | Stream results in batches; lift the 100k cap; "load more" or full fetch to a file | 0.3 |
-| **Inline editing:** edit cells, add rows, duplicate, delete; changes staged, SQL previewed, applied in one transaction | 0.3 |
+| ✅ **Inline editing:** edit cells, add rows, delete; changes staged, SQL previewed, applied in one transaction (duplicating rows still to do) | 0.3 |
 | Value editors per type: JSON tree, long text, dates, enums (dropdown), booleans, bytea (hex/image), arrays | 0.3 |
 | Click-through foreign keys: open the referenced row, or see rows that reference this one | 0.3 |
 | Filter builder (column / operator / value chips) alongside the raw WHERE field | 0.3 |

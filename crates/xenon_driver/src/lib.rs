@@ -120,6 +120,11 @@ pub struct Schema {
     pub objects: Vec<SchemaObject>,
 }
 
+/// Bytes as lowercase hex, for blob literals.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// How a server connection uses TLS. The names follow libpq's `sslmode`; other
 /// engines map them onto their own settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -242,6 +247,25 @@ pub trait Connection: Send + Sync {
         } else {
             self.quote_ident(ident)
         }
+    }
+
+    /// A value written as a SQL literal, for statements Xenon generates (saving
+    /// edits). Text is quoted; numbers aren't; NULL is NULL.
+    fn literal(&self, value: &Value) -> String {
+        match value {
+            Value::Null => "NULL".into(),
+            Value::Integer(n) => n.to_string(),
+            Value::Real(n) if n.is_finite() => n.to_string(),
+            Value::Real(n) => format!("'{n}'"),
+            Value::Decimal(n) => n.clone(),
+            Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
+            Value::Blob(bytes) => format!("X'{}'", hex(bytes)),
+        }
+    }
+
+    /// The statement that starts a transaction.
+    fn begin(&self) -> &'static str {
+        "begin"
     }
 
     /// True for engines that limit rows with `select top (n)` (SQL Server)

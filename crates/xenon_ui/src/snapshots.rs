@@ -262,6 +262,33 @@ fn snapshots() {
         });
         shot.save(&format!("03-browse-{suffix}"));
 
+        // Editing: change a status, delete a row, add one; review; save.
+        shot.act(|w, window, cx| {
+            w.begin_edit(1, 3, window, cx);
+            w.type_into_cell("shipped", window, cx);
+            w.commit_edit(false, window, cx);
+            w.select_cell(4, 0, false, window, cx);
+            w.delete_rows(&crate::DeleteRows, window, cx);
+            w.add_row(&crate::AddRow, window, cx);
+            let last = w.last_row();
+            w.begin_edit(last, 1, window, cx);
+            w.type_into_cell("42", window, cx);
+            w.commit_edit(false, window, cx);
+            w.begin_edit(7, 5, window, cx);
+        });
+        shot.save(&format!("17-editing-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.commit_edit(true, window, cx);
+            w.save_edits(&crate::SaveEdits, window, cx);
+        });
+        shot.save(&format!("18-save-review-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.confirm = None;
+            w.prefs.confirm_risky = false;
+            w.save_edits(&crate::SaveEdits, window, cx);
+        });
+        shot.save(&format!("19-saved-{suffix}"));
+
         shot.act(|w, window, cx| w.open_settings(&crate::OpenSettings, window, cx));
         shot.save(&format!("15-settings-{suffix}"));
         shot.act(|w, _, cx| {

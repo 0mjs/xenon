@@ -403,6 +403,23 @@ impl Connection for PostgresConnection {
     fn default_schema(&self) -> Option<String> {
         self.schema.clone()
     }
+
+    fn literal(&self, value: &Value) -> String {
+        match value {
+            Value::Blob(bytes) => format!("'\\x{}'::bytea", xenon_driver::hex(bytes)),
+            Value::Real(n) if !n.is_finite() => format!(
+                "'{}'",
+                if n.is_nan() {
+                    "NaN".into()
+                } else if *n > 0. {
+                    "Infinity".to_string()
+                } else {
+                    "-Infinity".into()
+                }
+            ),
+            other => default_literal(other),
+        }
+    }
 }
 
 /// Swap libpq's `verify-ca` / `verify-full` (which tokio-postgres doesn't parse)
@@ -529,6 +546,18 @@ fn describe_error(err: tokio_postgres::Error) -> anyhow::Error {
         message.push_str(&format!("\nHINT: {hint}"));
     }
     anyhow::Error::new(QueryError { message, position })
+}
+
+/// The shared literal rules, for what Postgres doesn't override.
+fn default_literal(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".into(),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(n) => n.to_string(),
+        Value::Decimal(n) => n.clone(),
+        Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
+        Value::Blob(bytes) => format!("'\\x{}'::bytea", xenon_driver::hex(bytes)),
+    }
 }
 
 #[cfg(test)]

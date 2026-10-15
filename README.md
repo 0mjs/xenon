@@ -67,6 +67,13 @@ editor.
 **Browsing a table** (click it in the explorer) opens it in its own tab with a `WHERE` filter;
 sorting there runs on the server, so you see the true top rows.
 
+**Editing a table:** double-click a cell (or select it and press `↵`), type, and press `↵`; **Set
+NULL** is next to the field. **+ Row** adds a row (empty cells take the column's default), `⌘⌫`
+marks the selected rows for deletion. Changes stay staged, tinted in the grid, until you press
+`⌘S`: they're saved in one transaction, and if any row changed or vanished since it was loaded,
+nothing is saved. **Review SQL** shows exactly what will run; production connections always ask,
+with their name typed. Tables need a primary key to be edited.
+
 **Also:** drag the line under the editor to resize it (double-click to reset); when the database
 says where a query failed, the cursor jumps there; View → Theme picks System, Light or Dark; double-click
 the title bar to zoom.

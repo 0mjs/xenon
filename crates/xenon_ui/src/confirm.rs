@@ -22,6 +22,8 @@ pub struct ConfirmDialog {
     preview: SharedString,
     /// Text the user must type to enable the button, if any.
     require: Option<String>,
+    /// The confirming button's label, and whether it's red.
+    action: (SharedString, bool),
     input: Entity<InputState>,
     _subscription: Subscription,
 }
@@ -56,16 +58,32 @@ impl ConfirmDialog {
             focus_handle.focus(window, cx);
         }
 
-        let preview: String = sql.lines().take(8).collect::<Vec<_>>().join("\n");
+        let lines: Vec<&str> = sql.lines().collect();
+        let mut preview = lines
+            .iter()
+            .take(12)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        if lines.len() > 12 {
+            preview.push_str(&format!("\n… and {} more lines", lines.len() - 12));
+        }
         Self {
             focus_handle,
             title: title.into(),
             body: body.into(),
             preview: preview.into(),
             require,
+            action: ("Run anyway".into(), true),
             input,
             _subscription: subscription,
         }
+    }
+
+    /// Label the confirming button (instead of "Run anyway"); `danger` makes it red.
+    pub fn action(mut self, label: impl Into<SharedString>, danger: bool) -> Self {
+        self.action = (label.into(), danger);
+        self
     }
 
     fn unlocked(&self, cx: &Context<Self>) -> bool {
@@ -203,8 +221,12 @@ impl Render for ConfirmDialog {
                 widgets::button(
                     &theme,
                     "confirm-run",
-                    "Run anyway",
-                    ButtonKind::Danger,
+                    self.action.0.clone(),
+                    if self.action.1 {
+                        ButtonKind::Danger
+                    } else {
+                        ButtonKind::Primary
+                    },
                     unlocked,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.confirm(cx))),

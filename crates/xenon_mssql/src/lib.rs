@@ -578,6 +578,22 @@ impl Connection for MssqlConnection {
     fn uses_top(&self) -> bool {
         true
     }
+
+    fn literal(&self, value: &Value) -> String {
+        match value {
+            // N'…' keeps non-Latin text intact in nvarchar columns.
+            Value::Text(text) => format!("N'{}'", text.replace('\'', "''")),
+            Value::Blob(bytes) => format!("0x{}", xenon_driver::hex(bytes)),
+            Value::Null => "NULL".into(),
+            Value::Integer(n) => n.to_string(),
+            Value::Real(n) => n.to_string(),
+            Value::Decimal(n) => n.clone(),
+        }
+    }
+
+    fn begin(&self) -> &'static str {
+        "begin transaction"
+    }
 }
 
 /// A value as Xenon shows it: numbers exact, dates as SQL Server prints them.

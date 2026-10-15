@@ -174,6 +174,9 @@ impl MysqlConnection {
             .tcp_connect_timeout(Some(CONNECT_TIMEOUT))
             // Over TCP, always: a "localhost" socket file is rarely where Docker puts it.
             .prefer_socket(false)
+            // Report rows an UPDATE matched, not only those it changed, so saving
+            // an edit that sets a value to itself still counts as one row.
+            .additional_capabilities(mysql::consts::CapabilityFlags::CLIENT_FOUND_ROWS)
             .init(init);
 
         let tls = |mode: SslMode| -> Option<SslOpts> {
@@ -408,6 +411,22 @@ impl Connection for MysqlConnection {
 
     fn default_schema(&self) -> Option<String> {
         self.schema.clone()
+    }
+
+    fn literal(&self, value: &Value) -> String {
+        match value {
+            // Backslash is an escape character in MySQL strings by default.
+            Value::Text(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
+            Value::Blob(bytes) => format!("X'{}'", xenon_driver::hex(bytes)),
+            Value::Null => "NULL".into(),
+            Value::Integer(n) => n.to_string(),
+            Value::Real(n) => n.to_string(),
+            Value::Decimal(n) => n.clone(),
+        }
+    }
+
+    fn begin(&self) -> &'static str {
+        "start transaction"
     }
 }
 

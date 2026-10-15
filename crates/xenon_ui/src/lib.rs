@@ -4,6 +4,7 @@ mod confirm;
 mod connect;
 mod detect;
 mod discover;
+mod edits;
 mod explorer;
 pub mod fonts;
 mod history;
@@ -28,6 +29,11 @@ actions!(
         NewConnection,
         ShowConnections,
         OpenSettings,
+        EditCell,
+        DeleteRows,
+        AddRow,
+        SaveEdits,
+        DiscardEdits,
         CloseConnection,
         RunQuery,
         RunAll,
@@ -95,6 +101,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-n", NewConnection, None),
         KeyBinding::new("cmd-shift-n", ShowConnections, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-s", SaveEdits, None),
+        KeyBinding::new("enter", EditCell, Some(GRID_CONTEXT)),
+        KeyBinding::new("cmd-backspace", DeleteRows, Some(GRID_CONTEXT)),
         KeyBinding::new(
             "escape",
             gpui_component::input::Escape,

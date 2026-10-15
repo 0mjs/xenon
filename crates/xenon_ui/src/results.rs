@@ -10,12 +10,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, SharedString,
-    UniformListScrollHandle, Window, canvas, div, prelude::*, px, uniform_list,
+    AnyElement, App, FontWeight, IntoElement, MouseButton, MouseDownEvent, Pixels, Rgba,
+    SharedString, UniformListScrollHandle, Window, canvas, div, prelude::*, px, uniform_list,
 };
 use xenon_driver::sql::SortDirection;
 use xenon_driver::{Column, ResultSet, Value};
 
+use crate::edits::{Edits, RowRef};
 use crate::theme::{MONO_FONT, Theme};
 
 pub const ROW_HEIGHT: f32 = 25.;
@@ -87,6 +88,11 @@ impl Grid {
     /// The data row shown at display position `ix`.
     pub fn row(&self, ix: usize) -> &[Value] {
         &self.data.rows[self.order[ix]]
+    }
+
+    /// Which data row is shown at display position `ix`.
+    pub fn data_index(&self, ix: usize) -> usize {
+        self.order[ix]
     }
 
     /// Sort the rows in place (client side). `None` restores the query's order.
@@ -192,10 +198,13 @@ pub type SelectCallback = Rc<dyn Fn(usize, usize, bool, &mut Window, &mut App)>;
 /// A column index.
 pub type ColumnCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// Column, mouse x, current width.
+pub type ColumnPairCallback = Rc<dyn Fn(usize, usize, &mut Window, &mut App)>;
 pub type ResizeCallback = Rc<dyn Fn(usize, Pixels, f32, &mut Window, &mut App)>;
 
 pub struct Callbacks {
     pub select: SelectCallback,
+    /// A double-click on a cell (display row, column).
+    pub edit: ColumnPairCallback,
     pub sort: ColumnCallback,
     pub resize_start: ResizeCallback,
     pub autofit: ColumnCallback,
@@ -207,6 +216,9 @@ pub struct View<'a> {
     pub selection: Option<Selection>,
     /// Sort shown in the headers (client-side or the browse query's).
     pub sort: Option<(usize, SortDirection)>,
+    /// Staged changes to show: edited cells, deleted rows, rows being added
+    /// (drawn after the fetched ones).
+    pub edits: Rc<Edits>,
 }
 
 pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoElement {
@@ -260,12 +272,47 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
     let selection = view.selection;
     let theme = theme.clone();
     let row_callbacks = callbacks.clone();
-    let rows = uniform_list("result-rows", order.len(), move |range, _, _| {
+    let edits = view.edits;
+    let count = order.len() + edits.inserted.len();
+    let rows = uniform_list("result-rows", count, move |range, _, _| {
         range
             .map(|ix| {
+                let (row, cells) = match order.get(ix) {
+                    Some(&data_ix) => (
+                        RowRef::Existing(data_ix),
+                        data.rows[data_ix]
+                            .iter()
+                            .enumerate()
+                            .map(
+                                |(col, value)| match edits.value(RowRef::Existing(data_ix), col) {
+                                    Some(Some(new)) => Shown::Edited(new.clone()),
+                                    _ => Shown::Value(value.clone()),
+                                },
+                            )
+                            .collect::<Vec<_>>(),
+                    ),
+                    None => {
+                        let new = ix - order.len();
+                        (
+                            RowRef::New(new),
+                            edits.inserted[new]
+                                .iter()
+                                .map(|value| match value {
+                                    Some(value) => Shown::Edited(value.clone()),
+                                    None => Shown::Default,
+                                })
+                                .collect(),
+                        )
+                    }
+                };
+                let deleted = matches!(row, RowRef::Existing(r) if edits.deleted.contains(&r));
                 render_row(
                     ix,
-                    &data.rows[order[ix]],
+                    &cells,
+                    RowState {
+                        new: matches!(row, RowRef::New(_)),
+                        deleted,
+                    },
                     &widths,
                     selection,
                     &theme,
@@ -385,9 +432,25 @@ fn header_cell(
         )
 }
 
+/// What a cell shows: the fetched value, a staged new one, or (in a row being
+/// added) nothing yet, so the database's default.
+enum Shown {
+    Value(Value),
+    Edited(Value),
+    Default,
+}
+
+#[derive(Clone, Copy)]
+struct RowState {
+    new: bool,
+    deleted: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_row(
     ix: usize,
-    row: &[Value],
+    row: &[Shown],
+    state: RowState,
     widths: &Arc<Vec<f32>>,
     selection: Option<Selection>,
     theme: &Theme,
@@ -397,6 +460,7 @@ fn render_row(
     let row_selected = selection.is_some_and(|s| s.rows().contains(&ix));
     let background = if ix % 2 == 1 { Some(theme.s2) } else { None };
     let select = callbacks.select.clone();
+    let edit = callbacks.edit.clone();
     let (origin_x, column_widths) = (origin_x.clone(), widths.clone());
 
     div()
@@ -409,6 +473,18 @@ fn render_row(
         .border_b_1()
         .border_color(theme.line_2)
         .when_some(background, |el, bg| el.bg(bg))
+        .when(state.new, |el| {
+            el.bg(Rgba {
+                a: 0.08,
+                ..theme.ok
+            })
+        })
+        .when(state.deleted, |el| {
+            el.bg(Rgba {
+                a: 0.10,
+                ..theme.err
+            })
+        })
         .hover(|style| style.bg(theme.s3))
         // One handler per row: the column comes from where the click landed.
         .on_mouse_down(
@@ -416,7 +492,11 @@ fn render_row(
             move |event: &MouseDownEvent, window, cx| {
                 let x = f32::from(event.position.x - origin_x.get()) - INDEX_WIDTH;
                 if let Some(column) = column_at(&column_widths, x) {
-                    select(ix, column, event.modifiers.shift, window, cx);
+                    if event.click_count >= 2 {
+                        edit(ix, column, window, cx);
+                    } else {
+                        select(ix, column, event.modifiers.shift, window, cx);
+                    }
                 }
             },
         )
@@ -431,17 +511,38 @@ fn render_row(
                 .justify_end()
                 .border_r_1()
                 .border_color(theme.line_2)
-                .text_color(if row_selected { theme.acc } else { theme.t3 })
-                .child(SharedString::from((ix + 1).to_string())),
+                .text_color(if state.new {
+                    theme.ok
+                } else if row_selected {
+                    theme.acc
+                } else {
+                    theme.t3
+                })
+                .child(if state.new {
+                    SharedString::new_static("+")
+                } else {
+                    SharedString::from((ix + 1).to_string())
+                }),
         )
         .children(
             row.iter()
                 .zip(widths.iter())
                 .enumerate()
-                .map(|(column, (value, width))| {
+                .map(|(column, (shown, width))| {
                     let selected = selection.is_some_and(|s| s.contains(ix, column));
                     let focused = selection.is_some_and(|s| s.head == (ix, column));
-                    cell(value, *width, theme)
+                    let el = match shown {
+                        Shown::Value(value) => cell(value, *width, theme),
+                        // A staged change: amber, like a pending edit anywhere.
+                        Shown::Edited(value) => cell(value, *width, theme).when(!state.new, |el| {
+                            el.bg(Rgba {
+                                a: 0.14,
+                                ..theme.warn
+                            })
+                        }),
+                        Shown::Default => default_cell(*width, theme),
+                    };
+                    el.when(state.deleted, |el| el.line_through().text_color(theme.t3))
                         .when(selected, |el| el.bg(theme.acc_wash))
                         .when(focused, |el| el.border_1().border_color(theme.acc))
                 }),
@@ -492,6 +593,22 @@ fn cell(value: &Value, width: f32, theme: &Theme) -> gpui::Div {
         );
     el.when(structured, |el| el.text_color(theme.t2))
         .child(SharedString::from(fit(&display, width)))
+}
+
+/// A cell in a row being added that has no value yet: the database fills it in.
+fn default_cell(width: f32, theme: &Theme) -> gpui::Div {
+    div()
+        .w(px(width))
+        .h_full()
+        .flex_none()
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .border_r_1()
+        .border_color(theme.line_2)
+        .text_color(theme.t3)
+        .italic()
+        .child(SharedString::new_static("default"))
 }
 
 /// Shorten `text` to the characters that fit a column `width` wide, ending

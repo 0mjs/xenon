@@ -16,7 +16,7 @@ use gpui_component::input::{Editor, EditorState, InputEvent, InputState};
 use xenon_driver::export::{self, Format};
 use xenon_driver::sql::{Risk, SortDirection, assess, browse_table, statement_at};
 use xenon_driver::{
-    CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema,
+    CancelHandle, Connection, ObjectKind, QueryError, QueryOutcome, QueryResult, Schema, Value,
 };
 use xenon_driver::{ConnectOptions, SslMode};
 use xenon_sqlite::SqliteConnection;
@@ -30,6 +30,7 @@ use crate::confirm::{ConfirmDialog, ConfirmEvent};
 use crate::connect::{ConnectDialog, ConnectEvent, Request, RequestTarget, Subject};
 use crate::detect::{Detected, detect};
 use crate::discover::{Found, FoundTarget};
+use crate::edits::{self, Edits, RowRef, TableRef};
 use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::servers;
@@ -41,11 +42,12 @@ use crate::widgets::{
     pretty_json,
 };
 use crate::{
-    CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, ExtendDown,
-    ExtendLeft, ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp,
-    NewConnection, NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab, Quit, RunAll,
-    RunQuery, SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer,
-    ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme,
+    AddRow, CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, DeleteRows,
+    DiscardEdits, EditCell, Explain, ExtendDown, ExtendLeft, ExtendRight, ExtendUp, FocusEditor,
+    MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection, NewTab, NextTab, OpenFile, OpenPalette,
+    OpenSettings, PrevTab, Quit, RunAll, RunQuery, SaveEdits, SelectAllCells, ShowConnections,
+    ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme,
+    UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -255,13 +257,18 @@ fn paste_note(text: &str) -> (SharedString, bool) {
 }
 
 /// An action waiting on the confirmation dialog.
-enum Pending {
+pub(crate) enum Pending {
     Run {
         tab_id: usize,
         sql: String,
         origin: Option<usize>,
     },
     Forget(i64),
+    /// Save a tab's staged changes.
+    Save {
+        tab_id: usize,
+        statements: Vec<edits::Statement>,
+    },
 }
 
 impl Session {
@@ -330,6 +337,21 @@ pub(crate) struct Tab {
     /// Byte offset in the editor where the last run's SQL began, to place
     /// error positions; `None` when the SQL ran was rewritten (Explain).
     run_origin: Option<usize>,
+    /// Changes to the table's rows, not yet saved.
+    pub(crate) edits: Rc<Edits>,
+    /// The cell open in the edit bar.
+    editing: Option<CellEditor>,
+    /// A short note in the results bar (saved, or why something can't happen), and whether it's an error.
+    flash: Option<(SharedString, bool)>,
+    saving: bool,
+}
+
+/// The edit bar's cell and its text field.
+struct CellEditor {
+    row: RowRef,
+    column: usize,
+    input: Entity<InputState>,
+    _enter: Subscription,
 }
 
 impl Tab {
@@ -394,7 +416,7 @@ pub struct Workspace {
     pub(crate) settings: Option<(Entity<SettingsDialog>, Subscription)>,
     pub(crate) palette: Option<(Entity<Palette>, Subscription)>,
     pub(crate) connect_dialog: Option<(Entity<ConnectDialog>, Subscription)>,
-    confirm: Option<(Entity<ConfirmDialog>, Subscription, Pending)>,
+    pub(crate) confirm: Option<(Entity<ConfirmDialog>, Subscription, Pending)>,
     pub(crate) saved: Vec<SavedConnection>,
     pub(crate) explorer_filter: Entity<InputState>,
     show_side_panel: bool,
@@ -596,6 +618,10 @@ impl Workspace {
             selection: None,
             column_widths: HashMap::new(),
             run_origin: None,
+            edits: Rc::default(),
+            editing: None,
+            flash: None,
+            saving: false,
         });
         self.active = self.tabs.len() - 1;
         cx.notify();
@@ -1182,6 +1208,10 @@ impl Workspace {
                         sql,
                         origin,
                     } => this.execute(tab_id, sql, origin, cx),
+                    Pending::Save { tab_id, statements } => {
+                        this.save_statements(tab_id, statements, window, cx);
+                        return;
+                    }
                     Pending::Forget(id) => {
                         if let Some(store) = &this.store
                             && let Err(err) = store.delete_connection(id)
@@ -1240,6 +1270,10 @@ impl Workspace {
     }
 
     pub(crate) fn run(&mut self, scope: RunScope, window: &mut Window, cx: &mut Context<Self>) {
+        // A re-run reloads the rows and would lose staged changes.
+        if self.guard_edits(cx) {
+            return;
+        }
         let Some(session) = self.active_session() else {
             self.notice = Some("Open a database first (⌘O or ⌘N).".into());
             cx.notify();
@@ -1411,6 +1445,9 @@ impl Workspace {
             return;
         };
         tab.selection = None;
+        // New rows mean new row numbers: staged changes can't carry over.
+        tab.edits = Rc::default();
+        tab.editing = None;
         match result {
             Ok(mut result) => {
                 if let QueryOutcome::Rows(rows) = &mut result.outcome {
@@ -1583,6 +1620,9 @@ impl Workspace {
 
     /// Regenerate the active browse tab's query from its filter and sort, and run it.
     fn run_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard_edits(cx) {
+            return;
+        }
         let (Some(session), Some(browse)) = (self.active_session(), &self.active_tab().browse)
         else {
             return;
@@ -1609,6 +1649,9 @@ impl Workspace {
     }
 
     fn clear_browse_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard_edits(cx) {
+            return;
+        }
         if let Some(browse) = &mut self.tabs[self.active].browse {
             browse.order = None;
             let filter = browse.filter.clone();
@@ -1617,11 +1660,455 @@ impl Workspace {
         self.run_browse(window, cx);
     }
 
+    // ------------------------------------------------------------- editing
+
+    /// The table the active tab's rows can be saved to, or why they can't be.
+    pub(crate) fn edit_target(&self) -> Result<TableRef, &'static str> {
+        let tab = self.active_tab();
+        let Some(browse) = &tab.browse else {
+            return Err("Query results are read-only; open a table from the explorer to edit it.");
+        };
+        let Some(session) = self.active_session() else {
+            return Err("Not connected.");
+        };
+        if session.read_only {
+            return Err("Read-only connection.");
+        }
+        let Some(grid) = &tab.grid else {
+            return Err("Nothing loaded yet.");
+        };
+        let object = session
+            .schemas
+            .iter()
+            .find(|s| s.name == browse.schema)
+            .and_then(|s| s.objects.iter().find(|o| o.name == browse.table));
+        let Some(object) = object else {
+            return Err("This table is no longer in the schema.");
+        };
+        if object.kind == ObjectKind::View {
+            return Err("Views are read-only.");
+        }
+        // Each key column must be in the result to find its rows again.
+        let key: Option<Vec<usize>> = object
+            .columns
+            .iter()
+            .filter(|c| c.primary_key)
+            .map(|c| grid.data.columns.iter().position(|r| r.name == c.name))
+            .collect();
+        match key {
+            Some(key) if !key.is_empty() => Ok(TableRef {
+                schema: (session.conn.default_schema().as_deref() != Some(browse.schema.as_str()))
+                    .then(|| browse.schema.clone()),
+                table: browse.table.clone(),
+                key,
+            }),
+            _ => Err("No primary key, so rows can't be told apart: read-only."),
+        }
+    }
+
+    /// Rows shown in a tab: those fetched, then those being added.
+    fn total_rows(tab: &Tab) -> usize {
+        tab.grid.as_ref().map_or(0, |g| g.row_count()) + tab.edits.inserted.len()
+    }
+
+    fn row_ref(tab: &Tab, ix: usize) -> Option<RowRef> {
+        let grid = tab.grid.as_ref()?;
+        if ix < grid.row_count() {
+            Some(RowRef::Existing(grid.data_index(ix)))
+        } else {
+            let new = ix - grid.row_count();
+            (new < tab.edits.inserted.len()).then_some(RowRef::New(new))
+        }
+    }
+
+    fn flash(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
+        self.tabs[self.active].flash = Some((text.into(), error));
+        cx.notify();
+    }
+
+    /// Changes are pending: say so instead of throwing them away.
+    fn guard_edits(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.active_tab().edits.is_empty() {
+            return false;
+        }
+        self.flash("Save or discard your changes first.", true, cx);
+        true
+    }
+
+    /// Open the edit bar on a cell (display row `ix`).
+    pub(crate) fn begin_edit(
+        &mut self,
+        ix: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(why) = self.edit_target() {
+            self.flash(why, false, cx);
+            return;
+        }
+        let tab = &self.tabs[self.active];
+        let (Some(row), Some(grid)) = (Self::row_ref(tab, ix), tab.grid.as_ref()) else {
+            return;
+        };
+        let current: Option<Value> = match tab.edits.value(row, column) {
+            Some(value) => value.cloned(),
+            None => match row {
+                RowRef::Existing(r) => Some(grid.data.rows[r][column].clone()),
+                RowRef::New(_) => None,
+            },
+        };
+        if matches!(current, Some(Value::Blob(_))) {
+            self.flash("Binary values can't be edited here yet.", false, cx);
+            return;
+        }
+        let (text, placeholder) = match &current {
+            None => (String::new(), "default"),
+            Some(Value::Null) => (String::new(), "NULL"),
+            Some(value) => (value.display().into_owned(), ""),
+        };
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(text)
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+        let enter = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.commit_edit(false, window, cx);
+            }
+        });
+        let tab = &mut self.tabs[self.active];
+        tab.selection = Some(Selection::cell(ix, column));
+        tab.flash = None;
+        tab.editing = Some(CellEditor {
+            row,
+            column,
+            input,
+            _enter: enter,
+        });
+        cx.notify();
+    }
+
+    /// Stage the edit bar's value (or NULL) and close it.
+    pub(crate) fn commit_edit(
+        &mut self,
+        set_null: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = &mut self.tabs[self.active];
+        let Some(editor) = tab.editing.take() else {
+            return;
+        };
+        let Some(grid) = &tab.grid else { return };
+        let text = editor.input.read(cx).value().to_string();
+        let original = match editor.row {
+            RowRef::Existing(r) => Some(grid.data.rows[r][editor.column].clone()),
+            RowRef::New(_) => None,
+        };
+        let numeric = original.as_ref().is_some_and(Value::is_numeric)
+            || grid.data.columns[editor.column]
+                .type_name
+                .as_deref()
+                .is_some_and(|t| {
+                    let t = t.to_ascii_lowercase();
+                    [
+                        "int", "numeric", "decimal", "float", "double", "real", "money", "serial",
+                    ]
+                    .iter()
+                    .any(|n| t.contains(n))
+                });
+        let value = if set_null {
+            Value::Null
+        } else if original
+            .as_ref()
+            .is_some_and(|o| !o.is_null() && o.display() == text)
+        {
+            original.clone().expect("checked above")
+        } else if numeric && text.trim().parse::<f64>().is_ok() {
+            Value::Decimal(text.trim().to_string())
+        } else {
+            Value::Text(text)
+        };
+        Rc::make_mut(&mut tab.edits).set(editor.row, editor.column, value, original.as_ref());
+        self.grid_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_row(&self) -> usize {
+        Self::total_rows(self.active_tab()) - 1
+    }
+
+    /// Type into the open edit bar (snapshots drive the UI without a keyboard).
+    #[cfg(test)]
+    pub(crate) fn type_into_cell(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = &self.tabs[self.active].editing {
+            let input = editor.input.clone();
+            input.update(cx, |input, cx| {
+                input.set_value(text.to_string(), window, cx)
+            });
+        }
+    }
+
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs[self.active].editing = None;
+        self.grid_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn edit_cell(&mut self, _: &EditCell, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(selection) = self.active_tab().selection {
+            let (row, column) = selection.head;
+            self.begin_edit(row, column, window, cx);
+        }
+    }
+
+    /// Mark the selected rows for deletion (or, if they all are, unmark them);
+    /// rows being added are simply removed.
+    pub(crate) fn delete_rows(&mut self, _: &DeleteRows, _: &mut Window, cx: &mut Context<Self>) {
+        if let Err(why) = self.edit_target() {
+            self.flash(why, false, cx);
+            return;
+        }
+        let tab = &mut self.tabs[self.active];
+        let Some(selection) = tab.selection else {
+            return;
+        };
+        let rows: Vec<RowRef> = selection
+            .rows()
+            .filter_map(|ix| Self::row_ref(tab, ix))
+            .collect();
+        let edits = Rc::make_mut(&mut tab.edits);
+        let existing: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| match r {
+                RowRef::Existing(r) => Some(*r),
+                RowRef::New(_) => None,
+            })
+            .collect();
+        let all_marked = !existing.is_empty() && existing.iter().all(|r| edits.deleted.contains(r));
+        for row in existing {
+            if all_marked {
+                edits.deleted.remove(&row);
+            } else {
+                edits.deleted.insert(row);
+            }
+        }
+        let mut new: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| match r {
+                RowRef::New(n) => Some(*n),
+                RowRef::Existing(_) => None,
+            })
+            .collect();
+        new.sort_unstable_by(|a, b| b.cmp(a));
+        for n in new {
+            edits.inserted.remove(n);
+        }
+        tab.flash = None;
+        cx.notify();
+    }
+
+    pub(crate) fn add_row(&mut self, _: &AddRow, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(why) = self.edit_target() {
+            self.flash(why, false, cx);
+            return;
+        }
+        let tab = &mut self.tabs[self.active];
+        let Some(grid) = &tab.grid else { return };
+        let columns = grid.data.columns.len();
+        Rc::make_mut(&mut tab.edits)
+            .inserted
+            .push(vec![None; columns]);
+        let last = Self::total_rows(tab) - 1;
+        grid.scroll.scroll_to_item(last, ScrollStrategy::Nearest);
+        tab.selection = Some(Selection::cell(last, 0));
+        tab.flash = None;
+        self.grid_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn discard_edits(&mut self, _: &DiscardEdits, _: &mut Window, cx: &mut Context<Self>) {
+        let tab = &mut self.tabs[self.active];
+        tab.edits = Rc::default();
+        tab.editing = None;
+        tab.flash = None;
+        cx.notify();
+    }
+
+    /// The statements that would save the active tab's changes.
+    fn pending_statements(&self) -> Result<Vec<edits::Statement>, &'static str> {
+        let target = self.edit_target()?;
+        let tab = self.active_tab();
+        let (Some(session), Some(grid)) = (self.active_session(), &tab.grid) else {
+            return Err("Nothing loaded yet.");
+        };
+        Ok(edits::statements(
+            session.conn.as_ref(),
+            &target,
+            &grid.data,
+            &tab.edits,
+        ))
+    }
+
+    fn review_edits(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_edits_confirming(true, window, cx);
+    }
+
+    pub(crate) fn save_edits(
+        &mut self,
+        _: &SaveEdits,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_edits_confirming(false, window, cx);
+    }
+
+    /// Save the active tab's changes. Production always asks (with its name
+    /// typed); so do deletions when "ask before risky statements" is on, and
+    /// any save the user asked to review.
+    fn save_edits_confirming(&mut self, review: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // ⌘S while the edit bar is open keeps what was typed.
+        if self.active_tab().editing.is_some() {
+            self.commit_edit(false, window, cx);
+        }
+        if self.active_tab().edits.is_empty() || self.active_tab().saving {
+            return;
+        }
+        let statements = match self.pending_statements() {
+            Ok(statements) => statements,
+            Err(why) => {
+                self.flash(why, true, cx);
+                return;
+            }
+        };
+        let tab_id = self.active_tab().id;
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let production = session.environment == Environment::Production;
+        let deletes = !self.active_tab().edits.deleted.is_empty();
+        if production || review || (deletes && self.prefs.confirm_risky) {
+            let count = self.active_tab().edits.count();
+            let rows = if count == 1 {
+                "1 row".to_string()
+            } else {
+                format!("{count} rows")
+            };
+            let (title, body) = if production {
+                (
+                    "Save to production?".to_string(),
+                    format!(
+                        "This changes {rows} in {}, a production connection. It all saves or none of it does.",
+                        session.name
+                    ),
+                )
+            } else {
+                (
+                    "Save changes?".to_string(),
+                    format!(
+                        "This changes {rows}, in one transaction: it all saves or none of it does."
+                    ),
+                )
+            };
+            let require = production.then(|| session.name.clone());
+            let script = edits::script(session.conn.as_ref(), &statements);
+            let dialog = cx.new(|cx| {
+                ConfirmDialog::new(title, body, &script, require, window, cx)
+                    .action("Save changes", false)
+            });
+            self.show_confirm(dialog, Pending::Save { tab_id, statements }, window, cx);
+            return;
+        }
+        self.save_statements(tab_id, statements, window, cx);
+    }
+
+    /// Run the save in the background, then reload the table.
+    fn save_statements(
+        &mut self,
+        tab_id: usize,
+        statements: Vec<edits::Statement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(session) = tab
+            .session
+            .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+        else {
+            return;
+        };
+        let conn = session.conn.clone();
+        let store = self.store.clone();
+        tab.saving = true;
+        tab.flash = None;
+        cx.notify();
+        let work = cx.background_spawn(async move {
+            let started = std::time::Instant::now();
+            let saved = edits::save(conn.as_ref(), &statements);
+            if let Some(store) = store {
+                let script = edits::script(conn.as_ref(), &statements);
+                let (rows, error) = match &saved {
+                    Ok(rows) => (Some(*rows as u64), None),
+                    Err(err) => (None, Some(format!("{err:#}"))),
+                };
+                let _ = store.record(NewHistoryEntry {
+                    connection: &conn.id(),
+                    sql: &script,
+                    duration: started.elapsed(),
+                    rows,
+                    error: error.as_deref(),
+                });
+            }
+            saved
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = work.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(index) = this.tabs.iter().position(|t| t.id == tab_id) else {
+                    return;
+                };
+                let tab = &mut this.tabs[index];
+                tab.saving = false;
+                match saved {
+                    Ok(rows) => {
+                        tab.edits = Rc::default();
+                        let message = format!(
+                            "Saved · {rows} {} changed",
+                            if rows == 1 { "row" } else { "rows" }
+                        );
+                        if index == this.active {
+                            this.run_browse(window, cx);
+                        }
+                        this.tabs[index].flash = Some((message.into(), false));
+                    }
+                    Err(err) => tab.flash = Some((format!("{err:#}").into(), true)),
+                }
+                this.reload_history(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     // ---------------------------------------------------------------- grid
 
     /// Header click: browse tabs sort on the server (the whole table, not just
     /// the rows fetched); query tabs sort the rows they already have.
     fn sort_column(&mut self, column: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard_edits(cx) {
+            return;
+        }
         let tab = &mut self.tabs[self.active];
         let Some(grid) = &mut tab.grid else { return };
         let name = grid.data.columns[column].name.clone();
@@ -1664,7 +2151,10 @@ impl Workspace {
     fn step_selection(&mut self, dr: isize, dc: isize, extend: bool, cx: &mut Context<Self>) {
         let tab = &mut self.tabs[self.active];
         let Some(grid) = &tab.grid else { return };
-        let (rows, columns) = (grid.row_count(), grid.data.columns.len());
+        let (rows, columns) = (
+            grid.row_count() + tab.edits.inserted.len(),
+            grid.data.columns.len(),
+        );
         if rows == 0 || columns == 0 {
             return;
         }
@@ -1794,7 +2284,7 @@ impl Workspace {
         }
         // Keys are listed here rather than looked up: several bindings only
         // apply inside the editor or grid, which the palette's focus isn't.
-        let commands: [(&str, &str, Box<dyn gpui::Action>); 24] = [
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 27] = [
             ("Run Statement", "⌘↵", Box::new(RunQuery)),
             ("Run All", "⇧⌘↵", Box::new(RunAll)),
             ("Explain", "⌘E", Box::new(Explain)),
@@ -1804,6 +2294,9 @@ impl Workspace {
             ("Next Tab", "⌃⇥", Box::new(NextTab)),
             ("Previous Tab", "⌃⇧⇥", Box::new(PrevTab)),
             ("Settings…", "⌘,", Box::new(OpenSettings)),
+            ("Save Changes", "⌘S", Box::new(SaveEdits)),
+            ("Discard Changes", "", Box::new(DiscardEdits)),
+            ("Add Row", "", Box::new(AddRow)),
             ("Connections…", "⇧⌘N", Box::new(ShowConnections)),
             ("Disconnect", "⇧⌘W", Box::new(CloseConnection)),
             ("Open SQLite File…", "⌘O", Box::new(OpenFile)),
@@ -2063,6 +2556,11 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::edit_cell))
+            .on_action(cx.listener(Self::delete_rows))
+            .on_action(cx.listener(Self::add_row))
+            .on_action(cx.listener(Self::save_edits))
+            .on_action(cx.listener(Self::discard_edits))
             .on_action(cx.listener(Self::close_connection))
             .on_action(cx.listener(|this, _: &ShowConnections, window, cx| {
                 this.open_connect_tab(window, cx)
@@ -2540,7 +3038,8 @@ impl Workspace {
             .when_some(tab.browse.as_ref(), |el, browse| {
                 el.child(self.render_filter_bar(browse, theme, cx))
             })
-            .child(self.render_results_bar(theme))
+            .child(self.render_results_bar(theme, cx))
+            .children(self.render_edit_bar(theme, cx))
             .child(
                 div()
                     .flex_1()
@@ -2708,7 +3207,196 @@ impl Workspace {
             })
     }
 
-    fn render_results_bar(&self, theme: &Theme) -> impl IntoElement {
+    /// The cell being edited: its column, its value, and what to do with it.
+    fn render_edit_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tab = self.active_tab();
+        let editor = tab.editing.as_ref()?;
+        let column = tab
+            .grid
+            .as_ref()?
+            .data
+            .columns
+            .get(editor.column)?
+            .name
+            .clone();
+        let small = |button: gpui::Stateful<gpui::Div>| button.h(px(26.)).px(px(10.));
+        Some(
+            div()
+                .key_context("CellEditor")
+                .on_action(
+                    cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
+                        this.cancel_edit(window, cx)
+                    }),
+                )
+                .h(px(44.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .border_b_1()
+                .border_color(theme.line)
+                .bg(theme.s1)
+                .child(
+                    field(
+                        theme,
+                        Some(
+                            div()
+                                .max_w(px(180.))
+                                .truncate()
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.))
+                                .text_color(theme.acc)
+                                .child(column)
+                                .into_any_element(),
+                        ),
+                        &editor.input,
+                        true,
+                    )
+                    .flex_1(),
+                )
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "cell-null",
+                        "Set NULL",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.commit_edit(true, window, cx)),
+                    ),
+                )
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "cell-cancel",
+                        "Cancel",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
+                )
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "cell-done",
+                        "Done",
+                        ButtonKind::Primary,
+                        true,
+                    ))
+                    .pl(px(10.))
+                    .child(kbd_on_accent(theme, "↵"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.commit_edit(false, window, cx)),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The right of the results bar: staged changes and how to save them, or
+    /// how to start editing, or why this table can't be edited.
+    fn render_edit_status(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let tab = self.active_tab();
+        let small =
+            |button: gpui::Stateful<gpui::Div>| button.h(px(24.)).px(px(9.)).text_size(px(11.5));
+        let mut status = div().flex().items_center().gap(px(6.)).text_size(px(11.5));
+        if let Some((message, error)) = &tab.flash {
+            status = status.child(
+                div()
+                    .max_w(px(420.))
+                    .truncate()
+                    .mr(px(6.))
+                    .text_color(if *error { theme.err } else { theme.ok })
+                    .child(message.clone()),
+            );
+        }
+        if tab.saving {
+            return status
+                .child(div().text_color(theme.t2).child("Saving…"))
+                .into_any_element();
+        }
+        if !tab.edits.is_empty() {
+            let count = tab.edits.count();
+            return status
+                .child(div().size(px(7.)).rounded_full().bg(theme.warn))
+                .child(
+                    div()
+                        .mr(px(4.))
+                        .text_color(theme.text)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(if count == 1 {
+                            "1 change".to_string()
+                        } else {
+                            format!("{count} changes")
+                        }),
+                )
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "discard-edits",
+                        "Discard",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.discard_edits(&DiscardEdits, window, cx)
+                    })),
+                )
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "review-edits",
+                        "Review SQL",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.review_edits(window, cx))),
+                )
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "save-edits",
+                        "Save",
+                        ButtonKind::Primary,
+                        true,
+                    ))
+                    .pl(px(9.))
+                    .child(kbd_on_accent(theme, "⌘S"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.save_edits(&SaveEdits, window, cx)),
+                    ),
+                )
+                .into_any_element();
+        }
+        match self.edit_target() {
+            Ok(_) => status
+                .child(
+                    div()
+                        .mr(px(4.))
+                        .text_color(theme.t3)
+                        .child("Double-click a cell to edit"),
+                )
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "add-row",
+                        "+ Row",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| this.add_row(&AddRow, window, cx))),
+                )
+                .into_any_element(),
+            Err(why) if tab.browse.is_some() && tab.grid.is_some() => status
+                .child(div().text_color(theme.t3).child(why))
+                .into_any_element(),
+            Err(_) => status.into_any_element(),
+        }
+    }
+
+    fn render_results_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         // A status dot and word, then quieter facts about the result.
         let (dot, status): (Rgba, SharedString) = match &tab.query {
@@ -2779,6 +3467,8 @@ impl Workspace {
                     .text_color(theme.t3)
                     .child(fact)
             }))
+            .child(div().flex_1())
+            .child(self.render_edit_status(theme, cx))
     }
 
     fn render_results(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2802,6 +3492,13 @@ impl Workspace {
             let this = cx.entity().downgrade();
             let tab_id = tab.id;
             let callbacks = results::Callbacks {
+                edit: Rc::new({
+                    let this = this.clone();
+                    move |row, column, window, cx| {
+                        this.update(cx, |this, cx| this.begin_edit(row, column, window, cx))
+                            .ok();
+                    }
+                }),
                 select: Rc::new({
                     let this = this.clone();
                     move |row, column, extend, window, cx| {
@@ -2858,6 +3555,7 @@ impl Workspace {
                 widths,
                 selection: tab.selection,
                 sort,
+                edits: tab.edits.clone(),
             };
             return div()
                 .id("results")
@@ -2942,25 +3640,43 @@ impl Workspace {
             .border_l_1()
             .border_color(theme.line);
 
+        // The row as it will be once saved: staged values in place of fetched ones.
         let selected = tab
             .selection
             .zip(tab.grid.as_ref())
             .and_then(|(selection, grid)| {
                 let ix = selection.head.0;
-                (ix < grid.row_count()).then(|| (ix, grid.row(ix), &grid.data.columns))
+                let row_ref = Self::row_ref(tab, ix)?;
+                let values: Vec<(Option<Value>, bool)> = (0..grid.data.columns.len())
+                    .map(|col| match (tab.edits.value(row_ref, col), row_ref) {
+                        (Some(value), _) => (value.cloned(), true),
+                        (None, RowRef::Existing(r)) => {
+                            (Some(grid.data.rows[r][col].clone()), false)
+                        }
+                        (None, RowRef::New(_)) => (None, false),
+                    })
+                    .collect();
+                Some((ix, row_ref, values, &grid.data.columns))
             });
-        let Some((ix, row, columns)) = selected else {
+        let Some((ix, row_ref, row, columns)) = selected else {
             return panel
                 .child(panel_label(theme, "Inspector"))
                 .child(empty_hint(theme, "Select a row to see every field"));
         };
 
-        panel = panel.child(panel_label(theme, &format!("Row {}", ix + 1)));
+        let label = match row_ref {
+            RowRef::New(_) => "New row".to_string(),
+            RowRef::Existing(r) if tab.edits.deleted.contains(&r) => {
+                format!("Row {} · to delete", ix + 1)
+            }
+            RowRef::Existing(_) => format!("Row {}", ix + 1),
+        };
+        panel = panel.child(panel_label(theme, &label));
         let fields = div()
             .id("inspector-fields")
             .flex_1()
             .overflow_y_scroll()
-            .children(columns.iter().zip(row).map(|(column, value)| {
+            .children(columns.iter().zip(row).map(|(column, (value, edited))| {
                 div()
                     .px(px(12.))
                     .py(px(8.))
@@ -2978,13 +3694,18 @@ impl Workspace {
                             .text_color(theme.t3)
                             .child(SharedString::from(column.name.clone())),
                     )
-                    .child(if value.is_null() {
-                        div().italic().text_color(theme.t3).child("NULL")
-                    } else {
-                        let text = value.display();
-                        let shown = pretty_json(&text).unwrap_or_else(|| text.into_owned());
-                        div().child(SharedString::from(shown))
-                    })
+                    .child(
+                        match value {
+                            None => div().italic().text_color(theme.t3).child("default"),
+                            Some(Value::Null) => div().italic().text_color(theme.t3).child("NULL"),
+                            Some(value) => {
+                                let text = value.display();
+                                let shown = pretty_json(&text).unwrap_or_else(|| text.into_owned());
+                                div().child(SharedString::from(shown))
+                            }
+                        }
+                        .when(edited, |el| el.text_color(theme.warn)),
+                    )
             }));
         panel.child(fields)
     }

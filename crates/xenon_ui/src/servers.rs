@@ -115,6 +115,12 @@ impl Connection for Tunneled {
     fn uses_top(&self) -> bool {
         self.inner.uses_top()
     }
+    fn literal(&self, value: &xenon_driver::Value) -> String {
+        self.inner.literal(value)
+    }
+    fn begin(&self) -> &'static str {
+        self.inner.begin()
+    }
     fn tunnel(&self) -> Option<String> {
         Some(self.via.clone())
     }
