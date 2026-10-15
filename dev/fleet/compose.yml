@@ -10,16 +10,18 @@ name: xenon-fleet
 
 services:
   postgres:
-    # Debian-based for its self-signed "snakeoil" certificate: TLS on, like a real server.
+    # TLS on, with the fleet's own CA (dev/fleet/tls-setup/make.sh): copied in so
+    # the key belongs to postgres with mode 0600, as Postgres insists.
     image: postgres:17
     ports: ["55432:5432"]
-    command:
-      - "-c"
-      - "ssl=on"
-      - "-c"
-      - "ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem"
-      - "-c"
-      - "ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key"
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        mkdir -p /tls && cp /tls-src/server.pem /tls-src/server.key /tls-src/ca.pem /tls/ &&
+        chown postgres:postgres /tls/* && chmod 600 /tls/server.key &&
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.pem
+        -c ssl_key_file=/tls/server.key -c ssl_ca_file=/tls/ca.pem
     environment:
       POSTGRES_USER: xenon
       POSTGRES_PASSWORD: xenon
@@ -27,6 +29,9 @@ services:
     volumes:
       - postgres:/var/lib/postgresql/data
       - ../seed/out/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+      - ./tls:/tls-src:ro
+      # `xenon_cert` logs in with its client certificate (mutual TLS).
+      - ./tls-setup/postgres-cert-user.sh:/docker-entrypoint-initdb.d/zz-cert-user.sh:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "xenon", "-d", "shop"]
       interval: 2s
@@ -40,10 +45,13 @@ services:
       MYSQL_USER: xenon
       MYSQL_PASSWORD: xenon
       MYSQL_DATABASE: shop
-    command: ["--max-connections=50", "--performance-schema=OFF"]
+    command: ["--max-connections=50", "--performance-schema=OFF",
+              "--ssl-ca=/tls/ca.pem", "--ssl-cert=/tls/server.pem", "--ssl-key=/tls/server.key"]
     volumes:
       - mysql:/var/lib/mysql
       - ../seed/out/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+      - ./tls:/tls:ro
+      - ./tls-setup/mysql-cert-user.sql:/docker-entrypoint-initdb.d/zz-cert-user.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uxenon", "-pxenon"]
       interval: 2s
@@ -57,9 +65,12 @@ services:
       MARIADB_USER: xenon
       MARIADB_PASSWORD: xenon
       MARIADB_DATABASE: shop
+    command: ["--ssl-ca=/tls/ca.pem", "--ssl-cert=/tls/server.pem", "--ssl-key=/tls/server.key"]
     volumes:
       - mariadb:/var/lib/mysql
       - ../seed/out/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+      - ./tls:/tls:ro
+      - ./tls-setup/mysql-cert-user.sql:/docker-entrypoint-initdb.d/zz-cert-user.sql:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 2s

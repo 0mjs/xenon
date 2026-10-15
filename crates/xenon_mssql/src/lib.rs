@@ -19,7 +19,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt as _};
 use xenon_driver::{
     CancelHandle, Column, ColumnInfo, Connection, Feed, ForeignKey, IndexInfo, ObjectColumn,
     ObjectKind, Progress, QueryError, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject,
-    TableInfo, Value, referential_action,
+    TableInfo, TlsFiles, Value, referential_action,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -242,7 +242,19 @@ async fn open(options: &ConnectOptions) -> Result<Tds> {
             config.trust_cert();
         }
         // native-tls can't check the chain without the name; both verify fully.
-        SslMode::VerifyCa | SslMode::VerifyFull => config.encryption(EncryptionLevel::Required),
+        SslMode::VerifyCa | SslMode::VerifyFull => {
+            config.encryption(EncryptionLevel::Required);
+            // A private CA, trusted for this connection.
+            if !options.tls.ca.is_empty() {
+                TlsFiles::read(&options.tls.ca, "CA certificate")?;
+                let path = match options.tls.ca.strip_prefix("~/") {
+                    Some(rest) => std::env::var("HOME")
+                        .map_or_else(|_| options.tls.ca.clone(), |h| format!("{h}/{rest}")),
+                    None => options.tls.ca.clone(),
+                };
+                config.trust_cert_ca(path);
+            }
+        }
     }
     // Through a tunnel: connect to its local end, verify the certificate for `host`.
     let address = match options.address {
@@ -941,9 +953,13 @@ fn type_label(ty: ColumnType) -> &'static str {
         ColumnType::Guid => "uniqueidentifier",
         ColumnType::Decimaln => "decimal",
         ColumnType::Numericn => "numeric",
-        ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => "varbinary",
-        ColumnType::BigVarChar | ColumnType::BigChar | ColumnType::Text => "varchar",
-        ColumnType::NVarchar | ColumnType::NChar | ColumnType::NText => "nvarchar",
+        ColumnType::BigVarBin | ColumnType::BigBinary => "varbinary",
+        ColumnType::BigVarChar | ColumnType::BigChar => "varchar",
+        ColumnType::NVarchar | ColumnType::NChar => "nvarchar",
+        // The legacy types by name: they have no `=`, so saving edits must know.
+        ColumnType::Image => "image",
+        ColumnType::Text => "text",
+        ColumnType::NText => "ntext",
         ColumnType::Xml => "xml",
         ColumnType::Udt => "udt",
         ColumnType::SSVariant => "sql_variant",

@@ -226,6 +226,24 @@ pub fn default_name(engine: ServerEngine, options: &ConnectOptions) -> String {
 }
 
 /// A saved tunnel as connection settings (the password comes from the Keychain).
+/// A saved connection's certificate files, for connecting.
+pub fn tls_files(paths: &xenon_store::TlsPaths) -> xenon_driver::TlsFiles {
+    xenon_driver::TlsFiles {
+        ca: paths.ca.clone(),
+        cert: paths.cert.clone(),
+        key: paths.key.clone(),
+    }
+}
+
+/// Certificate files to save with a connection.
+pub fn tls_paths(files: &xenon_driver::TlsFiles) -> xenon_store::TlsPaths {
+    xenon_store::TlsPaths {
+        ca: files.ca.clone(),
+        cert: files.cert.clone(),
+        key: files.key.clone(),
+    }
+}
+
 pub fn ssh_options(tunnel: &xenon_store::SshTunnel) -> xenon_driver::SshOptions {
     xenon_driver::SshOptions {
         host: tunnel.host.clone(),

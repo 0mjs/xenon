@@ -7,3 +7,4 @@ xcuserdata/
 
 # Private notes (pricing, competitors): never committed
 /.private
+/dev/fleet/tls

@@ -18,7 +18,7 @@ use tokio_postgres::{CancelToken, Client, Config, SimpleQueryMessage};
 use xenon_driver::{
     CancelHandle, Column, ColumnInfo, Connection, Feed, ForeignKey, IndexInfo, ObjectColumn,
     ObjectKind, Progress, QueryError, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject,
-    TableInfo, Value, referential_action,
+    TableInfo, TlsFiles, Value, referential_action,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -36,7 +36,8 @@ fn wire_mode(ssl: SslMode) -> tokio_postgres::config::SslMode {
 /// Split a `postgres://` URL or libpq `key=value` string into fields, so it
 /// can be saved (with the password kept apart, in the Keychain).
 pub fn parse_url(url: &str) -> Result<ConnectOptions> {
-    let (url, ssl) = extract_sslmode(url);
+    let (url, tls) = extract_tls_files(url);
+    let (url, ssl) = extract_sslmode(&url);
     let config: Config = url.parse().context("invalid connection string")?;
     let host = match config.get_hosts().first() {
         Some(tokio_postgres::config::Host::Tcp(host)) => host.clone(),
@@ -58,6 +59,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         ssh: None,
         address: None,
         lock_timeout: None,
+        tls,
     })
 }
 
@@ -124,13 +126,14 @@ impl PostgresConnection {
     /// Connect with a `postgres://` URL or a libpq `key=value` string.
     /// Understands every libpq `sslmode`, including `verify-ca` and `verify-full`.
     pub fn connect_url(url: &str) -> Result<Self> {
-        let (url, ssl) = extract_sslmode(url);
+        let (url, tls) = extract_tls_files(url);
+        let (url, ssl) = extract_sslmode(&url);
         let mut config: Config = url.parse().context("invalid connection string")?;
         if let Some(ssl) = ssl {
             config.ssl_mode(wire_mode(ssl));
         }
         let ssl = ssl.unwrap_or(SslMode::Prefer);
-        Self::connect(config, ssl)
+        Self::connect(config, ssl, &tls)
     }
 
     pub fn connect_options(options: &ConnectOptions) -> Result<Self> {
@@ -177,10 +180,10 @@ impl PostgresConnection {
             // Connect to the tunnel; `host` still names the server for TLS.
             config.hostaddr(address.ip());
         }
-        Self::connect(config, options.ssl)
+        Self::connect(config, options.ssl, &options.tls)
     }
 
-    fn connect(mut config: Config, ssl: SslMode) -> Result<Self> {
+    fn connect(mut config: Config, ssl: SslMode, files: &TlsFiles) -> Result<Self> {
         // Read-only rides in the startup options (set above, or in a URL's `options`).
         let read_only = config
             .get_options()
@@ -188,7 +191,7 @@ impl PostgresConnection {
         if config.get_connect_timeout().is_none() {
             config.connect_timeout(CONNECT_TIMEOUT);
         }
-        let tls = tls_connector(ssl)?;
+        let tls = tls_connector(ssl, files)?;
         let name = connection_name(&config);
         let id = format!(
             "postgres:{}@{}:{}/{}",
@@ -770,8 +773,67 @@ fn extract_sslmode(url: &str) -> (String, Option<SslMode>) {
     (out, found)
 }
 
-fn tls_connector(ssl: SslMode) -> Result<MakeTlsConnector> {
+/// Pull libpq's `sslrootcert`, `sslcert` and `sslkey` (which tokio-postgres
+/// doesn't parse) out of a URL or `key=value` string.
+fn extract_tls_files(url: &str) -> (String, TlsFiles) {
+    let mut out = url.to_string();
+    let mut take = |key: &str| -> String {
+        let needle = format!("{key}=");
+        let Some(start) = out
+            .match_indices(&needle)
+            .map(|(i, _)| i)
+            .find(|&i| i == 0 || matches!(out.as_bytes()[i - 1], b'?' | b'&' | b' ' | b'\t'))
+        else {
+            return String::new();
+        };
+        let value_start = start + needle.len();
+        let end = out[value_start..]
+            .find(['&', ' ', '\t'])
+            .map_or(out.len(), |i| value_start + i);
+        let value = out[value_start..end].to_string();
+        // Take a separator with it: the one before, or else the one after.
+        let (from, to) = if start > 0 && matches!(out.as_bytes()[start - 1], b'&' | b' ' | b'\t') {
+            (start - 1, end)
+        } else if end < out.len() {
+            (start, end + 1)
+        } else {
+            (start, end)
+        };
+        out.replace_range(from..to, "");
+        if out.ends_with('?') {
+            out.pop();
+        }
+        // URL-encoded paths (`%2F`) as written in a URL.
+        value
+            .replace("%2F", "/")
+            .replace("%2f", "/")
+            .replace("%20", " ")
+            .replace("%7E", "~")
+    };
+    let tls = TlsFiles {
+        ca: take("sslrootcert"),
+        cert: take("sslcert"),
+        key: take("sslkey"),
+    };
+    (out, tls)
+}
+
+fn tls_connector(ssl: SslMode, files: &TlsFiles) -> Result<MakeTlsConnector> {
     let mut builder = native_tls::TlsConnector::builder();
+    if !files.ca.is_empty() {
+        let pem = TlsFiles::read(&files.ca, "CA certificate")?;
+        let ca = native_tls::Certificate::from_pem(&pem)
+            .context("The CA certificate isn't a PEM certificate")?;
+        builder.add_root_certificate(ca);
+    }
+    if let Some((cert, key)) = files.client()? {
+        let identity = native_tls::Identity::from_pkcs8(
+            &TlsFiles::read(cert, "client certificate")?,
+            &xenon_driver::pkcs8_key(&TlsFiles::read(key, "client key")?)?,
+        )
+        .context("The client certificate and key don't load as PEM")?;
+        builder.identity(identity);
+    }
     match ssl {
         SslMode::Disable | SslMode::Prefer | SslMode::Require => {
             builder
@@ -911,6 +973,41 @@ mod tests {
     }
 
     #[test]
+    fn certificate_files_come_from_urls_too() {
+        let options = parse_url(
+            "postgres://me@db.example.com/shop?sslrootcert=%7E/certs/ca.pem&sslmode=verify-full\
+             &sslcert=/certs/me.pem&sslkey=/certs/me.key",
+        )
+        .unwrap();
+        assert_eq!(options.ssl, SslMode::VerifyFull);
+        assert_eq!(
+            options.tls,
+            TlsFiles {
+                ca: "~/certs/ca.pem".into(),
+                cert: "/certs/me.pem".into(),
+                key: "/certs/me.key".into(),
+            }
+        );
+        assert_eq!(options.database, "shop");
+        // libpq's key=value form.
+        let options =
+            parse_url("host=db.example.com dbname=shop sslrootcert=/certs/ca.pem user=me").unwrap();
+        assert_eq!(options.tls.ca, "/certs/ca.pem");
+        assert_eq!(
+            (options.user.as_str(), options.database.as_str()),
+            ("me", "shop")
+        );
+        // Only the certificate parameter: the URL still parses.
+        assert_eq!(
+            parse_url("postgres://db/shop?sslcert=/c.pem&sslkey=/c.key")
+                .unwrap()
+                .tls
+                .cert,
+            "/c.pem"
+        );
+    }
+
+    #[test]
     fn options_from_url() {
         let options =
             parse_url("postgres://me:p%40ss@db.example.com:6543/shop?sslmode=verify-full").unwrap();
@@ -927,6 +1024,7 @@ mod tests {
                 ssh: None,
                 address: None,
                 lock_timeout: None,
+                tls: TlsFiles::default(),
             }
         );
         let minimal = parse_url("postgres://localhost").unwrap();
@@ -1220,6 +1318,55 @@ mod tests {
     }
 
     /// Expects the test server to use a self-signed certificate, as a local test server does.
+    /// The fleet's throwaway certificates (dev/fleet/tls-setup/make.sh).
+    fn fleet_tls(file: &str) -> String {
+        format!("{}/../../dev/fleet/tls/{file}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn live_mutual_tls() {
+        if std::env::var("XENON_TEST_PG_URL").is_err() {
+            return;
+        }
+        let base = ConnectOptions {
+            host: "127.0.0.1".into(),
+            port: Some(55432),
+            database: "shop".into(),
+            ssl: SslMode::VerifyFull,
+            ..Default::default()
+        };
+        let ca = || TlsFiles {
+            ca: fleet_tls("ca.pem"),
+            ..Default::default()
+        };
+        // Given the fleet's CA, verify-full checks the server and passes.
+        PostgresConnection::connect_options(&ConnectOptions {
+            user: "xenon".into(),
+            password: "xenon".into(),
+            tls: ca(),
+            ..base.clone()
+        })
+        .expect("verify-full with the fleet's CA");
+        // `xenon_cert` logs in with its client certificate, no password.
+        let cert = ConnectOptions {
+            user: "xenon_cert".into(),
+            tls: TlsFiles {
+                cert: fleet_tls("client.pem"),
+                key: fleet_tls("client.key"),
+                ..ca()
+            },
+            ..base.clone()
+        };
+        let conn = PostgresConnection::connect_options(&cert).expect("client certificate login");
+        let who = rows(conn.execute("select current_user", 1).unwrap());
+        assert_eq!(who.rows[0][0], Value::Text("xenon_cert".into()));
+        // Without the certificate, the server turns it away.
+        assert!(
+            PostgresConnection::connect_options(&ConnectOptions { tls: ca(), ..cert }).is_err(),
+            "logged in without a client certificate"
+        );
+    }
+
     #[test]
     fn live_verify_full_rejects_self_signed_certificates() {
         let Ok(url) = std::env::var("XENON_TEST_PG_URL") else {

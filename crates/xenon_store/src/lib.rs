@@ -136,6 +136,8 @@ pub struct SshTunnel {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// Only a handful exist at a time; boxing the server's fields would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Target {
     Sqlite {
         path: String,
@@ -148,7 +150,17 @@ pub enum Target {
         user: String,
         ssl: String,
         ssh: Option<SshTunnel>,
+        /// Certificate files for TLS (a private CA, a client certificate).
+        tls: TlsPaths,
     },
+}
+
+/// Paths to PEM files for TLS. Empty for none.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TlsPaths {
+    pub ca: String,
+    pub cert: String,
+    pub key: String,
 }
 
 /// A connection the user saved. The password, if any, is in the Keychain
@@ -289,6 +301,9 @@ impl Store {
             ("ssh_user", "text not null default ''"),
             ("ssh_key", "text not null default ''"),
             ("color", "text not null default ''"),
+            ("ssl_ca", "text not null default ''"),
+            ("ssl_cert", "text not null default ''"),
+            ("ssl_key", "text not null default ''"),
         ] {
             if !columns.iter().any(|c| c == column) {
                 conn.execute_batch(&format!(
@@ -350,7 +365,7 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
             "select id, name, kind, host, port, database, user, ssl, path, environment, read_only,
-                    ssh_host, ssh_port, ssh_user, ssh_key, color
+                    ssh_host, ssh_port, ssh_user, ssh_key, color, ssl_ca, ssl_cert, ssl_key
              from connections order by last_used desc, id desc",
         )?;
         let rows = stmt
@@ -379,6 +394,11 @@ impl Store {
                                     })
                                 })
                                 .transpose()?
+                        },
+                        tls: TlsPaths {
+                            ca: row.get(16)?,
+                            cert: row.get(17)?,
+                            key: row.get(18)?,
                         },
                     }
                 };
@@ -419,6 +439,7 @@ impl Store {
                 user,
                 ssl,
                 ssh,
+                ..
             } => (
                 engine.as_str(),
                 host.as_str(),
@@ -431,6 +452,11 @@ impl Store {
             ),
         };
         let ssh_port = ssh.port.map(i64::from);
+        let no_tls = TlsPaths::default();
+        let tls = match &saved.target {
+            Target::Server { tls, .. } => tls,
+            Target::Sqlite { .. } => &no_tls,
+        };
         let mut id = saved.id;
         if id == 0 && kind == "sqlite" {
             id = conn
@@ -447,20 +473,21 @@ impl Store {
             conn.execute(
                 "insert into connections
                      (name, kind, host, port, database, user, ssl, path, environment, read_only, last_used,
-                      ssh_host, ssh_port, ssh_user, ssh_key, color)
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                      ssh_host, ssh_port, ssh_user, ssh_key, color, ssl_ca, ssl_cert, ssl_key)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?,
-                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color],
+                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color, tls.ca, tls.cert, tls.key],
             )?;
             Ok(conn.last_insert_rowid())
         } else {
             conn.execute(
                 "update connections set name = ?1, kind = ?2, host = ?3, port = ?4, database = ?5,
                      user = ?6, ssl = ?7, path = ?8, environment = ?9, read_only = ?10, last_used = ?11,
-                     ssh_host = ?12, ssh_port = ?13, ssh_user = ?14, ssh_key = ?15, color = ?16
-                 where id = ?17",
+                     ssh_host = ?12, ssh_port = ?13, ssh_user = ?14, ssh_key = ?15, color = ?16,
+                     ssl_ca = ?17, ssl_cert = ?18, ssl_key = ?19
+                 where id = ?20",
                 params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?,
-                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color, id],
+                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color, tls.ca, tls.cert, tls.key, id],
             )?;
             Ok(id)
         }
@@ -845,6 +872,12 @@ mod tests {
                 database: "acme".into(),
                 user: "app".into(),
                 ssl: "require".into(),
+                // Kept with the connection, so it reconnects the same way.
+                tls: TlsPaths {
+                    ca: "~/certs/acme-ca.pem".into(),
+                    cert: "~/certs/me.pem".into(),
+                    key: "~/certs/me.key".into(),
+                },
             },
             environment: Environment::Production,
             read_only: true,
@@ -934,6 +967,7 @@ mod tests {
                     user: "app".into(),
                     ssl: "require".into(),
                     ssh: Some(tunnel.clone()),
+                    tls: TlsPaths::default(),
                 },
                 environment: Environment::Production,
                 read_only: true,

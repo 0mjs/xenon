@@ -7,3 +7,5 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Reading PEM certificates and keys for mutual TLS.
+pem = "3"

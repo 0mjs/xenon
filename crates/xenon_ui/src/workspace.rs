@@ -168,6 +168,7 @@ impl Profile {
                 user,
                 ssl,
                 ssh,
+                tls,
             } => RequestTarget::Server(
                 *engine,
                 ConnectOptions {
@@ -182,6 +183,7 @@ impl Profile {
                     address: None,
                     ssh: ssh.as_ref().map(servers::ssh_options),
                     lock_timeout: None,
+                    tls: servers::tls_files(tls),
                 },
             ),
         };
@@ -254,6 +256,7 @@ impl Profile {
                 user: options.user.clone(),
                 ssl: options.ssl.as_str().to_string(),
                 ssh: options.ssh.as_ref().map(servers::ssh_tunnel),
+                tls: servers::tls_paths(&options.tls),
             },
         }
     }

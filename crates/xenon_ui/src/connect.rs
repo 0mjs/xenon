@@ -93,6 +93,10 @@ pub struct ConnectDialog {
     ssh_port: Entity<InputState>,
     ssh_user: Entity<InputState>,
     ssh_key: Entity<InputState>,
+    /// PEM files: a private CA to trust, a client certificate and its key.
+    tls_ca: Entity<InputState>,
+    tls_cert: Entity<InputState>,
+    tls_key: Entity<InputState>,
     ssh_password: Entity<InputState>,
     environment: Environment,
     read_only: bool,
@@ -156,6 +160,7 @@ impl ConnectDialog {
                         user,
                         ssl,
                         ssh,
+                        tls,
                     } => (
                         None,
                         *engine,
@@ -173,6 +178,7 @@ impl ConnectDialog {
                                 ..servers::ssh_options(tunnel)
                             }),
                             lock_timeout: None,
+                            tls: servers::tls_files(tls),
                         },
                     ),
                 };
@@ -228,6 +234,9 @@ impl ConnectDialog {
         );
         let ssh_user = field("from ~/.ssh/config", tunnel.user, window, cx);
         let ssh_key = field("agent or ~/.ssh/config", tunnel.key_file, window, cx);
+        let tls_ca = field("~/certs/ca.pem", options.tls.ca.clone(), window, cx);
+        let tls_cert = field("~/certs/client.pem", options.tls.cert.clone(), window, cx);
+        let tls_key = field("~/certs/client.key", options.tls.key.clone(), window, cx);
         let ssh_password = cx.new(|cx| {
             InputState::new(window, cx)
                 .masked(true)
@@ -295,6 +304,9 @@ impl ConnectDialog {
             ssh_user,
             ssh_key,
             ssh_password,
+            tls_ca,
+            tls_cert,
+            tls_key,
             _subscriptions: subscriptions,
         }
     }
@@ -376,6 +388,11 @@ impl ConnectDialog {
                     ssh: None,
                     address: None,
                     lock_timeout: None,
+                    tls: xenon_driver::TlsFiles {
+                        ca: value(&self.tls_ca, cx),
+                        cert: value(&self.tls_cert, cx),
+                        key: value(&self.tls_key, cx),
+                    },
                 }
             };
             options.read_only = self.read_only;
@@ -468,6 +485,11 @@ impl Render for ConnectDialog {
         let database_focused = focused(&self.database);
         let user_focused = focused(&self.user);
         let password_focused = focused(&self.password);
+        let tls_focus = [
+            focused(&self.tls_ca),
+            focused(&self.tls_cert),
+            focused(&self.tls_key),
+        ];
         let ssh_focus = [
             focused(&self.ssh_host),
             focused(&self.ssh_port),
@@ -649,6 +671,42 @@ impl Render for ConnectDialog {
                         .child(labelled("Password", &self.password, password_focused)),
                 )
                 .child(section(&theme, "SSL mode", ssl_picker))
+                // Certificates, for a private CA or a server that wants a client one.
+                .when(self.ssl != SslMode::Disable, |el| {
+                    let sql_server = self.engine == ServerEngine::SqlServer;
+                    el.child(
+                        div()
+                            .flex()
+                            .gap(px(10.))
+                            .child(
+                                labelled("CA certificate", &self.tls_ca, tls_focus[0])
+                                    .flex_1(),
+                            )
+                            .when(!sql_server, |el| {
+                                el.child(
+                                    labelled("Client certificate", &self.tls_cert, tls_focus[1])
+                                        .flex_1(),
+                                )
+                                .child(
+                                    labelled("Client key", &self.tls_key, tls_focus[2])
+                                        .flex_1(),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .mt(px(-4.))
+                            .text_size(px(11.5))
+                            .text_color(theme.t3)
+                            .child(if sql_server {
+                                "Optional, a PEM file: a private CA to trust. (SQL Server doesn't \
+                                 log in with client certificates.)"
+                            } else {
+                                "Optional, PEM files: a private CA to trust, and a client \
+                                 certificate for servers that ask for one."
+                            }),
+                    )
+                })
                 .when(
                     self.environment == Environment::Production
                         && !matches!(self.ssl, SslMode::VerifyFull | SslMode::VerifyCa),

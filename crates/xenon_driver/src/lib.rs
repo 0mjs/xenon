@@ -361,6 +361,51 @@ pub struct ConnectOptions {
     /// Give up waiting for a lock after this long, so a statement queued behind
     /// another session's lock fails instead of hanging (and holding up others).
     pub lock_timeout: Option<Duration>,
+    /// A CA to trust, and a client certificate to log in with (mutual TLS).
+    pub tls: TlsFiles,
+}
+
+/// Certificate files for TLS, as PEM. Empty for none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TlsFiles {
+    /// A CA certificate to trust besides the system's (a private CA).
+    pub ca: String,
+    /// The client certificate, for servers that want one (mutual TLS).
+    pub cert: String,
+    /// The client certificate's private key (PKCS#8 or PKCS#1).
+    pub key: String,
+}
+
+impl TlsFiles {
+    pub fn is_empty(&self) -> bool {
+        self.ca.is_empty() && self.cert.is_empty() && self.key.is_empty()
+    }
+
+    /// Read `path` (a leading `~` is the home folder), saying which file it was.
+    pub fn read(path: &str, what: &str) -> anyhow::Result<Vec<u8>> {
+        let path = match path.strip_prefix("~/") {
+            Some(rest) => std::env::var("HOME")
+                .map(|home| format!("{home}/{rest}"))
+                .unwrap_or_else(|_| path.to_string()),
+            None => path.to_string(),
+        };
+        std::fs::read(&path)
+            .map_err(|err| anyhow::anyhow!("Couldn't read the {what} ({path}): {err}"))
+    }
+
+    /// Both halves of a client certificate, or neither.
+    pub fn client(&self) -> anyhow::Result<Option<(&str, &str)>> {
+        match (self.cert.is_empty(), self.key.is_empty()) {
+            (true, true) => Ok(None),
+            (false, false) => Ok(Some((&self.cert, &self.key))),
+            (false, true) => Err(anyhow::anyhow!(
+                "A client certificate needs its key file too."
+            )),
+            (true, false) => Err(anyhow::anyhow!(
+                "A client key needs its certificate file too."
+            )),
+        }
+    }
 }
 
 /// An SSH server to tunnel through. Anything left empty comes from
@@ -374,6 +419,52 @@ pub struct SshOptions {
     pub key_file: String,
     /// The SSH password, or the key's passphrase. Kept in the Keychain.
     pub password: String,
+}
+
+/// A private key as PKCS#8 PEM, which native-TLS wants: PKCS#8 as is, an RSA
+/// key in PKCS#1 (`BEGIN RSA PRIVATE KEY`) wrapped. Other kinds are refused
+/// with the command that converts them.
+pub fn pkcs8_key(pem_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let block =
+        pem::parse(pem_bytes).map_err(|_| anyhow::anyhow!("The client key isn't a PEM key."))?;
+    match block.tag() {
+        "PRIVATE KEY" => Ok(pem_bytes.to_vec()),
+        "RSA PRIVATE KEY" => {
+            // PrivateKeyInfo { version 0, rsaEncryption, OCTET STRING <PKCS#1> }.
+            let algorithm = [
+                0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05,
+                0x00,
+            ];
+            let mut body = vec![0x02, 0x01, 0x00];
+            body.extend_from_slice(&algorithm);
+            body.extend(der_wrap(0x04, block.contents()));
+            let der = der_wrap(0x30, &body);
+            Ok(pem::encode(&pem::Pem::new("PRIVATE KEY", der)).into_bytes())
+        }
+        other => Err(anyhow::anyhow!(
+            "The client key is a {other}; Xenon reads PKCS#8 and RSA keys. Convert it with \
+             `openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem`."
+        )),
+    }
+}
+
+/// A DER element: `tag`, its length, `contents`.
+fn der_wrap(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let len = contents.len();
+    if len < 0x80 {
+        out.push(len as u8);
+    } else {
+        let bytes: Vec<u8> = len
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|b| *b == 0)
+            .collect();
+        out.push(0x80 | bytes.len() as u8);
+        out.extend(bytes);
+    }
+    out.extend_from_slice(contents);
+    out
 }
 
 /// [`Connection::unchanged`] for a column `=` compares exactly (and floats
@@ -537,6 +628,43 @@ pub trait Connection: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rsa_keys_convert_to_pkcs8_as_openssl_does() {
+        // A throwaway 1024-bit test key, and `openssl pkcs8 -topk8 -nocrypt` of it.
+        let pkcs1 = include_bytes!("../tests/keys/rsa-pkcs1.pem");
+        let expected =
+            pem::parse(include_bytes!("../tests/keys/rsa-pkcs8.pem").as_slice()).unwrap();
+        let converted = pem::parse(pkcs8_key(pkcs1).unwrap()).unwrap();
+        assert_eq!(converted.tag(), "PRIVATE KEY");
+        assert_eq!(converted.contents(), expected.contents());
+        // PKCS#8 passes through; anything else says how to convert it.
+        let pkcs8 = include_bytes!("../tests/keys/rsa-pkcs8.pem");
+        assert_eq!(pkcs8_key(pkcs8).unwrap(), pkcs8.to_vec());
+        let ec = b"-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n";
+        assert!(
+            pkcs8_key(ec)
+                .unwrap_err()
+                .to_string()
+                .contains("openssl pkcs8")
+        );
+    }
+
+    #[test]
+    fn client_certificates_need_both_halves() {
+        let files = |cert: &str, key: &str| TlsFiles {
+            ca: String::new(),
+            cert: cert.into(),
+            key: key.into(),
+        };
+        assert_eq!(files("", "").client().unwrap(), None);
+        assert_eq!(
+            files("a.pem", "a.key").client().unwrap(),
+            Some(("a.pem", "a.key"))
+        );
+        assert!(files("a.pem", "").client().is_err());
+        assert!(files("", "a.key").client().is_err());
+    }
 
     #[test]
     fn enum_options_from_type_text() {

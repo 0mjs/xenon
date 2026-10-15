@@ -31,6 +31,8 @@ jobs:
           # A throwaway key for the SSH bastion (as dev/fleet/up.sh makes).
           mkdir -p dev/fleet/ssh
           ssh-keygen -q -t ed25519 -N '' -C xenon-fleet -f dev/fleet/ssh/id_ed25519
+          # Throwaway certificates for the TLS tests (as up.sh makes).
+          dev/fleet/tls-setup/make.sh
           docker compose -f dev/fleet/compose.yml up -d --wait postgres mysql mariadb mssql bastion
           # SQL Server has no init-script folder: load its seed by hand.
           docker compose -f dev/fleet/compose.yml exec -T mssql \

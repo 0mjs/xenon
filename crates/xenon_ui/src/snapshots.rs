@@ -259,6 +259,7 @@ fn seed_saved(store: &Store, shop: &Path) {
                 host: "bastion.billing.internal".into(),
                 ..Default::default()
             }),
+            tls: Default::default(),
         },
         environment,
         read_only: false,

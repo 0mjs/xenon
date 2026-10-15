@@ -14,7 +14,7 @@ use mysql::{Conn, Opts, OptsBuilder, SslOpts};
 use xenon_driver::{
     CancelHandle, Column, ColumnInfo, Connection, Feed, ForeignKey, IndexInfo, ObjectColumn,
     ObjectKind, Progress, QueryError, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject,
-    TableInfo, Value, referential_action,
+    TableInfo, TlsFiles, Value, referential_action,
 };
 pub use xenon_driver::{ConnectOptions, SslMode};
 
@@ -54,10 +54,17 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         _ => (host_port.trim_matches(['[', ']']).to_string(), None),
     };
     let mut ssl = SslMode::Prefer;
+    let mut tls = TlsFiles::default();
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
+        match key.to_ascii_lowercase().replace('_', "-").as_str() {
+            "ssl-ca" | "sslca" => tls.ca = decode(value),
+            "ssl-cert" | "sslcert" => tls.cert = decode(value),
+            "ssl-key" | "sslkey" => tls.key = decode(value),
+            _ => {}
+        }
         if matches!(
             key.to_ascii_lowercase().as_str(),
             "ssl-mode" | "sslmode" | "ssl_mode"
@@ -83,7 +90,67 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         ssh: None,
         address: None,
         lock_timeout: None,
+        tls,
     })
+}
+
+/// A client certificate bundled as a PKCS#12 file (owner-only, in the temp
+/// folder), which native-TLS needs; deleted when the connection is.
+struct Identity {
+    path: std::path::PathBuf,
+}
+
+const IDENTITY_PASSWORD: &str = "xenon";
+
+impl Identity {
+    fn bundle(cert: &str, key: &str) -> Result<Self> {
+        let der = |bytes: Vec<u8>, what: &str| -> Result<Vec<u8>> {
+            Ok(pem::parse(bytes)
+                .map_err(|_| anyhow!("The {what} isn't PEM."))?
+                .into_contents())
+        };
+        let cert = der(
+            TlsFiles::read(cert, "client certificate")?,
+            "client certificate",
+        )?;
+        let key = der(
+            xenon_driver::pkcs8_key(&TlsFiles::read(key, "client key")?)?,
+            "client key",
+        )?;
+        let pfx = p12::PFX::new(&cert, &key, None, IDENTITY_PASSWORD, "xenon")
+            .ok_or_else(|| anyhow!("Couldn't bundle the client certificate and key."))?;
+        let path = std::env::temp_dir().join(format!(
+            "xenon-identity-{}-{}.p12",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?
+            .write_all(&pfx.to_der())?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for Identity {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn expand_home(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => {
+            std::env::var("HOME").map_or_else(|_| path.to_string(), |h| format!("{h}/{rest}"))
+        }
+        None => path.to_string(),
+    }
 }
 
 /// Undo `%xx` escapes in a URL part.
@@ -126,6 +193,8 @@ pub struct MysqlConnection {
 /// the main connection is running.
 struct MyCancel {
     opts: Opts,
+    /// The client certificate `opts` points at, kept while it's needed.
+    _identity: Option<Arc<Identity>>,
     connection_id: u32,
     /// Set when the user cancels (not the row limit), so the rows read so far are kept.
     user: std::sync::atomic::AtomicBool,
@@ -207,18 +276,32 @@ impl MysqlConnection {
             .additional_capabilities(mysql::consts::CapabilityFlags::CLIENT_FOUND_ROWS)
             .init(init);
 
+        let identity = match options.tls.client()? {
+            Some((cert, key)) => Some(Arc::new(Identity::bundle(cert, key)?)),
+            None => None,
+        };
+        let ca = (!options.tls.ca.is_empty()).then(|| {
+            // Read it here, so a missing file says so (not a TLS error).
+            TlsFiles::read(&options.tls.ca, "CA certificate").map(|_| options.tls.ca.clone())
+        });
+        let ca = ca.transpose()?;
         let tls = |mode: SslMode| -> Option<SslOpts> {
+            let base = SslOpts::default()
+                .with_root_cert_path(
+                    ca.clone()
+                        .map(|p| std::path::PathBuf::from(expand_home(&p))),
+                )
+                .with_client_identity(identity.as_ref().map(|i| {
+                    mysql::ClientIdentity::new(i.path.clone()).with_password(IDENTITY_PASSWORD)
+                }));
             match mode {
                 SslMode::Disable => None,
                 SslMode::Prefer | SslMode::Require => Some(
-                    SslOpts::default()
-                        .with_danger_accept_invalid_certs(true)
+                    base.with_danger_accept_invalid_certs(true)
                         .with_danger_skip_domain_validation(true),
                 ),
-                SslMode::VerifyCa => {
-                    Some(SslOpts::default().with_danger_skip_domain_validation(true))
-                }
-                SslMode::VerifyFull => Some(SslOpts::default()),
+                SslMode::VerifyCa => Some(base.with_danger_skip_domain_validation(true)),
+                SslMode::VerifyFull => Some(base),
             }
         };
         let opts: Opts = builder.clone().ssl_opts(tls(options.ssl)).into();
@@ -268,6 +351,7 @@ impl MysqlConnection {
             read_only: options.read_only,
             cancel: Arc::new(MyCancel {
                 opts,
+                _identity: identity,
                 connection_id: conn.connection_id(),
                 user: Default::default(),
             }),
@@ -645,6 +729,15 @@ impl Connection for MysqlConnection {
             // Spatial values come back in a form that doesn't compare reliably.
             "geometry" | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring"
             | "multipolygon" | "geometrycollection" | "geomcollection" => None,
+            // Read back as exact text, but `float` keeps single precision: `f = 0.1`
+            // never matches. Compare as the floating-point number it is.
+            "float" | "double" | "real" => match loaded {
+                Value::Decimal(text) | Value::Text(text) => match text.parse::<f64>() {
+                    Ok(n) => xenon_driver::default_unchanged(self, column, &Value::Real(n)),
+                    Err(_) => None,
+                },
+                _ => xenon_driver::default_unchanged(self, column, loaded),
+            },
             _ => xenon_driver::default_unchanged(self, column, loaded),
         }
     }
@@ -866,6 +959,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn certificate_files_come_from_urls() {
+        let options = parse_url(
+            "mysql://me@db.example.com/shop?ssl-mode=VERIFY_IDENTITY&ssl-ca=%2Fcerts%2Fca.pem\
+             &ssl_cert=/certs/me.pem&ssl-key=/certs/me.key",
+        )
+        .unwrap();
+        assert_eq!(options.ssl, SslMode::VerifyFull);
+        assert_eq!(options.tls.ca, "/certs/ca.pem");
+        assert_eq!(options.tls.cert, "/certs/me.pem");
+        assert_eq!(options.tls.key, "/certs/me.key");
+    }
+
+    #[test]
     fn urls() {
         let options =
             parse_url("mysql://app:s%40cret@db.example.com:3307/shop?ssl-mode=REQUIRED").unwrap();
@@ -1002,6 +1108,56 @@ mod live {
     fn fleet(port: u16) -> MysqlConnection {
         MysqlConnection::connect_options(&fleet_options(port))
             .expect("is the fleet up? dev/fleet/up.sh mysql mariadb")
+    }
+
+    /// `xenon_cert` must present the fleet's client certificate (require x509);
+    /// the fleet's CA makes verify-full pass.
+    fn mutual_tls(port: u16) {
+        let tls = |file: &str| format!("{}/../../dev/fleet/tls/{file}", env!("CARGO_MANIFEST_DIR"));
+        let with = |cert: bool| ConnectOptions {
+            user: "xenon_cert".into(),
+            password: "xenon".into(),
+            ssl: SslMode::VerifyFull,
+            tls: TlsFiles {
+                ca: tls("ca.pem"),
+                cert: if cert {
+                    tls("client.pem")
+                } else {
+                    String::new()
+                },
+                key: if cert {
+                    tls("client.key")
+                } else {
+                    String::new()
+                },
+            },
+            ..fleet_options(port)
+        };
+        let conn = MysqlConnection::connect_options(&with(true)).expect("client certificate login");
+        let who = rows(&conn, "select current_user()");
+        assert!(
+            matches!(&who.rows[0][0], Value::Text(user) if user.starts_with("xenon_cert@")),
+            "{:?}",
+            who.rows[0][0]
+        );
+        assert!(
+            MysqlConnection::connect_options(&with(false)).is_err(),
+            "logged in without a client certificate"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn mutual_tls_mysql() {
+        let _serial = serial();
+        mutual_tls(53306);
+    }
+
+    #[test]
+    #[ignore]
+    fn mutual_tls_mariadb() {
+        let _serial = serial();
+        mutual_tls(53307);
     }
 
     fn rows(conn: &MysqlConnection, sql: &str) -> ResultSet {

@@ -253,6 +253,7 @@ fn options_from_env(engine: ServerEngine, env: &str, port: u16) -> ConnectOption
         ssh: None,
         address: None,
         lock_timeout: None,
+        tls: Default::default(),
     }
 }
 
@@ -341,6 +342,7 @@ fn parse_pgpass(text: &str, source: &str) -> Vec<Found> {
                         ssh: None,
                         address: None,
                         lock_timeout: None,
+                        tls: Default::default(),
                     },
                 ),
             })

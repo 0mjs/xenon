@@ -44,6 +44,7 @@ pub(crate) fn plan(text: &str, saved: &[SavedConnection]) -> Plan {
                         user: options.user.clone(),
                         ssl: options.ssl.as_str().to_string(),
                         ssh: None,
+                        tls: servers::tls_paths(&options.tls),
                     },
                     servers::default_name(engine, &options),
                     options.password.clone(),
