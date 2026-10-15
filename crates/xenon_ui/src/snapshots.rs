@@ -441,6 +441,10 @@ fn snapshots() {
             let _ = window;
         });
         shot.act(|w, _, _| {
+            // It ran, failed, and was rolled back…
+            let error = w.error_text().unwrap_or_default();
+            assert!(error.contains("nothing it did was kept"), "{error}");
+            // …so the first statement's change isn't there.
             let status = w.sessions[0]
                 .conn
                 .execute("select status from orders where id = 1", 1)
@@ -449,6 +453,33 @@ fn snapshots() {
                 panic!("no rows")
             };
             assert_ne!(rows.rows[0][0], xenon_driver::Value::Text("lost".into()));
+        });
+        // On production a write asks first, and so does Fetch all re-running one.
+        shot.act(|w, window, cx| {
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value("delete from orders where id > 590 returning id", window, cx)
+            });
+            w.run(crate::workspace::RunScope::All, window, cx);
+            assert!(w.confirm.is_some(), "a production write ran without asking");
+            w.confirm = None;
+            w.prefs.row_limit = 2;
+            let tab = w.active_tab().id;
+            w.execute(
+                tab,
+                "delete from orders where id > 590 returning id".into(),
+                None,
+                cx,
+            );
+        });
+        shot.act(|w, window, cx| {
+            w.fetch_all(window, cx);
+            assert!(
+                w.confirm.is_some(),
+                "Fetch all re-ran a production write without asking"
+            );
+            w.confirm = None;
+            w.prefs.row_limit = 100_000;
         });
         shot.save(&format!("29-script-rolled-back-{suffix}"));
         shot.act(|w, _, _| w.sessions[0].environment = xenon_store::Environment::None);

@@ -49,7 +49,11 @@ fn comment_end(bytes: &[u8], i: usize, lexing: Lexing) -> Option<usize> {
         }
         (b'#', _, Lexing::Mysql) => Some(line_end(i)),
         // MySQL runs what's inside `/*! … */`: it's code, not a comment.
-        (b'/', Some(b'*'), Lexing::Mysql) if bytes.get(i + 2) == Some(&b'!') => None,
+        (b'/', Some(b'*'), Lexing::Mysql)
+            if bytes.get(i + 2) == Some(&b'!') || bytes[i..].starts_with(b"/*M!") =>
+        {
+            None
+        }
         (b'/', Some(b'*'), _) => Some(skip_block_comment(bytes, i)),
         _ => None,
     }
@@ -58,10 +62,18 @@ fn comment_end(bytes: &[u8], i: usize, lexing: Lexing) -> Option<usize> {
 /// Step past the opening of a MySQL executable comment (`/*!` and its version
 /// number) at `i`, so what follows is read as code.
 fn executable_comment_start(bytes: &[u8], i: usize, lexing: Lexing) -> Option<usize> {
-    if lexing != Lexing::Mysql || !bytes[i..].starts_with(b"/*!") {
+    // MariaDB also runs `/*M! … */`.
+    let opening = if bytes[i..].starts_with(b"/*!") {
+        3
+    } else if bytes[i..].starts_with(b"/*M!") {
+        4
+    } else {
+        return None;
+    };
+    if lexing != Lexing::Mysql {
         return None;
     }
-    let mut j = i + 3;
+    let mut j = i + opening;
     while j < bytes.len() && bytes[j].is_ascii_digit() {
         j += 1;
     }
@@ -300,10 +312,44 @@ const READS: &[&str] = &[
     "with",
 ];
 
-/// Verbs that change data or schema, wherever they appear in a statement.
+/// Verbs that change data or schema, wherever they appear in a statement, and
+/// functions that change something even when called from a `select`.
 const WRITE_VERBS: &[&str] = &[
-    "insert", "update", "delete", "merge", "upsert", "replace", "drop", "truncate", "alter",
-    "create", "rename", "grant", "revoke", "exec", "execute", "call", "copy",
+    "insert",
+    "update",
+    "delete",
+    "merge",
+    "upsert",
+    "replace",
+    "drop",
+    "truncate",
+    "alter",
+    "create",
+    "rename",
+    "grant",
+    "revoke",
+    "exec",
+    "execute",
+    "call",
+    "copy",
+    // Postgres: sessions, settings, sequences, large objects, the server itself.
+    "pg_terminate_backend",
+    "pg_cancel_backend",
+    "pg_reload_conf",
+    "pg_rotate_logfile",
+    "pg_switch_wal",
+    "pg_create_restore_point",
+    "pg_promote",
+    "set_config",
+    "setval",
+    "nextval",
+    "dblink_exec",
+    "lo_import",
+    "lo_export",
+    "lo_unlink",
+    "pg_file_write",
+    // SQL Server: the shell.
+    "xp_cmdshell",
 ];
 
 fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
@@ -344,7 +390,12 @@ fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
             _ => hidden()?,
         }
     } else {
-        first
+        // An unknown statement is a write; one hiding a worse verb (a SQL Server
+        // batch without semicolons, `if … drop table`) is as bad as that verb.
+        match hidden() {
+            Some(worse @ ("drop" | "truncate" | "alter" | "delete" | "update")) => worse,
+            _ => first,
+        }
     };
     let target = |after: &str| {
         let ix = words.iter().position(|w| w == after)?;
@@ -396,10 +447,55 @@ pub fn controls_transaction(sql: &str) -> bool {
     })
 }
 
+/// Whether running `sql` leaves a transaction open (`Some(true)` after
+/// `begin`, `Some(false)` after `commit` / `rollback`), by its last such
+/// statement; `None` when it neither begins nor ends one. For engines that can't
+/// say themselves.
+pub fn transaction_effect(sql: &str) -> Option<bool> {
+    split_statements(sql).into_iter().rev().find_map(|range| {
+        let words = words_outside_literals(&sql[range], Lexing::Standard);
+        let second = words.get(1).map(String::as_str);
+        match words.first().map(String::as_str)? {
+            // Not T-SQL's `begin … end` block, which is no transaction.
+            "begin"
+                if matches!(
+                    second,
+                    None | Some(
+                        "tran"
+                            | "transaction"
+                            | "work"
+                            | "read"
+                            | "isolation"
+                            | "deferred"
+                            | "immediate"
+                            | "exclusive"
+                    )
+                ) =>
+            {
+                Some(true)
+            }
+            "start" if second == Some("transaction") => Some(true),
+            "commit" | "rollback" | "abort" => Some(false),
+            // Postgres's `end` commits; T-SQL's ends a block.
+            "end" if matches!(second, None | Some("transaction" | "work")) => Some(false),
+            _ => None,
+        }
+    })
+}
+
 /// True when `sql` tries to turn a read-only session back into a read-write
 /// one (`set transaction read write`, `begin read write`,
 /// `set default_transaction_read_only = off`…).
 pub fn lifts_read_only(sql: &str) -> bool {
+    // Named in a string too: Postgres's `set_config('default_transaction_read_only', 'off', …)`.
+    let lower = sql.to_ascii_lowercase();
+    if ["transaction_read_only", "tx_read_only"]
+        .iter()
+        .any(|name| lower.contains(name) && !lower.contains(&format!("show {name}")))
+        && (lower.contains("set") || lower.contains("reset"))
+    {
+        return true;
+    }
     statements_both_ways(sql).any(|words| {
         words
             .windows(2)
@@ -711,6 +807,31 @@ mod tests {
     }
 
     #[test]
+    fn sql_server_batches_without_semicolons_count_every_statement() {
+        for (sql, risk) in [
+            (
+                "select * from orders\ndelete from orders where id = 1",
+                Risk::Write,
+            ),
+            (
+                "declare @x int = 1\ndelete from orders where id = @x",
+                Risk::Write,
+            ),
+            (
+                "if exists (select 1 from orders) drop table orders",
+                Risk::Destructive,
+            ),
+            (
+                "set nocount on\nupdate orders set status = 'x'",
+                Risk::EveryRow,
+            ),
+            ("/*M!100100 drop table orders */", Risk::Destructive),
+        ] {
+            assert_eq!(assess(sql).map(|r| r.0), Some(risk), "{sql}");
+        }
+    }
+
+    #[test]
     fn anything_not_known_to_read_counts_as_a_write() {
         for sql in [
             "lock table orders in exclusive mode",
@@ -724,6 +845,8 @@ mod tests {
             "set global max_connections = 1",
             "pragma foreign_keys = off",
             "begin insert into orders values (1) end",
+            "select pg_terminate_backend(42)",
+            "select nextval('orders_id_seq')",
             "notify channel",
         ] {
             assert_eq!(assess(sql).map(|r| r.0), Some(Risk::Write), "{sql}");
@@ -778,6 +901,30 @@ mod tests {
     }
 
     #[test]
+    fn transaction_effect_follows_the_last_begin_or_commit() {
+        assert_eq!(transaction_effect("begin; update t set a = 1"), Some(true));
+        assert_eq!(
+            transaction_effect("start transaction read only"),
+            Some(true)
+        );
+        assert_eq!(
+            transaction_effect("BEGIN TRAN; delete from t where id = 1"),
+            Some(true)
+        );
+        assert_eq!(
+            transaction_effect("begin; update t set a = 1; commit"),
+            Some(false)
+        );
+        assert_eq!(transaction_effect("rollback"), Some(false));
+        assert_eq!(transaction_effect("select 1"), None);
+        // A T-SQL block isn't a transaction.
+        assert_eq!(
+            transaction_effect("begin insert into t values (1) end"),
+            None
+        );
+    }
+
+    #[test]
     fn spots_attempts_to_lift_read_only() {
         for sql in [
             "set transaction read write",
@@ -787,6 +934,7 @@ mod tests {
             "set default_transaction_read_only = off",
             "select 1; SET SESSION transaction_read_only = 0",
             "set @@session.transaction_read_only = 0",
+            "select set_config('default_transaction_read_only', 'off', false)",
             "set transaction read /* sneaky */ write",
         ] {
             assert!(lifts_read_only(sql), "{sql}");

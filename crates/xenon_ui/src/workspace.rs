@@ -287,6 +287,7 @@ pub(crate) enum Pending {
         tab_id: usize,
         sql: String,
         origin: Option<usize>,
+        row_limit: Option<usize>,
     },
     Forget(i64),
     DeleteQuery(i64),
@@ -643,6 +644,7 @@ impl Workspace {
             None => {}
         }
         this.watch_tabs(cx);
+        cx.set_global(QuitGuard(cx.entity().downgrade()));
         // Closing the window quits: ask first when a transaction is open.
         let workspace = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
@@ -833,7 +835,15 @@ impl Workspace {
     }
 
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Query::Running { cancel, .. } = &self.tabs[index].query {
+        // A tab's query stops with it, except on SQL Server inside a transaction,
+        // where stopping it would end the session and roll the transaction back.
+        let ends_session = self.tabs[index]
+            .session
+            .and_then(|id| self.session(id))
+            .is_some_and(|s| s.engine == Engine::SqlServer && s.in_transaction);
+        if let Query::Running { cancel, .. } = &self.tabs[index].query
+            && !ends_session
+        {
             cancel.cancel();
         }
         let session = self.tabs.remove(index).session;
@@ -907,24 +917,55 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match servers::parse_url(engine, &url) {
-            Ok(options) => self.open_profile(
-                Profile {
-                    saved_id: None,
+            Ok(options) => {
+                // A URL for a saved database is that database: it keeps its
+                // production label and read-only flag, however it was reached.
+                let saved = self.saved_for(engine, &options).cloned();
+                let profile = Profile {
+                    saved_id: saved.as_ref().map(|s| s.id),
                     save: false,
-                    name: servers::default_name(engine, &options),
-                    environment: Environment::None,
-                    read_only: false,
+                    name: saved.as_ref().map_or_else(
+                        || servers::default_name(engine, &options),
+                        |s| s.name.clone(),
+                    ),
+                    environment: saved.as_ref().map_or(Environment::None, |s| s.environment),
+                    read_only: saved.as_ref().is_some_and(|s| s.read_only),
                     target: RequestTarget::Server(engine, options),
                     lock_timeout: None,
-                },
-                window,
-                cx,
-            ),
+                };
+                self.open_profile(profile, window, cx)
+            }
             Err(err) => {
                 self.notice = Some(format!("{err:#}").into());
                 cx.notify();
             }
         }
+    }
+
+    /// The saved connection to the same server, database and user, if any.
+    fn saved_for(
+        &self,
+        engine: ServerEngine,
+        options: &ConnectOptions,
+    ) -> Option<&SavedConnection> {
+        let port = options.port.unwrap_or(engine.default_port());
+        self.saved.iter().find(|saved| match &saved.target {
+            Target::Server {
+                engine: e,
+                host,
+                port: p,
+                database,
+                user,
+                ..
+            } => {
+                *e == engine
+                    && host.eq_ignore_ascii_case(&options.host)
+                    && p.unwrap_or(engine.default_port()) == port
+                    && *database == options.database
+                    && (user.is_empty() || options.user.is_empty() || *user == options.user)
+            }
+            Target::Sqlite { .. } => false,
+        })
     }
 
     pub(crate) fn connect_to_saved(
@@ -1440,7 +1481,15 @@ impl Workspace {
                         tab_id,
                         sql,
                         origin,
-                    } => this.execute(tab_id, sql, origin, cx),
+                        row_limit,
+                    } => match this.busy(tab_id) {
+                        // Something started while the prompt was open: don't overlap it.
+                        Some(why) => this.flash(why, true, cx),
+                        None => {
+                            let limit = row_limit.unwrap_or(this.prefs.row_limit);
+                            this.execute_with_limit(tab_id, sql, origin, limit, cx);
+                        }
+                    },
                     Pending::Save { tab_id, statements } => {
                         this.save_statements(tab_id, statements, window, cx);
                         return;
@@ -1526,15 +1575,15 @@ impl Workspace {
         if self.guard_edits(cx) {
             return;
         }
-        let Some(session) = self.active_session() else {
+        if self.active_session().is_none() {
             self.notice = Some("Open a database first.".into());
             cx.notify();
             return;
+        }
+        let Some(session) = self.active_session() else {
+            return;
         };
         let tab = &self.tabs[self.active];
-        if matches!(tab.query, Query::Running { .. }) {
-            return;
-        }
 
         let editor = tab.editor.read(cx);
         let text = editor.value().to_string();
@@ -1557,15 +1606,74 @@ impl Workspace {
         if sql.trim().is_empty() {
             return;
         }
+        // Explaining a script would run everything after its first statement.
+        if scope == RunScope::Explain && xenon_driver::sql::split_statements(&sql).len() > 1 {
+            self.flash(
+                "Explain works on one statement at a time: select it first.",
+                true,
+                cx,
+            );
+            return;
+        }
         let sql = match scope {
             RunScope::Explain => session.conn.explain(sql.trim().trim_end_matches(';')),
             _ => sql,
         };
         let tab_id = tab.id;
+        self.guard(tab_id, sql, origin, None, window, cx);
+    }
 
-        // Guard rails: risky statements need a confirmation, and on production
-        // every write needs the connection's name typed. Read-only connections
-        // are already protected by the server.
+    /// The active tab's error, for tests.
+    #[cfg(test)]
+    pub(crate) fn error_text(&self) -> Option<String> {
+        match &self.active_tab().query {
+            Query::Failed(message) => Some(message.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Why a query can't start on a tab now: a confirmation is waiting, or a
+    /// query is already running on its connection (statements on one session
+    /// must not interleave, or one's transaction swallows another's).
+    fn busy(&self, tab_id: usize) -> Option<&'static str> {
+        if self.confirm.is_some() {
+            return Some("Answer the open prompt first.");
+        }
+        let session = self.tabs.iter().find(|t| t.id == tab_id)?.session?;
+        self.tabs
+            .iter()
+            .any(|t| t.session == Some(session) && matches!(t.query, Query::Running { .. }))
+            .then_some(
+                "A query is already running on this connection: wait for it, or cancel it (⌘.).",
+            )
+    }
+
+    /// The one way SQL from the editor reaches a connection: risky statements
+    /// need a confirmation, and on production every write needs the
+    /// connection's name typed (read-only connections are protected by the
+    /// server). `row_limit` overrides Settings' (for Fetch all).
+    fn guard(
+        &mut self,
+        tab_id: usize,
+        sql: String,
+        origin: Option<usize>,
+        row_limit: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(why) = self.busy(tab_id) {
+            self.flash(why, true, cx);
+            return;
+        }
+        let Some(session) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.session)
+            .and_then(|id| self.session(id))
+        else {
+            return;
+        };
         if !session.read_only
             && let Some((risk, what)) = assess(&sql)
             && (session.environment == Environment::Production
@@ -1595,13 +1703,15 @@ impl Workspace {
                     tab_id,
                     sql,
                     origin,
+                    row_limit,
                 },
                 window,
                 cx,
             );
             return;
         }
-        self.execute(tab_id, sql, origin, cx);
+        let limit = row_limit.unwrap_or(self.prefs.row_limit);
+        self.execute_with_limit(tab_id, sql, origin, limit, cx);
     }
 
     /// Run `sql` for a tab in the background, recording it in the history.
@@ -1617,11 +1727,13 @@ impl Workspace {
     }
 
     /// Run again what the active tab last ran, keeping every row.
-    fn fetch_all(&mut self, cx: &mut Context<Self>) {
+    /// Run what the active tab last ran again, keeping every row; it asks
+    /// first like any run (a capped `delete … returning` is a write).
+    pub(crate) fn fetch_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab = self.active_tab();
         if let Some((sql, origin)) = tab.last_run.clone() {
             let id = tab.id;
-            self.execute_with_limit(id, sql, origin, usize::MAX, cx);
+            self.guard(id, sql, origin, Some(usize::MAX), window, cx);
         }
     }
 
@@ -1654,6 +1766,8 @@ impl Workspace {
             .then(|| std::time::Duration::from_secs(self.prefs.query_limit));
         let limiter = cancel.clone();
         let began = std::time::Instant::now();
+        // SQL Server cancels by ending the session, rolling back an open transaction.
+        let keeps_session = !(session.engine == Engine::SqlServer && session.in_transaction);
         // On production, a script of several statements that writes runs as one
         // transaction: if one fails, none of it is kept.
         let production = session.environment == Environment::Production
@@ -1677,15 +1791,28 @@ impl Workspace {
         let last_sql = sql.clone();
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
-            let begun = wrap.is_some_and(|wrap| conn.execute(wrap.begin(), 1).is_ok());
-            let result = conn.execute_streaming(&sql, row_limit, &mut |progress| match progress {
+            let begun = wrap.map(|wrap| conn.execute(wrap.begin(), 1));
+            // A wrapped statement never runs unwrapped: if the transaction
+            // couldn't start, nothing runs.
+            let refused = match &begun {
+                Some(Err(err)) => Some(anyhow::anyhow!(
+                    "Couldn't start the transaction production statements run in, so nothing ran: {err:#}"
+                )),
+                _ => None,
+            };
+            let begun = matches!(begun, Some(Ok(_)));
+            let result = if let Some(err) = refused {
+                Err(err)
+            } else {
+                conn.execute_streaming(&sql, row_limit, &mut |progress| match progress {
                 xenon_driver::Progress::Preview(rows) => {
                     *feed.preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
                 }
                 xenon_driver::Progress::Rows(n) => {
                     feed.rows.store(n, std::sync::atomic::Ordering::Relaxed);
                 }
-            });
+                })
+            };
             let result = match (wrap, begun) {
                 (Some(wrap), true) => match result {
                     Ok(done) => conn.execute("commit", 1).map(|_| done),
@@ -1728,7 +1855,13 @@ impl Workspace {
                 }) => conn.introspect().ok(),
                 _ => None,
             };
-            let in_transaction = conn.in_transaction();
+            // When the server can't say, follow `begin` / `commit` in what ran.
+            let in_transaction = conn.in_transaction().or_else(|| {
+                result
+                    .is_ok()
+                    .then(|| xenon_driver::sql::transaction_effect(&sql))
+                    .flatten()
+            });
             (result, schemas, in_transaction, atomic && begun)
         });
         let task = cx.spawn(async move |this, cx| {
@@ -1787,7 +1920,17 @@ impl Workspace {
                             && began.elapsed() >= limit
                         {
                             tab.timed_out = Some(limit);
-                            limiter.cancel();
+                            if keeps_session {
+                                limiter.cancel();
+                            } else {
+                                tab.flash = Some((
+                                    "Over the production time limit, but stopping it would end the \
+                                     session and roll back the open transaction: cancel it yourself \
+                                     (⌘.) if you mean to."
+                                        .into(),
+                                    true,
+                                ));
+                            }
                         }
                         cx.notify();
                     })
@@ -1884,6 +2027,13 @@ impl Workspace {
 
     fn bench_start(&mut self, cx: &mut Context<Self>) {
         let Some(bench) = &self.bench else { return };
+        // A developer benchmark (XENON_BENCH): never on production.
+        if self
+            .active_session()
+            .is_none_or(|s| s.environment == Environment::Production)
+        {
+            return;
+        }
         let sql = bench.sql.clone();
         // Setting the editor's text needs a window; render does it.
         self.bench_pending_sql = Some(sql.clone());
@@ -2214,6 +2364,15 @@ impl Workspace {
             conn.uses_top(),
         );
         let editor = self.active_tab().editor.clone();
+        // The filter goes into a `where`: it can narrow the rows, not change them.
+        if xenon_driver::sql::writes(&sql) {
+            self.flash(
+                "The filter can only narrow the rows: it can't run other statements.",
+                true,
+                cx,
+            );
+            return;
+        }
         editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));
         self.run(RunScope::All, window, cx);
     }
@@ -2559,6 +2718,16 @@ impl Workspace {
     /// typed); so do deletions when "ask before risky statements" is on, and
     /// any save the user asked to review.
     fn save_edits_confirming(&mut self, review: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Saving begins and ends its own transaction, which would commit (or
+        // roll back) the one the user has open.
+        if self.active_session().is_some_and(|s| s.in_transaction) {
+            self.flash(
+                "A transaction is open: commit or roll it back (status bar) before saving changes.",
+                true,
+                cx,
+            );
+            return;
+        }
         // ⌘S while the edit bar is open keeps what was typed.
         if self.active_tab().editing.is_some() {
             self.commit_edit(false, window, cx);
@@ -4347,7 +4516,7 @@ impl Workspace {
                     widgets::button(theme, "fetch-all", "Fetch all", ButtonKind::Ghost, true)
                         .h(px(22.))
                         .px(px(8.))
-                        .on_click(cx.listener(|this, _, _, cx| this.fetch_all(cx))),
+                        .on_click(cx.listener(|this, _, w, cx| this.fetch_all(w, cx))),
                 )
             })
             .child(div().flex_1())
@@ -4880,6 +5049,12 @@ impl Workspace {
         )
     }
 }
+
+/// The workspace that decides whether Xenon may quit (it asks when a
+/// transaction is open), for Quit handled outside it.
+pub(crate) struct QuitGuard(pub gpui::WeakEntity<Workspace>);
+
+impl gpui::Global for QuitGuard {}
 
 /// Why a production query stopped early.
 fn time_limit_note(limit: Option<std::time::Duration>) -> String {

@@ -411,6 +411,46 @@ mod tests {
     }
 
     #[test]
+    fn saving_works_on_duckdb_too() {
+        let conn = xenon_duckdb::DuckDbConnection::open_in_memory().unwrap();
+        conn.execute(
+            "create table orders (id integer primary key, status varchar, note varchar, total double);
+             insert into orders values (1, 'paid', null, 1.5), (2, 'pending', 'x', 2.5)",
+            10,
+        )
+        .unwrap();
+        let data = match conn
+            .execute("select id, status, note, total from orders order by id", 10)
+            .unwrap()
+            .outcome
+        {
+            QueryOutcome::Rows(rows) => rows,
+            other => panic!("{other:?}"),
+        };
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(0), 1, Value::Text("refunded".into()), None);
+        edits.deleted.insert(1);
+        let target = TableRef {
+            schema: None,
+            table: "orders".into(),
+            key: vec![0],
+        };
+        assert_eq!(
+            save(&conn, &statements(&conn, &target, &data, &edits)).unwrap(),
+            2
+        );
+        let after = match conn
+            .execute("select status from orders", 10)
+            .unwrap()
+            .outcome
+        {
+            QueryOutcome::Rows(rows) => rows,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(after.rows, [[Value::Text("refunded".into())]]);
+    }
+
+    #[test]
     fn an_edit_never_overwrites_someone_elses_change() {
         let (conn, path) = shop();
         let data = fetch(&conn);

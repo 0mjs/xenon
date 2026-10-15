@@ -354,11 +354,22 @@ impl MssqlConnection {
         feed: &mut Feed<'_>,
         killed: &std::sync::atomic::AtomicBool,
     ) -> Result<(QueryOutcome, usize, bool, bool)> {
+        // Stopping at the row limit ends the session, which would roll back a
+        // transaction the user has open: then the rest is read and dropped instead.
+        let in_transaction = client
+            .simple_query("select @@trancount")
+            .await
+            .map_err(describe)?
+            .into_row()
+            .await
+            .map_err(describe)?
+            .and_then(|row| row.get::<i32, _>(0))
+            .is_some_and(|count| count > 0);
         let mut stream = client.simple_query(sql).await.map_err(describe)?;
         let mut sets: Vec<ResultSet> = Vec::new();
         let mut types: Vec<ColumnType> = Vec::new();
         let mut over_limit = false;
-        let writes = xenon_driver::sql::writes(sql);
+        let writes = xenon_driver::sql::writes(sql) || in_transaction;
         let mut cancelled = false;
         loop {
             let item = match stream.try_next().await {
@@ -769,7 +780,10 @@ impl Connection for MssqlConnection {
 
     fn in_transaction(&self) -> Option<bool> {
         let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
-        let client = guard.as_mut()?;
+        // The session ended (a cancel or the row limit): its transaction went with it.
+        let Some(client) = guard.as_mut() else {
+            return Some(false);
+        };
         runtime()
             .block_on(async {
                 client
@@ -1003,6 +1017,45 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn lock_wait_gives_up_even_after_a_reconnect() {
+        let holder = fleet();
+        let waiter = MssqlConnection::connect_options(&ConnectOptions {
+            lock_timeout: Some(Duration::from_millis(500)),
+            ..fleet().options.clone()
+        })
+        .unwrap();
+        // A cancel ends the session; the new one must still have the lock wait.
+        let handle = waiter.cancel_handle();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            handle.cancel();
+        });
+        let _ = waiter.execute("waitfor delay '00:00:03'", 1);
+        stopper.join().unwrap();
+        holder
+            .execute(
+                "drop table if exists xenon_lock_probe; create table xenon_lock_probe (id int primary key); \
+                 insert into xenon_lock_probe values (1)",
+                1,
+            )
+            .unwrap();
+        holder.execute("begin transaction", 1).unwrap();
+        holder
+            .execute("update xenon_lock_probe set id = 1", 1)
+            .unwrap();
+        let started = Instant::now();
+        let blocked = waiter.execute("update xenon_lock_probe set id = 1", 1);
+        holder.execute("rollback", 1).unwrap();
+        holder.execute("drop table xenon_lock_probe", 1).unwrap();
+        assert!(
+            blocked.is_err(),
+            "the second update didn't wait for the lock"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     #[ignore]

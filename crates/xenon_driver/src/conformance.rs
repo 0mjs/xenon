@@ -113,14 +113,27 @@ fn exec(conn: &dyn Connection, sql: &str) -> Result<QueryOutcome> {
 }
 
 /// A value as text, so engines that hand back the same data in different
-/// shapes (a decimal as text or a float, a blob as bytes or `\x…`) compare equal.
+/// shapes (a decimal as text or a float, a blob as bytes or `\x…`) compare
+/// equal, and nothing else does: numbers compare exactly, as their shortest
+/// decimal form (`12.50` and `12.5` match; `12.5` and `12.500001` don't).
 fn normal(value: &Value) -> String {
-    let number = |n: f64| format!("{n:.6}");
+    let decimal = |text: &str| {
+        let text = if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            text
+        };
+        if text == "-0" {
+            "0".into()
+        } else {
+            text.to_string()
+        }
+    };
     match value {
         Value::Null => "NULL".into(),
-        Value::Integer(n) => number(*n as f64),
-        Value::Real(n) => number(*n),
-        Value::Decimal(text) => text.parse().map_or_else(|_| text.clone(), number),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(n) => decimal(&n.to_string()),
+        Value::Decimal(text) => decimal(text),
         Value::Text(text) => text.clone(),
         Value::Blob(bytes) => format!("\\x{}", crate::hex(bytes)),
     }

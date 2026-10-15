@@ -8880,6 +8880,7 @@ dependencies = [
  "anyhow",
  "rusqlite",
  "xenon_driver",
+ "xenon_duckdb",
  "xenon_mssql",
  "xenon_mysql",
  "xenon_postgres",

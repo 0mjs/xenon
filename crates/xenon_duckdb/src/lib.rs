@@ -59,6 +59,9 @@ impl FileKind {
 
 pub struct DuckDbConnection {
     conn: Mutex<duckdb::Connection>,
+    /// Refuse writes: a read-only database file is protected by DuckDB too, but
+    /// a CSV opened read-only, or `copy … to` a file, isn't.
+    read_only: bool,
     name: String,
     path: PathBuf,
     version: String,
@@ -95,11 +98,11 @@ impl DuckDbConnection {
                 } else {
                     AccessMode::Automatic
                 };
-                duckdb::Connection::open_with_flags(path, Config::default().access_mode(mode)?)
+                duckdb::Connection::open_with_flags(path, offline()?.access_mode(mode)?)
                     .with_context(|| format!("couldn't open {}", path.display()))?
             }
             data => {
-                let conn = duckdb::Connection::open_in_memory()?;
+                let conn = duckdb::Connection::open_in_memory_with_flags(offline()?)?;
                 let reader = match data {
                     FileKind::Parquet => "read_parquet",
                     FileKind::Json => "read_json_auto",
@@ -118,18 +121,24 @@ impl DuckDbConnection {
                 conn
             }
         };
-        Self::wrap(conn, name, path.to_path_buf())
+        Self::wrap(conn, name, path.to_path_buf(), read_only)
     }
 
     pub fn open_in_memory() -> Result<Self> {
         Self::wrap(
-            duckdb::Connection::open_in_memory()?,
+            duckdb::Connection::open_in_memory_with_flags(offline()?)?,
             "memory".into(),
             PathBuf::from(":memory:"),
+            false,
         )
     }
 
-    fn wrap(conn: duckdb::Connection, name: String, path: PathBuf) -> Result<Self> {
+    fn wrap(
+        conn: duckdb::Connection,
+        name: String,
+        path: PathBuf,
+        read_only: bool,
+    ) -> Result<Self> {
         let version: String = conn
             .query_row("select version()", [], |row| row.get(0))
             .unwrap_or_default();
@@ -139,6 +148,7 @@ impl DuckDbConnection {
         });
         Ok(Self {
             conn: Mutex::new(conn),
+            read_only,
             name,
             path,
             version: format!("duckdb {}", version.trim_start_matches('v')),
@@ -277,6 +287,15 @@ impl Connection for DuckDbConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        if self.read_only
+            && let Some((_, what)) = xenon_driver::sql::assess(sql)
+        {
+            return Err(QueryError {
+                message: format!("This is a read-only connection, so {what} isn't allowed."),
+                position: None,
+            }
+            .into());
+        }
         self.run(sql, row_limit, progress)
     }
 
@@ -537,6 +556,14 @@ impl Connection for DuckDbConnection {
             Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
         }
     }
+}
+
+/// DuckDB set not to fetch anything from the internet by itself: it would
+/// otherwise download and load extensions (`httpfs`, `json`…) on first use.
+fn offline() -> Result<Config> {
+    Ok(Config::default()
+        .with("autoinstall_known_extensions", "false")?
+        .with("autoload_known_extensions", "false")?)
 }
 
 /// DuckDB's message as a [`QueryError`], like the other engines' errors.
@@ -843,7 +870,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let csv = dir.join("people.csv");
         std::fs::write(&csv, "id,name\n1,Ada\n2,Grace\n").unwrap();
-        let conn = DuckDbConnection::open(&csv, true).unwrap();
+        // Read-write: the test copies it out to Parquet below.
+        let conn = DuckDbConnection::open(&csv, false).unwrap();
         let read = rows(&conn, "select name from people order by id");
         assert_eq!(read.rows[1][0], Value::Text("Grace".into()));
         let tables = conn.introspect().unwrap();
@@ -882,6 +910,41 @@ mod tests {
         let conn = DuckDbConnection::open(&path, true).unwrap();
         assert!(conn.execute("insert into t values (1)", 10).is_err());
         assert_eq!(FileKind::of(Path::new("/nonexistent/x.sqlite")), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn read_only_holds_for_files_and_never_fetches_extensions() {
+        let dir = std::env::temp_dir().join(format!("xenon-duckdb-ro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("people.csv");
+        std::fs::write(&csv, "id,name\n1,Ada\n").unwrap();
+        let conn = DuckDbConnection::open(&csv, true).unwrap();
+        let out = dir.join("copy.csv");
+        for write in [
+            "create table t (id integer)".to_string(),
+            format!("copy (select * from people) to '{}'", out.display()),
+            "attach ':memory:' as other".to_string(),
+            "install httpfs".to_string(),
+        ] {
+            let err = conn.execute(&write, 10).unwrap_err().to_string();
+            assert!(err.contains("read-only connection"), "{write}: {err}");
+        }
+        assert!(!out.exists());
+        assert_eq!(
+            rows(&conn, "select count(*) from people").rows[0][0],
+            Value::Integer(1)
+        );
+        // Extensions are never downloaded or loaded behind the user's back.
+        let settings = rows(
+            &conn,
+            "select current_setting('autoinstall_known_extensions'), \
+                    current_setting('autoload_known_extensions')",
+        );
+        assert_eq!(
+            settings.rows[0],
+            [Value::Text("false".into()), Value::Text("false".into())]
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

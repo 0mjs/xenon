@@ -11,6 +11,7 @@ xenon_driver.workspace = true
 
 [dev-dependencies]
 xenon_sqlite.workspace = true
+xenon_duckdb.workspace = true
 rusqlite.workspace = true
 xenon_postgres.workspace = true
 xenon_mysql.workspace = true

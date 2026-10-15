@@ -115,6 +115,8 @@ pub struct MysqlConnection {
     /// The database connected to, if any: where unqualified names resolve.
     schema: Option<String>,
     mariadb: bool,
+    /// The server's `NO_BACKSLASH_ESCAPES` mode: backslashes in strings are plain.
+    plain_backslashes: bool,
     read_only: bool,
     conn: Mutex<Conn>,
     cancel: Arc<MyCancel>,
@@ -240,6 +242,11 @@ impl MysqlConnection {
             .map_err(describe_error)?
             .unwrap_or_default();
         let mariadb = raw_version.to_ascii_lowercase().contains("mariadb");
+        let plain_backslashes = conn
+            .query_first::<String, _>("select @@session.sql_mode")
+            .ok()
+            .flatten()
+            .is_some_and(|mode| mode.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES"));
         let number = raw_version
             .split(['-', ' '])
             .next()
@@ -256,6 +263,7 @@ impl MysqlConnection {
             local: matches!(host, "localhost" | "127.0.0.1" | "::1"),
             version: format!("{} {number}", if mariadb { "mariadb" } else { "mysql" }),
             mariadb,
+            plain_backslashes,
             schema,
             read_only: options.read_only,
             cancel: Arc::new(MyCancel {
@@ -299,15 +307,11 @@ impl Connection for MysqlConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
-        // MySQL's read-only transactions stop DML but not DDL, which commits on
-        // its own; refuse schema changes here so read-only means read-only.
+        // MySQL's read-only session stops DML but not DDL (which commits on its
+        // own), nor DDL run by `prepare … execute` or a procedure: refuse
+        // anything recognised as a write here, so read-only means read-only.
         if self.read_only
             && let Some((_, what)) = xenon_driver::sql::assess(sql)
-            && [
-                "DROP", "ALTER", "CREATE", "TRUNCATE", "RENAME", "GRANT", "REVOKE",
-            ]
-            .iter()
-            .any(|verb| what.starts_with(verb))
         {
             return Err(QueryError {
                 message: format!("This is a read-only connection, so {what} isn't allowed."),
@@ -407,6 +411,24 @@ impl Connection for MysqlConnection {
             }
         }
         drop(result);
+        // However it was done, a read-only session switched to read-write goes
+        // straight back.
+        if self.read_only
+            && conn
+                .query_first::<i64, _>("select @@session.transaction_read_only")
+                .ok()
+                .flatten()
+                == Some(0)
+        {
+            let _ = conn.query_drop("set session transaction read only");
+            return Err(QueryError {
+                message: "This read-only connection was switched to read-write; Xenon switched it \
+                          back."
+                    .into(),
+                position: None,
+            }
+            .into());
+        }
         let outcome = outcome.ok_or_else(|| anyhow!("nothing to run"))?;
         // Some killed statements (`sleep()`, `benchmark()`) return a value instead
         // of failing; after a cancel, that value isn't the answer.
@@ -639,6 +661,9 @@ impl Connection for MysqlConnection {
     fn literal(&self, value: &Value) -> String {
         match value {
             // Backslash is an escape character in MySQL strings by default.
+            Value::Text(text) if self.plain_backslashes => {
+                format!("'{}'", text.replace('\'', "''"))
+            }
             Value::Text(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
             Value::Blob(bytes) => format!("X'{}'", xenon_driver::hex(bytes)),
             Value::Null => "NULL".into(),
@@ -894,16 +919,20 @@ mod live {
         );
     }
 
-    fn fleet(port: u16) -> MysqlConnection {
-        MysqlConnection::connect_options(&ConnectOptions {
+    fn fleet_options(port: u16) -> ConnectOptions {
+        ConnectOptions {
             host: "127.0.0.1".into(),
             port: Some(port),
             database: "shop".into(),
             user: "xenon".into(),
             password: "xenon".into(),
             ..Default::default()
-        })
-        .expect("is the fleet up? dev/fleet/up.sh mysql mariadb")
+        }
+    }
+
+    fn fleet(port: u16) -> MysqlConnection {
+        MysqlConnection::connect_options(&fleet_options(port))
+            .expect("is the fleet up? dev/fleet/up.sh mysql mariadb")
     }
 
     fn rows(conn: &MysqlConnection, sql: &str) -> ResultSet {
@@ -1072,21 +1101,66 @@ mod live {
     #[test]
     #[ignore]
     fn read_only_refuses_writes_and_schema_changes() {
-        let conn = MysqlConnection::connect_options(&ConnectOptions {
-            host: "127.0.0.1".into(),
-            port: Some(53306),
-            database: "shop".into(),
-            user: "xenon".into(),
-            password: "xenon".into(),
-            read_only: true,
-            ..Default::default()
-        })
-        .unwrap();
-        assert!(
-            conn.execute("update customers set city = 'x' where id = 1", 10)
-                .is_err()
-        );
-        assert!(conn.execute("drop table customers", 10).is_err());
-        assert!(conn.execute("select count(*) from customers", 10).is_ok());
+        for port in [53306, 53307] {
+            let conn = MysqlConnection::connect_options(&ConnectOptions {
+                host: "127.0.0.1".into(),
+                port: Some(port),
+                database: "shop".into(),
+                user: "xenon".into(),
+                password: "xenon".into(),
+                read_only: true,
+                ..Default::default()
+            })
+            .unwrap();
+            for write in [
+                "update customers set city = 'x' where id = 1",
+                "drop table customers",
+                "rename table customers to gone",
+                "prepare s from 'drop table customers'",
+                "call no_such_procedure()",
+                "/*!50000 drop table customers */",
+                "set session transaction read write",
+                "set @@session.transaction_read_only = 0",
+            ] {
+                assert!(conn.execute(write, 10).is_err(), "{port}: {write}");
+            }
+            assert!(conn.execute("select count(*) from customers", 10).is_ok());
+            // Still read-only after all that.
+            assert!(
+                conn.execute("update customers set city = 'x' where id = 1", 10)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn lock_wait_gives_up() {
+        for port in [53306, 53307] {
+            let open = |lock_timeout| {
+                MysqlConnection::connect_options(&ConnectOptions {
+                    lock_timeout,
+                    ..fleet_options(port)
+                })
+                .unwrap()
+            };
+            let holder = open(None);
+            let waiter = open(Some(Duration::from_secs(1)));
+            holder.execute("start transaction", 1).unwrap();
+            holder
+                .execute("update customers set city = city where id = 1", 1)
+                .unwrap();
+            let started = Instant::now();
+            let blocked = waiter.execute("update customers set city = city where id = 1", 1);
+            holder.execute("rollback", 1).unwrap();
+            assert!(
+                blocked.is_err(),
+                "{port}: the second update didn't wait for the lock"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{port}: waited too long"
+            );
+        }
     }
 }

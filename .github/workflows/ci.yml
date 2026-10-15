@@ -62,3 +62,6 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Headless screens that also check the UI's guards (production prompts,
+      # Fetch all, scripts rolled back, quit with a transaction open).
+      - run: cargo test -p xenon_ui snapshots -- --ignored

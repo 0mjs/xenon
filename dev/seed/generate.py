@@ -303,6 +303,10 @@ def write_sql(path, schema, data, mysql):
             f.write(inserts(table, data[table], mysql, quote))
         if not mysql:
             f.write("commit;\nrefresh materialized view analytics.daily_revenue;\nanalyze;\n")
+        else:
+            # Lets Xenon see whether its session has a transaction open
+            # (information_schema.innodb_trx), as a DBA's account would.
+            f.write("GRANT PROCESS ON *.* TO 'xenon'@'%';\n")
 
 
 def write_mssql(path, data):

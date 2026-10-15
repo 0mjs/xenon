@@ -171,7 +171,27 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-p", PaletteUp, Some("Palette > Input")),
         KeyBinding::new("ctrl-n", PaletteDown, Some("Palette > Input")),
     ]);
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    // Reached when the workspace isn't in the focus path (it handles Quit itself
+    // otherwise): it still gets to ask about open transactions first.
+    cx.on_action(|_: &Quit, cx| {
+        let workspace = cx
+            .try_global::<workspace::QuitGuard>()
+            .and_then(|guard| guard.0.upgrade());
+        let window = cx.windows().first().copied();
+        if let (Some(workspace), Some(window)) = (workspace, window) {
+            let asked = window.update(cx, |_, window, cx| {
+                workspace.update(cx, |this, cx| {
+                    if this.may_quit(window, cx) {
+                        cx.quit();
+                    }
+                })
+            });
+            if asked.is_ok() {
+                return;
+            }
+        }
+        cx.quit();
+    });
 }
 
 #[cfg(test)]

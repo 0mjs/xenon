@@ -412,7 +412,37 @@ impl Connection for PostgresConnection {
             }
             .into());
         }
-        runtime().block_on(self.run(sql, row_limit, progress))
+        let result = runtime().block_on(self.run(sql, row_limit, progress));
+        if self.read_only {
+            // However it was done (a `do` block building the statement, say),
+            // a read-only session switched to read-write goes straight back.
+            let still = runtime()
+                .block_on(
+                    self.client
+                        .simple_query("show default_transaction_read_only"),
+                )
+                .ok()
+                .and_then(|messages| {
+                    messages.into_iter().find_map(|m| match m {
+                        SimpleQueryMessage::Row(row) => row.get(0).map(|v| v == "on"),
+                        _ => None,
+                    })
+                });
+            if still == Some(false) {
+                let _ = runtime().block_on(
+                    self.client
+                        .simple_query("set default_transaction_read_only = on"),
+                );
+                return Err(QueryError {
+                    message: "This read-only connection was switched to read-write; Xenon \
+                              switched it back."
+                        .into(),
+                    position: None,
+                }
+                .into());
+            }
+        }
+        result
     }
 
     fn introspect(&self) -> Result<Vec<Schema>> {
@@ -798,6 +828,11 @@ fn default_literal(value: &Value) -> String {
         Value::Integer(n) => n.to_string(),
         Value::Real(n) => n.to_string(),
         Value::Decimal(n) => n.clone(),
+        // With a backslash, an escape string: it means the same whatever the
+        // server's `standard_conforming_strings`.
+        Value::Text(text) if text.contains('\\') => {
+            format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+        }
         Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
         Value::Blob(bytes) => format!("'\\x{}'::bytea", xenon_driver::hex(bytes)),
     }
@@ -867,14 +902,58 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("25006"), "{err}");
-        // And it can't be switched back on from the editor.
+        // And it can't be switched back on from the editor, however it's written.
         for lift in [
             "set default_transaction_read_only = off",
             "begin read write; create table xenon_ro_probe (x int); commit",
+            "select set_config('default_transaction_read_only', 'off', false)",
+            // Built at run time, so no check of the text can see it: caught after.
+            "do $$ begin execute 'set default_transaction_' || 'read_only = off'; end $$",
         ] {
             let err = db.execute(lift, 10).unwrap_err().to_string();
             assert!(err.contains("read-only connection"), "{lift}: {err}");
         }
+        let err = db
+            .execute("create table xenon_ro_probe (x int)", 10)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("25006"), "still read-only: {err}");
+    }
+
+    #[test]
+    fn live_lock_wait_gives_up() {
+        let Ok(url) = std::env::var("XENON_TEST_PG_URL") else {
+            return;
+        };
+        let holder = PostgresConnection::connect_url(&url).unwrap();
+        let waiter = PostgresConnection::connect_options(&ConnectOptions {
+            lock_timeout: Some(Duration::from_millis(500)),
+            ..parse_url(&url).unwrap()
+        })
+        .unwrap();
+        holder
+            .execute(
+                "drop table if exists xenon_lock_probe; create table xenon_lock_probe (id int primary key); \
+                 insert into xenon_lock_probe values (1)",
+                1,
+            )
+            .unwrap();
+        holder
+            .execute("begin; update xenon_lock_probe set id = 1", 1)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let blocked = waiter.execute("update xenon_lock_probe set id = 1", 1);
+        holder
+            .execute("rollback; drop table xenon_lock_probe", 1)
+            .unwrap();
+        let err = blocked
+            .expect_err("the second update didn't wait for the lock")
+            .to_string();
+        assert!(
+            err.contains("55P03") || err.contains("lock timeout"),
+            "{err}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
