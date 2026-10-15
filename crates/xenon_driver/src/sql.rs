@@ -252,6 +252,22 @@ pub fn writes(sql: &str) -> bool {
     assess(sql).is_some()
 }
 
+/// True when `sql` manages a transaction itself (`begin`, `commit`,
+/// `savepoint`…), so it shouldn't be wrapped in another.
+pub fn controls_transaction(sql: &str) -> bool {
+    split_statements(sql).into_iter().any(|range| {
+        let words = words_outside_literals(&sql[range]);
+        match words.first().map(String::as_str) {
+            Some(
+                "begin" | "start" | "commit" | "rollback" | "end" | "savepoint" | "release"
+                | "abort" | "prepare",
+            ) => true,
+            Some("set") => words.get(1).is_some_and(|w| w == "transaction"),
+            _ => false,
+        }
+    })
+}
+
 /// True when `sql` tries to turn a read-only session back into a read-write
 /// one (`set transaction read write`, `begin read write`,
 /// `set default_transaction_read_only = off`…).
@@ -549,6 +565,19 @@ mod tests {
         ] {
             assert!(!writes(sql), "{sql}");
         }
+    }
+
+    #[test]
+    fn spots_scripts_that_manage_their_own_transaction() {
+        assert!(controls_transaction("begin; update t set a = 1; commit"));
+        assert!(controls_transaction("update t set a = 1;\nSAVEPOINT s1"));
+        assert!(controls_transaction(
+            "BEGIN TRAN; delete from t where id = 1"
+        ));
+        assert!(!controls_transaction(
+            "update t set a = 1; delete from u where id = 2"
+        ));
+        assert!(!controls_transaction("select 'begin'; select 1"));
     }
 
     #[test]

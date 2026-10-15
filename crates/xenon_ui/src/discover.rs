@@ -252,6 +252,7 @@ fn options_from_env(engine: ServerEngine, env: &str, port: u16) -> ConnectOption
         read_only: false,
         ssh: None,
         address: None,
+        lock_timeout: None,
     }
 }
 
@@ -339,6 +340,7 @@ fn parse_pgpass(text: &str, source: &str) -> Vec<Found> {
                         read_only: false,
                         ssh: None,
                         address: None,
+                        lock_timeout: None,
                     },
                 ),
             })

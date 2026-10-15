@@ -82,6 +82,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         read_only: false,
         ssh: None,
         address: None,
+        lock_timeout: None,
     })
 }
 
@@ -183,6 +184,12 @@ impl MysqlConnection {
         let mut init = vec!["SET NAMES utf8mb4".to_string()];
         if options.read_only {
             init.push("SET SESSION TRANSACTION READ ONLY".to_string());
+        }
+        if let Some(wait) = options.lock_timeout {
+            // Row locks (InnoDB) and table locks (metadata, e.g. behind an ALTER); whole seconds.
+            let seconds = wait.as_secs().max(1);
+            init.push(format!("SET SESSION innodb_lock_wait_timeout = {seconds}"));
+            init.push(format!("SET SESSION lock_wait_timeout = {seconds}"));
         }
         let builder = OptsBuilder::new()
             .ip_or_hostname(Some(connect_host))
@@ -587,6 +594,21 @@ impl Connection for MysqlConnection {
 
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.cancel.clone()
+    }
+
+    fn in_transaction(&self) -> Option<bool> {
+        let query = if self.mariadb {
+            "select @@in_transaction"
+        } else {
+            // Needs the PROCESS privilege; without it, Xenon can't tell.
+            "select count(*) > 0 from information_schema.innodb_trx \
+             where trx_mysql_thread_id = connection_id()"
+        };
+        self.lock()
+            .query_first::<i64, _>(query)
+            .ok()
+            .flatten()
+            .map(|open| open != 0)
     }
 
     fn is_local(&self) -> bool {

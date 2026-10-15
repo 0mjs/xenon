@@ -167,6 +167,7 @@ impl ConnectDialog {
                                 password: ssh_password.clone(),
                                 ..servers::ssh_options(tunnel)
                             }),
+                            lock_timeout: None,
                         },
                     ),
                 };
@@ -357,6 +358,7 @@ impl ConnectDialog {
                     read_only: false,
                     ssh: None,
                     address: None,
+                    lock_timeout: None,
                 }
             };
             options.read_only = self.read_only;

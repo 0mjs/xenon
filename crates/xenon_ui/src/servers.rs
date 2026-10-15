@@ -105,6 +105,9 @@ impl Connection for Tunneled {
     fn describe(&self, schema: &str, table: &str) -> anyhow::Result<xenon_driver::TableInfo> {
         self.inner.describe(schema, table)
     }
+    fn in_transaction(&self) -> Option<bool> {
+        self.inner.in_transaction()
+    }
     fn cancel_handle(&self) -> Arc<dyn xenon_driver::CancelHandle> {
         self.inner.cancel_handle()
     }

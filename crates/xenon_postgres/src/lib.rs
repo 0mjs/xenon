@@ -57,6 +57,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         read_only: false,
         ssh: None,
         address: None,
+        lock_timeout: None,
     })
 }
 
@@ -155,8 +156,15 @@ impl PostgresConnection {
         if !options.password.is_empty() {
             config.password(&options.password);
         }
+        let mut startup = Vec::new();
         if options.read_only {
-            config.options("-c default_transaction_read_only=on");
+            startup.push("-c default_transaction_read_only=on".to_string());
+        }
+        if let Some(wait) = options.lock_timeout {
+            startup.push(format!("-c lock_timeout={}", wait.as_millis().max(1)));
+        }
+        if !startup.is_empty() {
+            config.options(startup.join(" "));
         }
         if let Some(address) = options.address {
             // Connect to the tunnel; `host` still names the server for TLS.
@@ -594,6 +602,27 @@ impl Connection for PostgresConnection {
         self.cancel.clone()
     }
 
+    fn in_transaction(&self) -> Option<bool> {
+        // `now()` is when the transaction began; outside one, that's this statement.
+        match runtime().block_on(
+            self.client
+                .simple_query("select now() <> statement_timestamp()"),
+        ) {
+            Ok(messages) => messages.into_iter().find_map(|message| match message {
+                SimpleQueryMessage::Row(row) => row.get(0).map(|v| v == "t"),
+                _ => None,
+            }),
+            // "current transaction is aborted": open, and waiting for a rollback.
+            Err(err)
+                if err.code()
+                    == Some(&tokio_postgres::error::SqlState::IN_FAILED_SQL_TRANSACTION) =>
+            {
+                Some(true)
+            }
+            Err(_) => None,
+        }
+    }
+
     fn is_local(&self) -> bool {
         self.local
     }
@@ -795,6 +824,7 @@ mod tests {
                 read_only: false,
                 ssh: None,
                 address: None,
+                lock_timeout: None,
             }
         );
         let minimal = parse_url("postgres://localhost").unwrap();

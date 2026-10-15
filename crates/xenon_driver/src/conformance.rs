@@ -363,9 +363,19 @@ fn transactions(conn: &dyn Connection, d: &Dialect) -> Result<()> {
         conn,
         &format!("create table {table} (id {} primary key)", d.integer),
     )?;
+    let before = conn.in_transaction();
     exec(conn, conn.begin())?;
     exec(conn, &format!("insert into {table} (id) values (1)"))?;
+    let during = conn.in_transaction();
     exec(conn, d.rollback)?;
+    let after = conn.in_transaction();
+    // Engines that can tell must tell it right.
+    if let (Some(before), Some(during), Some(after)) = (before, during, after) {
+        ensure!(
+            !before && during && !after,
+            "in_transaction: before {before}, during {during}, after {after}"
+        );
+    }
     let count = rows(conn, &format!("select count(*) from {table}"), 10)?;
     ensure!(
         normal(&count.rows[0][0]) == normal(&Value::Integer(0)),

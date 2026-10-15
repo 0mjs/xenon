@@ -70,6 +70,10 @@ const BROWSE_LIMITS: [(usize, &str); 4] = [
     (1_000, "1,000"),
     (5_000, "5,000"),
 ];
+/// How long a query on a production connection may run before Xenon stops it (seconds).
+const QUERY_LIMITS: [(u64, &str); 4] = [(0, "Off"), (30, "30 s"), (60, "1 min"), (300, "5 min")];
+/// How long a statement on a production connection waits for a lock (seconds).
+const LOCK_WAITS: [(u64, &str); 4] = [(0, "Off"), (2, "2 s"), (5, "5 s"), (30, "30 s")];
 const EDITOR_FONTS: [(f32, &str); 4] = [
     (12., "Small"),
     (12.5, "Default"),
@@ -89,6 +93,10 @@ pub(crate) struct Prefs {
     pub confirm_risky: bool,
     /// Reopen last session's tabs (on saved connections) at launch.
     pub restore_tabs: bool,
+    /// On production: stop a query after this many seconds (0: never).
+    pub query_limit: u64,
+    /// On production: give up waiting for a lock after this many seconds (0: wait).
+    pub lock_wait: u64,
 }
 
 impl Default for Prefs {
@@ -101,6 +109,8 @@ impl Default for Prefs {
             editor_font: 12.5,
             confirm_risky: true,
             restore_tabs: true,
+            query_limit: 60,
+            lock_wait: 5,
         }
     }
 }
@@ -131,6 +141,12 @@ impl Prefs {
         if let Some(value) = get("restore_tabs") {
             prefs.restore_tabs = value != "false";
         }
+        if let Some(value) = get("query_limit").and_then(|v| v.parse().ok()) {
+            prefs.query_limit = value;
+        }
+        if let Some(value) = get("lock_wait").and_then(|v| v.parse().ok()) {
+            prefs.lock_wait = value;
+        }
         prefs
     }
 
@@ -144,6 +160,8 @@ impl Prefs {
             ("editor_font", self.editor_font.to_string()),
             ("confirm_risky", self.confirm_risky.to_string()),
             ("restore_tabs", self.restore_tabs.to_string()),
+            ("query_limit", self.query_limit.to_string()),
+            ("lock_wait", self.lock_wait.to_string()),
         ];
         for (key, value) in values {
             if let Err(err) = store.set_setting(key, &value) {
@@ -427,6 +445,41 @@ impl Render for SettingsDialog {
                             this.change(cx, |p| p.confirm_risky = !p.confirm_risky)
                         }))
                         .child(widgets::checkbox(&theme, prefs.confirm_risky)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Production query time limit",
+                    Some("Xenon stops a query on a production connection that runs longer than this."),
+                    segmented_of(
+                        cx,
+                        "query-limit",
+                        QUERY_LIMITS
+                            .iter()
+                            .map(|(n, l)| (*l, *n == prefs.query_limit))
+                            .collect(),
+                        Box::new(|p, ix| p.query_limit = QUERY_LIMITS[ix].0),
+                    )
+                    .w(px(270.)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Production lock wait",
+                    Some(
+                        "A statement waiting this long for another session's lock fails instead of \
+                         queuing everyone behind it. Applies from the next connect.",
+                    ),
+                    segmented_of(
+                        cx,
+                        "lock-wait",
+                        LOCK_WAITS
+                            .iter()
+                            .map(|(n, l)| (*l, *n == prefs.lock_wait))
+                            .collect(),
+                        Box::new(|p, ix| p.lock_wait = LOCK_WAITS[ix].0),
+                    )
+                    .w(px(270.)),
                 )
                 .into_any_element(),
             ],

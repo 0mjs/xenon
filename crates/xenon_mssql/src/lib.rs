@@ -253,8 +253,8 @@ async fn open(options: &ConnectOptions) -> Result<Tds> {
             .ok_or_else(|| anyhow!("Couldn't find {server}."))?,
     };
     let tcp = connect_tcp(address).await?;
-    match Client::connect(config.clone(), tcp.compat_write()).await {
-        Ok(client) => Ok(client),
+    let mut client = match Client::connect(config.clone(), tcp.compat_write()).await {
+        Ok(client) => client,
         // Azure SQL sends clients on to the node that holds the database.
         Err(tiberius::error::Error::Routing { host, port }) => {
             config.host(&host);
@@ -264,12 +264,22 @@ async fn open(options: &ConnectOptions) -> Result<Tds> {
                 .next()
                 .ok_or_else(|| anyhow!("Couldn't find {host}."))?;
             let tcp = connect_tcp(address).await?;
-            Ok(Client::connect(config, tcp.compat_write())
+            Client::connect(config, tcp.compat_write())
                 .await
-                .map_err(describe)?)
+                .map_err(describe)?
         }
-        Err(err) => Err(describe(err)),
+        Err(err) => return Err(describe(err)),
+    };
+    if let Some(wait) = options.lock_timeout {
+        client
+            .simple_query(format!("set lock_timeout {}", wait.as_millis().max(1)))
+            .await
+            .map_err(describe)?
+            .into_results()
+            .await
+            .map_err(describe)?;
     }
+    Ok(client)
 }
 
 async fn connect_tcp(address: SocketAddr) -> Result<TcpStream> {
@@ -746,6 +756,23 @@ impl Connection for MssqlConnection {
 
     fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
         self.cancel.clone()
+    }
+
+    fn in_transaction(&self) -> Option<bool> {
+        let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        let client = guard.as_mut()?;
+        runtime()
+            .block_on(async {
+                client
+                    .simple_query("select @@trancount")
+                    .await
+                    .ok()?
+                    .into_row()
+                    .await
+                    .ok()?
+                    .and_then(|row| row.get::<i32, _>(0))
+            })
+            .map(|count| count > 0)
     }
 
     fn is_local(&self) -> bool {

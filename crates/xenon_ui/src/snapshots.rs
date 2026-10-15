@@ -400,6 +400,51 @@ fn snapshots() {
         });
         shot.save(&format!("25-saved-queries-{suffix}"));
         shot.act(|w, window, cx| w.show_panel(crate::workspace::SidePanel::Explorer, window, cx));
+
+        // A transaction left open shows in the status bar, with Commit and Roll back.
+        shot.act(|w, window, cx| {
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(
+                    "begin;\nupdate orders set status = 'held' where id = 2",
+                    window,
+                    cx,
+                )
+            });
+            w.run(crate::workspace::RunScope::All, window, cx);
+        });
+        shot.save(&format!("28-transaction-open-{suffix}"));
+        shot.act(|w, _, cx| {
+            assert!(w.active_session().unwrap().in_transaction);
+            w.end_transaction(false, cx);
+        });
+        shot.act(|w, _, _| assert!(!w.active_session().unwrap().in_transaction));
+
+        // On production, a script that fails part-way keeps none of its changes.
+        shot.act(|w, window, cx| {
+            w.sessions[0].environment = xenon_store::Environment::Production;
+            let tab = w.active_tab().id;
+            w.execute(
+                tab,
+                "update orders set status = 'lost' where id = 1;\ninsert into no_such_table values (1)"
+                    .into(),
+                None,
+                cx,
+            );
+            let _ = window;
+        });
+        shot.act(|w, _, _| {
+            let status = w.sessions[0]
+                .conn
+                .execute("select status from orders where id = 1", 1)
+                .unwrap();
+            let xenon_driver::QueryOutcome::Rows(rows) = status.outcome else {
+                panic!("no rows")
+            };
+            assert_ne!(rows.rows[0][0], xenon_driver::Value::Text("lost".into()));
+        });
+        shot.save(&format!("29-script-rolled-back-{suffix}"));
+        shot.act(|w, _, _| w.sessions[0].environment = xenon_store::Environment::None);
         shot.act(|w, window, cx| {
             let editor = w.active_tab().editor.clone();
             editor.update(cx, |editor, cx| {

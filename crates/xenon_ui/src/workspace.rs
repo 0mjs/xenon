@@ -104,6 +104,8 @@ pub(crate) struct Session {
     /// What the editor completes against; shared with every tab on this
     /// connection, and replaced when the schema changes.
     pub catalog: Rc<RefCell<Option<Rc<Catalog>>>>,
+    /// A transaction the user began is open (its locks held until it ends).
+    pub in_transaction: bool,
 }
 
 /// Everything needed to open (and maybe remember) a connection.
@@ -115,6 +117,8 @@ struct Profile {
     environment: Environment,
     read_only: bool,
     target: RequestTarget,
+    /// Set from Settings for production connections when connecting.
+    lock_timeout: Option<std::time::Duration>,
 }
 
 impl Profile {
@@ -142,6 +146,7 @@ impl Profile {
                     read_only: saved.read_only,
                     address: None,
                     ssh: ssh.as_ref().map(servers::ssh_options),
+                    lock_timeout: None,
                 },
             ),
         };
@@ -152,6 +157,7 @@ impl Profile {
             environment: saved.environment,
             read_only: saved.read_only,
             target,
+            lock_timeout: None,
         }
     }
 
@@ -163,6 +169,7 @@ impl Profile {
             environment: request.environment,
             read_only: request.read_only,
             target: request.target,
+            lock_timeout: None,
         }
     }
 
@@ -180,6 +187,7 @@ impl Profile {
             RequestTarget::Server(engine, options) => {
                 let mut options = options.clone();
                 options.read_only = self.read_only;
+                options.lock_timeout = self.lock_timeout;
                 if let Some(id) = self.saved_id {
                     if options.password.is_empty() {
                         options.password =
@@ -277,6 +285,8 @@ pub(crate) enum Pending {
     },
     Forget(i64),
     DeleteQuery(i64),
+    /// Disconnect a session with a transaction open.
+    Disconnect(usize),
     /// Save a tab's staged changes.
     Save {
         tab_id: usize,
@@ -383,6 +393,8 @@ pub(crate) struct Tab {
     fetched: usize,
     /// The grid shows the running query's first rows.
     previewing: bool,
+    /// Set when the production time limit stopped the running query.
+    timed_out: Option<std::time::Duration>,
     /// The last SQL run here and where it began in the editor, for "Fetch all".
     last_run: Option<(String, Option<usize>)>,
 }
@@ -716,6 +728,7 @@ impl Workspace {
             previewing: false,
             last_run: None,
             saved_query: None,
+            timed_out: None,
         });
         self.active = self.tabs.len() - 1;
         self.hook_completions(self.active, cx);
@@ -859,6 +872,7 @@ impl Workspace {
                 environment: Environment::None,
                 read_only: false,
                 target: RequestTarget::Sqlite(path_text),
+                lock_timeout: None,
             },
         };
         self.open_profile(profile, window, cx);
@@ -880,6 +894,7 @@ impl Workspace {
                     environment: Environment::None,
                     read_only: false,
                     target: RequestTarget::Server(engine, options),
+                    lock_timeout: None,
                 },
                 window,
                 cx,
@@ -904,8 +919,11 @@ impl Workspace {
     /// first), then open it alongside any other connections and remember it if
     /// asked. A connection that's already open is brought forward instead.
     /// Errors go to the connection dialog when it's open.
-    fn open_profile(&mut self, profile: Profile, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_profile(&mut self, mut profile: Profile, window: &mut Window, cx: &mut Context<Self>) {
         self.notice = None;
+        if profile.environment == Environment::Production && self.prefs.lock_wait > 0 {
+            profile.lock_timeout = Some(std::time::Duration::from_secs(self.prefs.lock_wait));
+        }
         if let Some(id) = profile
             .saved_id
             .and_then(|saved| self.sessions.iter().find(|s| s.saved_id == Some(saved)))
@@ -973,6 +991,7 @@ impl Workspace {
                             expanded: HashSet::new(),
                             collapsed_schemas: HashSet::new(),
                             collapsed: false,
+                            in_transaction: false,
                         });
                         if !this.reopen_tabs(saved_id, id, window, cx) {
                             this.attach(id, false, window, cx);
@@ -1103,6 +1122,7 @@ impl Workspace {
                     environment: Environment::None,
                     read_only: false,
                     target: RequestTarget::Server(*engine, options.clone()),
+                    lock_timeout: None,
                 },
                 window,
                 cx,
@@ -1134,7 +1154,56 @@ impl Workspace {
 
     /// Disconnect session `id` and close its tabs. With nothing left open, the
     /// window goes back to the Connect screen.
+    /// Commit or roll back the active connection's open transaction.
+    pub(crate) fn end_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let (conn, id) = (session.conn.clone(), session.id);
+        let sql = if commit { "commit" } else { "rollback" };
+        let task = cx.background_spawn(async move {
+            let ended = conn.execute(sql, 1).map(|_| ());
+            (ended, conn.in_transaction())
+        });
+        cx.spawn(async move |this, cx| {
+            let (ended, open) = task.await;
+            this.update(cx, |this, cx| {
+                if let Some(session) = this.session_mut(id) {
+                    session.in_transaction = open.unwrap_or(ended.is_err());
+                }
+                let note = match ended {
+                    Ok(()) if commit => ("Committed.".to_string(), false),
+                    Ok(()) => ("Rolled back.".to_string(), false),
+                    Err(err) => (format!("{err:#}"), true),
+                };
+                this.flash(note.0, note.1, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Disconnect, asking first when a transaction is open (disconnecting rolls it back).
     pub(crate) fn close_session(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session(id) else {
+            return;
+        };
+        if session.in_transaction {
+            let body = format!(
+                "A transaction is open on {}. Disconnecting rolls back everything it changed.",
+                session.name
+            );
+            let dialog = cx.new(|cx| {
+                ConfirmDialog::new("Roll back and disconnect?", body, "", None, window, cx)
+                    .action("Roll back and disconnect", true)
+            });
+            self.show_confirm(dialog, Pending::Disconnect(id), window, cx);
+            return;
+        }
+        self.disconnect(id, window, cx);
+    }
+
+    fn disconnect(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.sessions.iter().position(|s| s.id == id) else {
             return;
         };
@@ -1226,6 +1295,7 @@ impl Workspace {
                 environment: Environment::None,
                 read_only: false,
                 target: RequestTarget::Server(engine, options),
+                lock_timeout: None,
             },
             window,
             cx,
@@ -1360,6 +1430,10 @@ impl Workspace {
                         this.reload_saved();
                     }
                     Pending::DeleteQuery(id) => this.forget_query(id, cx),
+                    Pending::Disconnect(id) => {
+                        this.disconnect(id, window, cx);
+                        return;
+                    }
                 }
             }
             this.focus_editor(window, cx);
@@ -1485,7 +1559,7 @@ impl Workspace {
     }
 
     /// Run `sql` for a tab in the background, recording it in the history.
-    fn execute(
+    pub(crate) fn execute(
         &mut self,
         tab_id: usize,
         sql: String,
@@ -1529,11 +1603,24 @@ impl Workspace {
         let conn = session.conn.clone();
         let store = self.store.clone();
         let cancel = conn.cancel_handle();
+        // Production queries are stopped after the limit set in Settings → Safety.
+        let limit = (session.environment == Environment::Production && self.prefs.query_limit > 0)
+            .then(|| std::time::Duration::from_secs(self.prefs.query_limit));
+        let limiter = cancel.clone();
+        let began = std::time::Instant::now();
+        // On production, a script of several statements that writes runs as one
+        // transaction: if one fails, none of it is kept.
+        let atomic = session.environment == Environment::Production
+            && !session.in_transaction
+            && xenon_driver::sql::split_statements(&sql).len() > 1
+            && xenon_driver::sql::writes(&sql)
+            && !xenon_driver::sql::controls_transaction(&sql);
         let live = Arc::new(Live::default());
         let feed = live.clone();
         let last_sql = sql.clone();
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
+            let begun = !atomic || conn.execute(conn.begin(), 1).is_ok();
             let result = conn.execute_streaming(&sql, row_limit, &mut |progress| match progress {
                 xenon_driver::Progress::Preview(rows) => {
                     *feed.preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
@@ -1542,6 +1629,19 @@ impl Workspace {
                     feed.rows.store(n, std::sync::atomic::Ordering::Relaxed);
                 }
             });
+            let result = if atomic && begun {
+                match result {
+                    Ok(done) => conn.execute("commit", 1).map(|_| done),
+                    Err(err) => {
+                        let _ = conn.execute("rollback", 1);
+                        Err(err.context(
+                            "The script ran as one transaction (production), so nothing it did was kept",
+                        ))
+                    }
+                }
+            } else {
+                result
+            };
             feed.done.store(true, std::sync::atomic::Ordering::SeqCst);
             crate::trace("execute query", started);
             if let Some(store) = store {
@@ -1574,12 +1674,29 @@ impl Workspace {
                 }) => conn.introspect().ok(),
                 _ => None,
             };
-            (result, schemas)
+            let in_transaction = conn.in_transaction();
+            (result, schemas, in_transaction, atomic && begun)
         });
         let task = cx.spawn(async move |this, cx| {
-            let (result, schemas) = work.await;
+            let (result, schemas, in_transaction, atomic) = work.await;
             this.update(cx, |this, cx| {
-                this.finish_query(tab_id, session_id, result, schemas, cx)
+                if let (Some(session), Some(open)) = (this.session_mut(session_id), in_transaction)
+                {
+                    session.in_transaction = open;
+                }
+                let note = match &result {
+                    Ok(done) if atomic => Some(format!(
+                        "Ran {} statements as one transaction.",
+                        done.statements
+                    )),
+                    _ => None,
+                };
+                this.finish_query(tab_id, session_id, result, schemas, cx);
+                if let (Some(note), Some(tab)) =
+                    (note, this.tabs.iter_mut().find(|t| t.id == tab_id))
+                {
+                    tab.flash = Some((note.into(), false));
+                }
             })
             .ok();
         });
@@ -1611,6 +1728,13 @@ impl Workspace {
                             tab.previewing = true;
                         }
                         tab.fetched = live.rows.load(std::sync::atomic::Ordering::Relaxed);
+                        if let Some(limit) = limit
+                            && tab.timed_out.is_none()
+                            && began.elapsed() >= limit
+                        {
+                            tab.timed_out = Some(limit);
+                            limiter.cancel();
+                        }
                         cx.notify();
                     })
                     .is_ok();
@@ -1623,6 +1747,8 @@ impl Workspace {
             return;
         };
         tab.run_origin = origin;
+        tab.timed_out = None;
+        tab.flash = None;
         tab.fetched = 0;
         tab.previewing = false;
         tab.last_run = Some((last_sql, origin));
@@ -1673,6 +1799,9 @@ impl Workspace {
                 } else {
                     tab.grid = None;
                 }
+                if result.cancelled && tab.timed_out.is_some() {
+                    tab.flash = Some((time_limit_note(tab.timed_out).into(), true));
+                }
                 tab.query = Query::Done(Arc::new(result));
                 if let Some(bench) = &mut self.bench
                     && matches!(bench.phase, crate::bench::Phase::Loading)
@@ -1680,6 +1809,10 @@ impl Workspace {
                     bench.phase = crate::bench::Phase::Idle(crate::bench::Mark::now());
                     self.bench_schedule(cx);
                 }
+            }
+            Err(_) if tab.timed_out.is_some() => {
+                tab.grid = None;
+                tab.query = Query::Failed(time_limit_note(tab.timed_out).into());
             }
             Err(err) => {
                 tab.grid = None;
@@ -3080,7 +3213,7 @@ impl Render for Workspace {
             .relative()
             .child(self.render_titlebar(&theme, cx))
             .child(body)
-            .child(self.render_statusbar(&theme))
+            .child(self.render_statusbar(&theme, cx))
             .when_some(self.connect_dialog.as_ref(), |el, (dialog, _)| {
                 el.child(dialog.clone())
             })
@@ -4013,7 +4146,8 @@ impl Workspace {
                         }
                     }
                     (QueryOutcome::Affected(n), _) => {
-                        format!("{} rows affected", group_digits(*n as usize))
+                        let noun = if *n == 1 { "row" } else { "rows" };
+                        format!("{} {noun} affected", group_digits(*n as usize))
                     }
                     _ => "Done".into(),
                 }
@@ -4503,7 +4637,7 @@ impl Workspace {
         panel.child(fields)
     }
 
-    fn render_statusbar(&self, theme: &Theme) -> impl IntoElement {
+    fn render_statusbar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let cell = |text: SharedString, color: Rgba| {
             div()
                 .h_full()
@@ -4549,15 +4683,45 @@ impl Workspace {
                 .when_some(session.conn.tunnel(), |bar, via| {
                     bar.child(cell(format!("ssh via {via}").into(), theme.t3))
                 })
-                .child(cell(
-                    if session.read_only {
-                        "read-only"
-                    } else {
-                        "auto-commit"
+                .map(|bar| {
+                    if !session.in_transaction {
+                        return bar.child(cell(
+                            if session.read_only {
+                                "read-only"
+                            } else {
+                                "auto-commit"
+                            }
+                            .into(),
+                            theme.t3,
+                        ));
                     }
-                    .into(),
-                    theme.t3,
-                )),
+                    // Locks are held until this ends: say so, and offer to end it.
+                    let action = |id: &'static str, label: &'static str, commit: bool| {
+                        div()
+                            .id(id)
+                            .px(px(6.))
+                            .rounded(px(3.))
+                            .cursor_pointer()
+                            .text_color(theme.text)
+                            .hover(|el| el.bg(theme.s3))
+                            .child(label)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.end_transaction(commit, cx)),
+                            )
+                    };
+                    bar.child(
+                        cell("".into(), theme.warn)
+                            .gap(px(6.))
+                            .bg(Rgba {
+                                a: 0.12,
+                                ..theme.warn
+                            })
+                            .child(div().size(px(6.)).rounded_full().bg(theme.warn))
+                            .child("transaction open")
+                            .child(action("txn-commit", "Commit", true))
+                            .child(action("txn-rollback", "Roll back", false)),
+                    )
+                }),
             None => bar.child(cell("no connection".into(), theme.t3)),
         };
         let open = self.sessions.len();
@@ -4574,4 +4738,18 @@ impl Workspace {
             .border_l_1(),
         )
     }
+}
+
+/// Why a production query stopped early.
+fn time_limit_note(limit: Option<std::time::Duration>) -> String {
+    let seconds = limit.map_or(0, |l| l.as_secs());
+    let shown = if seconds.is_multiple_of(60) {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{seconds} s")
+    };
+    format!(
+        "Stopped after {shown}: the time limit for queries on production. \
+         Change it in Settings → Safety."
+    )
 }

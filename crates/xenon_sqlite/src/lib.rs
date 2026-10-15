@@ -309,6 +309,10 @@ impl Connection for SqliteConnection {
         self.interrupt.clone()
     }
 
+    fn in_transaction(&self) -> Option<bool> {
+        Some(!self.lock().ok()?.is_autocommit())
+    }
+
     fn is_local(&self) -> bool {
         true
     }

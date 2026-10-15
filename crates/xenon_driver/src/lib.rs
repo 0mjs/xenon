@@ -310,6 +310,9 @@ pub struct ConnectOptions {
     /// Open the TCP connection here instead (an SSH tunnel's local end) while
     /// still using `host` to verify the server's TLS certificate.
     pub address: Option<std::net::SocketAddr>,
+    /// Give up waiting for a lock after this long, so a statement queued behind
+    /// another session's lock fails instead of hanging (and holding up others).
+    pub lock_timeout: Option<Duration>,
 }
 
 /// An SSH server to tunnel through. Anything left empty comes from
@@ -402,6 +405,12 @@ pub trait Connection: Send + Sync {
             Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
             Value::Blob(bytes) => format!("X'{}'", hex(bytes)),
         }
+    }
+
+    /// Whether a transaction the user began is still open (so its locks are
+    /// held until commit or rollback). `None` when the engine can't say.
+    fn in_transaction(&self) -> Option<bool> {
+        None
     }
 
     /// The statement that starts a transaction.
