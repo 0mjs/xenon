@@ -2096,9 +2096,7 @@ impl Workspace {
                 if let Some(session) = this.session_mut(session_id) {
                     session.last_used = std::time::Instant::now();
                 }
-                let lost = result
-                    .as_ref()
-                    .is_err_and(crate::reconnect::may_be_lost);
+                let lost = result.as_ref().is_err_and(crate::reconnect::may_be_lost);
                 this.finish_query(tab_id, session_id, result, schemas, cx);
                 if lost {
                     this.check_after_failure(session_id, tab_id, cx);
