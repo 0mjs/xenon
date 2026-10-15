@@ -878,6 +878,27 @@ fn snapshots() {
             w.save_edits(&crate::SaveEdits, window, cx);
         });
         shot.save(&format!("19-saved-{suffix}"));
+        // Typing into a cell in place; Tab stages it and edits the next one.
+        shot.act(|w, window, cx| {
+            w.confirm = None;
+            if let Some(grid) = &w.active_tab().grid {
+                grid.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+            }
+            w.begin_edit(1, 5, window, cx);
+            w.type_into_cell("left at the door", window, cx);
+        });
+        shot.save(&format!("51-inline-edit-{suffix}"));
+        shot.act(|w, window, cx| {
+            let (row, column, _) = w.inline_edit().expect("typed into in place");
+            assert_eq!((row, column), (1, 5));
+            w.edit_next_cell(false, window, cx);
+            assert_eq!(w.staged_changes(), 1);
+            let (_, next, _) = w.inline_edit().expect("on to the next cell");
+            assert_eq!(next, 6);
+            w.cancel_edit_for_test(window, cx);
+            w.discard_edits(&crate::DiscardEdits, window, cx);
+            assert_eq!(w.staged_changes(), 0);
+        });
 
         // Value editors: JSON in a text area, true / false, a date with Now.
         shot.act(|w, _, cx| {

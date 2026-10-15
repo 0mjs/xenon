@@ -3567,6 +3567,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Clicking away from a cell being typed into keeps what was typed.
+        if self
+            .inline_edit()
+            .is_some_and(|(r, c, _)| (r, c) != (row, column))
+        {
+            self.commit_edit(false, window, cx);
+        }
         let tab = &mut self.tabs[self.active];
         tab.selection = Some(match (tab.selection, extend) {
             (Some(current), true) => Selection {
@@ -5347,17 +5354,17 @@ impl Workspace {
                     ValueKind::Date(kind) => Some(*kind),
                     _ => None,
                 };
+                // The value is typed into its cell; the bar keeps the buttons.
                 bar.child(
                     row()
                         .child(
-                            field(
-                                theme,
-                                Some(label(column).into_any_element()),
-                                &editor.input,
-                                true,
-                            )
-                            .flex_1(),
+                            div()
+                                .text_size(crate::theme::text(11.5))
+                                .text_color(theme.t3)
+                                .child("Editing"),
                         )
+                        .child(label(column))
+                        .child(div().flex_1())
                         .when_some(date, |el, kind| {
                             el.child(
                                 div()
@@ -5388,6 +5395,52 @@ impl Workspace {
             }
         };
         Some(element.into_any_element())
+    }
+
+    /// The cell being typed into in place (single-line values): its display row
+    /// and column in the grid, and its field.
+    pub(crate) fn inline_edit(&self) -> Option<(usize, usize, Entity<InputState>)> {
+        use crate::value_editor::ValueKind;
+        let tab = self.active_tab();
+        let editor = tab.editing.as_ref()?;
+        if !matches!(editor.kind, ValueKind::Line | ValueKind::Date(_)) {
+            return None;
+        }
+        let grid = tab.grid.as_ref()?;
+        let row = match editor.row {
+            RowRef::Existing(r) => grid.order().iter().position(|&x| x == r)?,
+            RowRef::New(n) => grid.row_count() + n,
+        };
+        Some((row, grid.display_of(editor.column)?, editor.input.clone()))
+    }
+
+    /// Tab while typing into a cell: stage it, then edit the next (or, with
+    /// Shift, the previous) cell in the row.
+    pub(crate) fn edit_next_cell(
+        &mut self,
+        back: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((row, column, _)) = self.inline_edit() else {
+            return;
+        };
+        self.commit_edit(false, window, cx);
+        if self.active_tab().editing.is_some() {
+            // Not staged (a value the column can't take): stay put.
+            return;
+        }
+        let Some(grid) = self.active_tab().grid.as_ref() else {
+            return;
+        };
+        let next = if back {
+            column.checked_sub(1)
+        } else {
+            Some(column + 1).filter(|c| *c < grid.columns().len())
+        };
+        if let Some(data) = next.and_then(|c| grid.column(c)) {
+            self.begin_edit(row, data, window, cx);
+        }
     }
 
     /// Put `text` in the open edit bar's field.
@@ -5856,11 +5909,28 @@ impl Workspace {
                 sort,
                 edits: tab.edits.clone(),
                 links,
+                editing: self.inline_edit(),
             };
             return div()
                 .id("results")
                 .key_context("ResultsGrid")
                 .track_focus(&self.grid_focus)
+                // Typing into a cell: Escape cancels, Tab saves it and moves on.
+                .on_action(
+                    cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
+                        if this.inline_edit().is_some() {
+                            this.cancel_edit(window, cx);
+                        } else {
+                            cx.propagate();
+                        }
+                    }),
+                )
+                .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "tab" && this.inline_edit().is_some() {
+                        cx.stop_propagation();
+                        this.edit_next_cell(event.keystroke.modifiers.shift, window, cx);
+                    }
+                }))
                 .size_full()
                 .child(results::render(view, theme, callbacks))
                 .into_any_element();

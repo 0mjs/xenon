@@ -17,6 +17,8 @@ use gpui::{
 use xenon_driver::sql::SortDirection;
 use xenon_driver::{Column, ResultSet, Value};
 
+use gpui_component::Sizable as _;
+
 use crate::assets;
 use crate::edits::{Edits, RowRef};
 use crate::theme::Theme;
@@ -363,6 +365,12 @@ pub struct View<'a> {
     pub edits: Rc<Edits>,
     /// Per column, the table its values point at, for foreign-key columns.
     pub links: Vec<Option<SharedString>>,
+    /// The cell being typed into, in place: display row, display column, field.
+    pub editing: Option<(
+        usize,
+        usize,
+        gpui::Entity<gpui_component::input::InputState>,
+    )>,
 }
 
 pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoElement {
@@ -474,6 +482,7 @@ pub fn render(view: View<'_>, theme: &Theme, callbacks: Callbacks) -> impl IntoE
         pinned,
         pinned_width,
         shift,
+        editing: view.editing.clone(),
     });
     let theme = theme.clone();
     let row_callbacks = callbacks.clone();
@@ -683,6 +692,12 @@ struct RowLayout {
     pinned_width: f32,
     /// How far the grid is scrolled sideways.
     shift: f32,
+    /// The cell being typed into (display row and column) and its field.
+    editing: Option<(
+        usize,
+        usize,
+        gpui::Entity<gpui_component::input::InputState>,
+    )>,
 }
 
 #[derive(Clone, Copy)]
@@ -742,6 +757,37 @@ fn render_row(
     let cell_at = |column: usize| {
         let data = layout.shown[column];
         let width = widths[column];
+        // Being edited: typed into where it is.
+        if let Some((_, _, input)) = layout
+            .editing
+            .as_ref()
+            .filter(|(r, c, _)| *r == ix && *c == column)
+        {
+            return div()
+                .w(px(width))
+                .h_full()
+                .flex_none()
+                .p(px(2.))
+                .border_r_1()
+                .border_color(theme.line_2)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .px(px(6.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(theme.acc)
+                        .bg(theme.field)
+                        .child(
+                            gpui_component::input::Input::new(input)
+                                .appearance(false)
+                                .with_size(gpui_component::Size::Small),
+                        ),
+                );
+        }
         let selected = selection.is_some_and(|s| s.contains(ix, column));
         let focused = selection.is_some_and(|s| s.head == (ix, column));
         let link = linked(data);
