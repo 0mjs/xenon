@@ -244,7 +244,7 @@ impl Theme {
             raised: rgb(0x272a31),
             scrim: rgba(0x020203b3),
             shadow: rgba(0x00000099),
-            frame: rgba(0x1011158f),
+            frame: rgba(0x101115b8),
             card_line: rgb(0x26282e),
             pill: rgba(0xffffff1f),
         }
@@ -273,7 +273,7 @@ impl Theme {
             raised: rgb(0xffffff),
             scrim: rgba(0x1113182e),
             shadow: rgba(0x1113182e),
-            frame: rgba(0xf6f7fa8c),
+            frame: rgba(0xf6f7fad9),
             card_line: rgb(0xdfe2e7),
             pill: rgba(0xffffffbf),
         }
@@ -357,6 +357,9 @@ pub fn apply(mode: Mode, cx: &mut App) {
         Mode::Light => gpui_component::ThemeMode::Light,
     };
     gpui_component::Theme::change(component_mode, None, cx);
+    // The window's root paints this behind everything; clear it so the frosted
+    // window shows through around the cards.
+    gpui_component::Theme::global_mut(cx).tokens.background = gpui::transparent_black().into();
 }
 
 pub trait ActiveTheme {

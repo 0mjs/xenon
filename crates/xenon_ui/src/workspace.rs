@@ -65,8 +65,8 @@ const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
 /// The space between the cards the window is laid out in.
-const CARD_GAP: f32 = 10.;
-const CARD_RADIUS: f32 = 14.;
+const CARD_GAP: f32 = 8.;
+const CARD_RADIUS: f32 = 12.;
 const TAB_MAX_WIDTH: f32 = 240.;
 /// Rows from which sorting by an unindexed column asks first.
 const LARGE_TABLE: u64 = 1_000_000;
@@ -3592,10 +3592,17 @@ impl Render for Workspace {
             .when(self.show_side_panel, |el| {
                 el.child(self.render_side_panel(&theme, cx))
             })
-            .child(self.render_center(&theme, cx))
-            .when(
-                self.show_inspector && self.active_session().is_some(),
-                |el| el.child(self.render_inspector(&theme, cx)),
+            .child(
+                card(&theme)
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_row()
+                    .child(self.render_center(&theme, cx))
+                    .when(
+                        self.show_inspector && self.active_session().is_some(),
+                        |el| el.child(self.render_inspector(&theme, cx)),
+                    ),
             );
 
         div()
@@ -3997,7 +4004,7 @@ impl Workspace {
             SidePanel::History => ("History", self.render_history(theme, cx)),
             SidePanel::Saved => ("Saved queries", self.render_saved_queries(theme, cx)),
         };
-        card(theme)
+        div()
             .w(px(self.side_panel_width))
             .flex_none()
             .relative()
@@ -4064,18 +4071,21 @@ impl Workspace {
 
     fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self.active_session().is_none() {
-            return card(theme)
+            return div()
                 .flex_1()
                 .min_w(px(0.))
                 .child(self.render_launcher(theme, cx))
                 .into_any_element();
         }
         let tab = self.active_tab();
-        let editor = card(theme)
+        let editor = div()
             .h(px(self.editor_height))
             .flex_none()
             .flex()
             .flex_col()
+            .bg(theme.s2)
+            .border_b_1()
+            .border_color(theme.line)
             .child(self.render_toolbar(theme, cx))
             .child(
                 div()
@@ -4087,7 +4097,7 @@ impl Workspace {
                     .child(Editor::new(&tab.editor).h_full().appearance(false)),
             );
 
-        let results = card(theme).flex_1().min_h(px(0.)).flex().flex_col();
+        let results = div().flex_1().min_h(px(0.)).flex().flex_col();
         div()
             .flex_1()
             .min_w(px(0.))
@@ -4095,10 +4105,11 @@ impl Workspace {
             .flex_col()
             .child(editor)
             .child(
-                // The gap between the cards is the handle.
                 div()
                     .id("split")
-                    .h(px(CARD_GAP))
+                    .h(px(5.))
+                    .mt(px(-3.))
+                    .mb(px(-2.))
                     .flex_none()
                     .cursor_row_resize()
                     .on_mouse_down(
@@ -5165,11 +5176,13 @@ impl Workspace {
 
     fn render_inspector(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
-        let mut panel = card(theme)
+        let mut panel = div()
             .w(px(INSPECTOR_WIDTH))
             .flex_none()
             .flex()
-            .flex_col();
+            .flex_col()
+            .border_l_1()
+            .border_color(theme.line);
 
         // The row as it will be once saved: staged values in place of fetched ones.
         let selected = tab
@@ -5444,7 +5457,7 @@ fn refused_in_read_only(err: &anyhow::Error) -> bool {
     message.contains("read-only transaction") || message.contains("read only transaction")
 }
 
-/// A panel floating on the frosted window: the explorer, editor, results or inspector.
+/// The panel floating on the frosted window that holds the editor, results and inspector.
 fn card(theme: &Theme) -> gpui::Div {
     div()
         .bg(theme.s1)
@@ -5452,5 +5465,5 @@ fn card(theme: &Theme) -> gpui::Div {
         .border_1()
         .border_color(theme.card_line)
         .overflow_hidden()
-        .shadow_md()
+        .shadow_sm()
 }
