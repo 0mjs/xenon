@@ -66,6 +66,9 @@ const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
+/// What totals were worked out for: the rows, their order, and the selection.
+type StatsKey = (usize, usize, Selection);
+
 /// What a failed query got wrong: where, and what was likely meant.
 pub(crate) struct ErrorHint {
     /// The range in the editor it points at, when it's known.
@@ -538,6 +541,9 @@ pub struct Workspace {
     next_run: u64,
     /// A problem opening a database, shown on the Connect screen and in the explorer.
     pub(crate) notice: Option<SharedString>,
+    /// Totals for the selected cells, kept until the selection, rows or their
+    /// order change: adding up a million cells every frame would be slow.
+    selection_stats: RefCell<Option<(StatsKey, Option<crate::stats::Stats>)>>,
     /// Whether a newer Xenon is out, shown in the status bar.
     pub(crate) update: crate::updates::UpdateState,
     /// The connection being opened, while it opens.
@@ -667,6 +673,7 @@ impl Workspace {
             next_run: 0,
             notice: None,
             update: Default::default(),
+            selection_stats: RefCell::new(None),
             connecting: None,
             store,
             history: Vec::new(),
@@ -2442,6 +2449,29 @@ impl Workspace {
     /// Ask for the results grid to be drawn again.
     fn notify_grid(&mut self, cx: &mut Context<Self>) {
         cx.notify();
+    }
+
+    /// Totals for the active tab's selected cells, worked out once per selection.
+    pub(crate) fn selection_totals(&self) -> Option<crate::stats::Stats> {
+        let tab = self.active_tab();
+        let (grid, selection) = (tab.grid.as_ref()?, tab.selection?);
+        let key = (
+            Arc::as_ptr(&grid.data) as usize,
+            Arc::as_ptr(&grid.order()) as usize,
+            selection,
+        );
+        if let Some((cached, stats)) = &*self.selection_stats.borrow()
+            && *cached == key
+        {
+            return stats.clone();
+        }
+        let rows = selection.rows().start..selection.rows().end.min(grid.row_count());
+        let columns = selection.columns();
+        let stats = crate::stats::of(rows.flat_map(|row| {
+            grid.row(row)[columns.start..columns.end.min(grid.data.columns.len())].iter()
+        }));
+        *self.selection_stats.borrow_mut() = Some((key, stats.clone()));
+        stats
     }
 
     /// Put the suggested name in place of the misspelt one.
@@ -5927,6 +5957,24 @@ impl Workspace {
                 .child(cell(format!("{open} connections open").into(), theme.t3).border_l_1())
         });
 
+        let totals = self.selection_totals().map(|stats| {
+            let text = match &stats.numbers {
+                Some(n) => format!(
+                    "count {} · sum {} · avg {} · min {} · max {}",
+                    group_digits(stats.count),
+                    n.sum,
+                    n.average,
+                    n.min,
+                    n.max
+                ),
+                None => format!("count {}", group_digits(stats.count)),
+            };
+            div()
+                .h_full()
+                .border_l_1()
+                .border_color(theme.line)
+                .child(cell(text.into(), theme.t2))
+        });
         let update = match &self.update {
             UpdateState::Idle => None,
             UpdateState::Checking => {
@@ -5954,6 +6002,7 @@ impl Workspace {
             }
         };
         bar.when(open <= 1, |bar| bar.child(div().flex_1()))
+            .children(totals)
             .children(update.map(|cell| {
                 div()
                     .h_full()

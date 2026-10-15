@@ -382,6 +382,22 @@ fn snapshots() {
             w.select_cell(5, 4, true, window, cx);
         });
         shot.save(&format!("03-browse-{suffix}"));
+        // Totals for a selection of numbers, exact to the cent.
+        shot.act(|w, window, cx| {
+            w.select_cell(0, 2, false, window, cx);
+            w.select_cell(3, 2, true, window, cx);
+            let stats = w.selection_totals().expect("totals");
+            assert_eq!(stats.count, 4);
+            let numbers = stats.numbers.expect("all numbers");
+            assert_eq!(numbers.sum, "393.70", "{numbers:?}");
+            assert_eq!(numbers.min, "41.47");
+            assert_eq!(numbers.max, "155.38");
+        });
+        shot.save(&format!("42-totals-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.select_cell(2, 2, false, window, cx);
+            w.select_cell(5, 4, true, window, cx);
+        });
         // A newer release is out: the status bar links to it.
         shot.act(|w, _, cx| {
             w.update = crate::updates::UpdateState::Available(crate::updates::Release {

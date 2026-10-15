@@ -120,7 +120,7 @@ so it can join the test fleet.
 | Pagination with exact counts (where cheap) or estimates | 0.5 |
 | Column visibility, pinning, reordering; remembered per table | 0.5 |
 | Show results as JSON / as records; transpose a single row | 0.5 |
-| Aggregates for a selection in the status bar (sum, avg, count, min, max) | 0.5 |
+| ✅ Aggregates for a selection in the status bar (sum, avg, count, min, max), exact for decimals | 0.5 |
 | Geometry/PostGIS preview on a small map | Later |
 
 ### Schema (structure)

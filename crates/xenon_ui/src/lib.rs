@@ -22,6 +22,7 @@ mod results;
 mod saved;
 mod servers;
 mod settings;
+mod stats;
 mod structure;
 pub mod theme;
 mod updates;
