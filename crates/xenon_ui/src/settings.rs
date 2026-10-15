@@ -8,7 +8,7 @@ use gpui::{
 use gpui_component::input::Escape;
 use xenon_store::Store;
 
-use crate::theme::{Accent, ActiveTheme, MONO_FONT, Mode, Theme};
+use crate::theme::{Accent, ActiveTheme, Layout, MONO_FONT, Mode, Theme};
 use crate::widgets::{self, ButtonKind, RADIUS_CONTROL};
 
 /// Light, dark, or whatever macOS is set to.
@@ -85,6 +85,9 @@ const EDITOR_FONTS: [(f32, &str); 4] = [
 pub(crate) struct Prefs {
     pub theme: ThemeChoice,
     pub accent: Accent,
+    pub layout: Layout,
+    /// The desktop shows, blurred, through the window's frame.
+    pub frosted: bool,
     pub row_limit: usize,
     pub browse_limit: usize,
     pub editor_font: f32,
@@ -106,6 +109,8 @@ impl Default for Prefs {
         Self {
             theme: ThemeChoice::System,
             accent: Accent::default(),
+            layout: Layout::default(),
+            frosted: true,
             row_limit: 100_000,
             browse_limit: 1_000,
             editor_font: 12.5,
@@ -128,6 +133,12 @@ impl Prefs {
         }
         if let Some(value) = get(Accent::SETTING) {
             prefs.accent = Accent::parse(&value);
+        }
+        if let Some(value) = get("layout") {
+            prefs.layout = Layout::parse(&value);
+        }
+        if let Some(value) = get("frosted") {
+            prefs.frosted = value != "false";
         }
         if let Some(value) = get("row_limit").and_then(|v| v.parse().ok()) {
             prefs.row_limit = value;
@@ -161,6 +172,8 @@ impl Prefs {
         let values = [
             ("theme", self.theme.as_str().to_string()),
             (Accent::SETTING, self.accent.as_str().to_string()),
+            ("layout", self.layout.as_str().to_string()),
+            ("frosted", self.frosted.to_string()),
             ("row_limit", self.row_limit.to_string()),
             ("browse_limit", self.browse_limit.to_string()),
             ("editor_font", self.editor_font.to_string()),
@@ -352,6 +365,37 @@ impl Render for SettingsDialog {
                             .map(|t| (t.label(), t == prefs.theme))
                             .collect(),
                         Box::new(|p, ix| p.theme = ThemeChoice::ALL[ix]),
+                    )
+                    .w(px(270.)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Layout",
+                    Some(
+                        "Classic: panels edge to edge. Floating: the work area in a rounded card.",
+                    ),
+                    segmented_of(
+                        cx,
+                        "layout",
+                        Layout::ALL
+                            .into_iter()
+                            .map(|l| (l.label(), l == prefs.layout))
+                            .collect(),
+                        Box::new(|p, ix| p.layout = Layout::ALL[ix]),
+                    )
+                    .w(px(270.)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Window",
+                    Some("Frosted: the desktop shows, blurred, through the window's frame."),
+                    segmented_of(
+                        cx,
+                        "window-material",
+                        vec![("Solid", !prefs.frosted), ("Frosted", prefs.frosted)],
+                        Box::new(|p, ix| p.frosted = ix == 1),
                     )
                     .w(px(270.)),
                 )

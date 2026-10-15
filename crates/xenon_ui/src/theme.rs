@@ -141,6 +141,52 @@ impl Accent {
 struct CurrentAccent(Accent);
 impl Global for CurrentAccent {}
 
+/// How the window is laid out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    /// Edge to edge: panels meet at hairlines.
+    Classic,
+    /// The editor and results float in one rounded card on the frame.
+    #[default]
+    Floating,
+}
+
+impl Layout {
+    pub const ALL: [Layout; 2] = [Layout::Classic, Layout::Floating];
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "classic" => Layout::Classic,
+            _ => Layout::Floating,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layout::Classic => "classic",
+            Layout::Floating => "floating",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Layout::Classic => "Classic",
+            Layout::Floating => "Floating",
+        }
+    }
+}
+
+/// The layout in use; each has its own dark palette.
+struct CurrentLayout(Layout);
+impl Global for CurrentLayout {}
+
+/// Switch to `layout`, keeping the current mode and accent.
+pub fn set_layout(layout: Layout, cx: &mut App) {
+    cx.set_global(CurrentLayout(layout));
+    let mode = cx.global::<Theme>().mode;
+    apply(mode, cx);
+}
+
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub mode: Mode,
@@ -220,6 +266,19 @@ impl Theme {
 
     /// Near-black chrome, so panels separate by a shade, and the Xenon silver
     /// accent for focus and the main action.
+    /// The deeper dark surfaces the Classic layout was designed with.
+    fn classic_dark(&mut self) {
+        self.bg = rgb(0x060607);
+        self.s1 = rgb(0x0b0c0e);
+        self.s2 = rgb(0x101114);
+        self.s3 = rgb(0x17191d);
+        self.line = rgb(0x23252b);
+        self.line_2 = rgb(0x16171b);
+        self.overlay = rgb(0x111215);
+        self.field = rgb(0x08090a);
+        self.raised = rgb(0x22252b);
+    }
+
     pub fn dark() -> Self {
         Self {
             mode: Mode::Dark,
@@ -303,7 +362,14 @@ pub fn apply(mode: Mode, cx: &mut App) {
     let accent = cx
         .try_global::<CurrentAccent>()
         .map_or(Accent::default(), |a| a.0);
-    cx.set_global(Theme::new(mode, accent));
+    let mut theme = Theme::new(mode, accent);
+    let layout = cx
+        .try_global::<CurrentLayout>()
+        .map_or(Layout::default(), |l| l.0);
+    if layout == Layout::Classic && mode == Mode::Dark {
+        theme.classic_dark();
+    }
+    cx.set_global(theme);
 
     // The bundled JSON carries Xenon's colours; swap in this accent's.
     let mut json = EDITOR_THEMES.to_string();

@@ -509,17 +509,19 @@ pub fn engine_badge(theme: &Theme, engine: Engine, available: bool) -> gpui::Div
         ))
 }
 
-pub fn tree_row(depth: usize) -> gpui::Div {
-    div()
-        .h(px(24.))
-        .mx(px(6.))
-        .rounded(px(6.))
-        .pl(px(6. + depth as f32 * 12.))
-        .pr(px(6.))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(6.))
+/// A row in the explorer's tree. `inset`: rounded and set in from the edges
+/// (the Floating layout); otherwise edge to edge.
+pub fn tree_row(depth: usize, inset: bool) -> gpui::Div {
+    let row = div().h(px(24.));
+    let row = if inset {
+        row.mx(px(6.))
+            .rounded(px(6.))
+            .pl(px(6. + depth as f32 * 12.))
+            .pr(px(6.))
+    } else {
+        row.pl(px(12. + depth as f32 * 12.)).pr(px(12.))
+    };
+    row.flex().flex_row().items_center().gap(px(6.))
 }
 
 pub fn env_tag(label: &'static str, color: Rgba) -> impl IntoElement {

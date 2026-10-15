@@ -324,6 +324,24 @@ fn snapshots() {
             w.select_cell(5, 4, true, window, cx);
         });
         shot.save(&format!("03-browse-{suffix}"));
+        // The Classic layout, solid: the original edge-to-edge design.
+        shot.act(|w, window, cx| {
+            let prefs = crate::settings::Prefs {
+                layout: crate::theme::Layout::Classic,
+                frosted: false,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx);
+        });
+        shot.save(&format!("35-classic-{suffix}"));
+        shot.act(|w, window, cx| {
+            let prefs = crate::settings::Prefs {
+                layout: crate::theme::Layout::Floating,
+                frosted: true,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx);
+        });
         // The filter builder: status = paid, and total ≥ 300.
         shot.act(|w, window, cx| {
             w.toggle_filter_builder(window, cx);

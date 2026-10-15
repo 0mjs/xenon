@@ -91,7 +91,7 @@ impl Workspace {
         // A filter shows every match, even in folded connections and schemas.
         let folded = session.collapsed && filter.is_empty();
         let mut rows = vec![
-            tree_row(0)
+            tree_row(0, !self.classic())
                 .id(group.clone())
                 .group(group.clone())
                 .mt(px(2.))
@@ -175,7 +175,7 @@ impl Workspace {
             if nested {
                 let name = schema.name.clone();
                 rows.push(
-                    tree_row(1)
+                    tree_row(1, !self.classic())
                         .id(SharedString::from(format!("schema-{id}-{}", schema.name)))
                         .cursor_pointer()
                         .text_color(theme.t2)
@@ -232,7 +232,7 @@ impl Workspace {
         let group = SharedString::from(format!("saved-{}", saved.id));
         let (connect, edit, forget) = (saved.clone(), saved.clone(), saved.clone());
 
-        tree_row(0)
+        tree_row(0, !self.classic())
             .id(group.clone())
             .group(group.clone())
             .cursor_pointer()
@@ -308,7 +308,7 @@ impl Workspace {
         };
 
         let mut rows = vec![
-            tree_row(depth)
+            tree_row(depth, !self.classic())
                 .id(SharedString::from(format!("obj-{id}-{key}")))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.s3).text_color(theme.text))
@@ -342,7 +342,7 @@ impl Workspace {
 
         if expanded {
             rows.extend(object.columns.iter().map(|column| {
-                tree_row(depth + 1)
+                tree_row(depth + 1, !self.classic())
                     .text_color(theme.t2)
                     .child(div().flex_1().truncate().child(column.name.clone()))
                     .when(column.primary_key, |el| el.child(env_tag("PK", theme.acc)))

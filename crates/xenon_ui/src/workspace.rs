@@ -38,7 +38,7 @@ use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::servers;
 use crate::settings::{Prefs, SettingsDialog, SettingsEvent, ThemeChoice};
-use crate::theme::{self, ActiveTheme, MONO_FONT, Mode, Theme, UI_FONT};
+use crate::theme::{self, ActiveTheme, Layout, MONO_FONT, Mode, Theme, UI_FONT};
 use crate::widgets::{
     self as widgets, ButtonKind, Engine, RADIUS_CONTROL, centered_hint, connection_tags,
     empty_hint, env_tag, field, format_duration, group_digits, kbd, kbd_on_accent, panel_label,
@@ -621,7 +621,9 @@ impl Workspace {
         };
         let prefs = Prefs::load(store.as_deref());
         theme::set_accent(prefs.accent, cx);
+        theme::set_layout(prefs.layout, cx);
         theme::apply(prefs.theme.mode(window), cx);
+        window.set_background_appearance(window_material(prefs.frosted));
 
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -3509,8 +3511,14 @@ impl Workspace {
         if prefs.accent != old.accent {
             theme::set_accent(prefs.accent, cx);
         }
-        if prefs.theme != old.theme || prefs.accent != old.accent {
+        if prefs.layout != old.layout {
+            theme::set_layout(prefs.layout, cx);
+        }
+        if prefs.theme != old.theme || prefs.accent != old.accent || prefs.layout != old.layout {
             theme::apply(prefs.theme.mode(window), cx);
+        }
+        if prefs.frosted != old.frosted {
+            window.set_background_appearance(window_material(prefs.frosted));
         }
         prefs.save(self.store.as_deref());
         cx.notify();
@@ -3612,6 +3620,15 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(crate) fn classic(&self) -> bool {
+        self.prefs.layout == Layout::Classic
+    }
+
+    /// The space around the card: none when the layout is Classic.
+    fn card_gap(&self) -> f32 {
+        if self.classic() { 0. } else { CARD_GAP }
+    }
+
     fn set_side_panel(&mut self, show: bool) {
         if show != self.show_side_panel {
             self.show_side_panel = show;
@@ -3679,20 +3696,21 @@ impl Render for Workspace {
         let theme = cx.theme().clone();
 
         let open = self.side_panel_open(window);
+        let gap = self.card_gap();
         let body = div()
             .flex()
             .flex_row()
             .flex_1()
             .min_h(px(0.))
-            .pr(px(CARD_GAP))
-            .pb(px(CARD_GAP))
+            .pr(px(gap))
+            .pb(px(gap))
             .child(self.render_rail(&theme, cx))
             .when(open > 0., |el| {
                 let panel = self.render_side_panel(&theme, cx);
                 el.child(if open < 1. {
                     // Sliding: clip the panel at its full width as the space grows.
                     div()
-                        .w(px((self.side_panel_width + CARD_GAP) * open))
+                        .w(px((self.side_panel_width + gap) * open))
                         .flex_none()
                         .overflow_hidden()
                         .opacity(open)
@@ -3703,8 +3721,8 @@ impl Render for Workspace {
                 })
             })
             .child(
-                card(&theme)
-                    .when(open >= 1., |el| el.ml(px(CARD_GAP)))
+                card(&theme, self.classic())
+                    .when(open >= 1., |el| el.ml(px(gap)))
                     .flex_1()
                     .min_w(px(0.))
                     .flex()
@@ -3818,7 +3836,11 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.frame)
+            .bg(if self.prefs.frosted {
+                theme.frame
+            } else {
+                theme.bg
+            })
             .font_family(UI_FONT)
             .text_color(theme.text)
             .text_size(px(12.))
@@ -3847,6 +3869,7 @@ impl Workspace {
         let several = self.sessions.len() > 1;
         let inset = drag_area(cx).w(px(TRAFFIC_LIGHT_INSET)).flex_none();
         let spacer = drag_area(cx).flex_1();
+        let classic = self.classic();
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
             let active = index == self.active;
             let running = matches!(tab.query, Query::Running { .. });
@@ -3868,17 +3891,30 @@ impl Workspace {
             div()
                 .id(("tab", tab.id))
                 .group("tab")
-                .h(px(28.))
                 .max_w(px(TAB_MAX_WIDTH))
-                .pl(px(12.))
-                .pr(px(6.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .relative()
-                .rounded(px(8.))
                 .cursor_pointer()
-                .when(active, |el| el.bg(theme.pill).text_color(theme.text))
+                // Classic: full-height tabs split by hairlines. Floating: pills.
+                .map(|el| {
+                    if classic {
+                        el.h_full()
+                            .pl(px(14.))
+                            .pr(px(8.))
+                            .border_r_1()
+                            .border_color(theme.line)
+                            .when(active, |el| el.bg(theme.s1))
+                    } else {
+                        el.h(px(28.))
+                            .pl(px(12.))
+                            .pr(px(6.))
+                            .rounded(px(8.))
+                            .when(active, |el| el.bg(theme.pill))
+                    }
+                })
+                .when(active, |el| el.text_color(theme.text))
                 .when(!active, |el| {
                     el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
                 })
@@ -3931,8 +3967,20 @@ impl Workspace {
                                 .text_color(theme.t2),
                         ),
                 )
-                // Production tabs carry a red ring.
-                .when(active && production, |el| {
+                // The active tab is underlined (Classic) or ringed (Floating, production only);
+                // red on production.
+                .when(active && classic, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(2.))
+                            .bg(if production { theme.err } else { theme.acc }),
+                    )
+                })
+                .when(active && production && !classic, |el| {
                     el.border_1().border_color(theme.err)
                 })
         });
@@ -3944,7 +3992,8 @@ impl Workspace {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(4.))
+            .when(classic, |el| el.border_b_1().border_color(theme.line))
+            .when(!classic, |el| el.gap(px(4.)))
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, _| {
                     if this.titlebar_pressed && event.dragging() {
@@ -3967,13 +4016,20 @@ impl Workspace {
             .child(
                 div()
                     .id("toggle-side-panel")
-                    .size(px(28.))
-                    .mr(px(4.))
+                    .map(|el| {
+                        if classic {
+                            el.h_full()
+                                .px(px(10.))
+                                .border_r_1()
+                                .border_color(theme.line)
+                        } else {
+                            el.size(px(28.)).mr(px(4.)).rounded(px(8.))
+                        }
+                    })
                     .justify_center()
                     .flex()
                     .flex_none()
                     .items_center()
-                    .rounded(px(8.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.s3))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -4098,6 +4154,9 @@ impl Workspace {
             .items_center()
             .pt(px(8.))
             .gap(px(4.))
+            .when(self.classic(), |el| {
+                el.border_r_1().border_color(theme.line)
+            })
             .pb(px(10.))
             .child(item("rail-explorer", "database", SidePanel::Explorer))
             .child(item("rail-history", "clock", SidePanel::History))
@@ -4132,12 +4191,18 @@ impl Workspace {
             SidePanel::History => ("History", self.render_history(theme, cx)),
             SidePanel::Saved => ("Saved queries", self.render_saved_queries(theme, cx)),
         };
+        let classic = self.classic();
         div()
             .w(px(self.side_panel_width))
             .flex_none()
             .relative()
             .flex()
             .flex_col()
+            .when(classic, |el| {
+                el.border_r_1()
+                    .border_color(theme.line)
+                    .when(!self.prefs.frosted, |el| el.bg(theme.s1))
+            })
             .child(
                 div()
                     .flex()
@@ -4177,8 +4242,13 @@ impl Workspace {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .right(px(-CARD_GAP))
-                    .w(px(CARD_GAP))
+                    .map(|el| {
+                        if classic {
+                            el.right(px(-3.)).w(px(6.))
+                        } else {
+                            el.right(px(-CARD_GAP)).w(px(CARD_GAP))
+                        }
+                    })
                     .cursor_col_resize()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -4207,7 +4277,7 @@ impl Workspace {
         }
         let tab = self.active_tab();
         // The card clips square, so its painted corners round themselves.
-        let inner = px(CARD_RADIUS - 1.);
+        let inner = px(if self.classic() { 0. } else { CARD_RADIUS - 1. });
         let editor = div()
             .h(px(self.editor_height))
             .flex_none()
@@ -4230,7 +4300,12 @@ impl Workspace {
             );
 
         // Room at the foot so highlighted rows stop short of the rounded corners.
-        let results = div().flex_1().min_h(px(0.)).pb(px(8.)).flex().flex_col();
+        let results = div()
+            .flex_1()
+            .min_h(px(0.))
+            .when(!self.classic(), |el| el.pb(px(8.)))
+            .flex()
+            .flex_col();
         div()
             .flex_1()
             .min_w(px(0.))
@@ -5443,6 +5518,9 @@ impl Workspace {
             .flex_none()
             .flex()
             .flex_row()
+            .when(self.classic(), |el| {
+                el.border_t_1().border_color(theme.line)
+            })
             .font_family(MONO_FONT)
             .text_size(px(10.5));
 
@@ -5591,7 +5669,10 @@ fn refused_in_read_only(err: &anyhow::Error) -> bool {
 }
 
 /// The panel floating on the frosted window that holds the editor, results and inspector.
-fn card(theme: &Theme) -> gpui::Div {
+fn card(theme: &Theme, classic: bool) -> gpui::Div {
+    if classic {
+        return div().bg(theme.s1);
+    }
     div()
         .bg(theme.s1)
         .rounded(px(CARD_RADIUS))
@@ -5607,4 +5688,13 @@ fn drag_area(cx: &mut Context<Workspace>) -> gpui::Div {
         MouseButton::Left,
         cx.listener(|this, _, _, _| this.titlebar_pressed = true),
     )
+}
+
+/// The window behind the frame: blurred desktop, or solid.
+fn window_material(frosted: bool) -> gpui::WindowBackgroundAppearance {
+    if frosted {
+        gpui::WindowBackgroundAppearance::Blurred
+    } else {
+        gpui::WindowBackgroundAppearance::Opaque
+    }
 }
