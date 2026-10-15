@@ -100,6 +100,13 @@ impl PgCancel {
     }
 }
 
+/// Past the row limit, rows read and dropped (or time spent) before the query is
+/// cancelled: most queries just over the limit finish on their own.
+const LIMIT_GRACE_ROWS: usize = 10_000;
+const LIMIT_GRACE: Duration = Duration::from_millis(100);
+/// Long enough for a cancel the server has taken to reach the session.
+const CANCEL_SETTLE: Duration = Duration::from_millis(300);
+
 /// One shared Tokio runtime drives every Postgres connection.
 fn runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -280,6 +287,10 @@ impl PostgresConnection {
         let mut current: Option<ResultSet> = None;
         let mut cancelled_for_limit = false;
         let mut limit_stop = None;
+        // Past the row limit: when, and how many rows were dropped since.
+        let mut over_limit: Option<(Instant, usize)> = None;
+        // The server confirmed the row limit's cancel stopped this query.
+        let mut cancel_landed = false;
         let writes = xenon_driver::sql::writes(sql);
         let mut cancelled = false;
 
@@ -289,6 +300,7 @@ impl PostgresConnection {
                 Err(err)
                     if cancelled_for_limit && err.code() == Some(&SqlState::QUERY_CANCELED) =>
                 {
+                    cancel_landed = true;
                     break;
                 }
                 // Stopped by the user while reading rows: keep what arrived.
@@ -322,15 +334,19 @@ impl PostgresConnection {
                 SimpleQueryMessage::Row(row) => {
                     let Some(result) = &mut current else { continue };
                     if result.rows.len() == row_limit {
-                        if !result.truncated {
-                            // Stop the server instead of streaming rows we'd discard.
-                            result.truncated = true;
-                            // A write must finish (a cancel would roll it back), so
-                            // its extra rows are read and dropped instead.
-                            if !writes {
-                                cancelled_for_limit = true;
-                                limit_stop = Some(self.cancel.stop());
-                            }
+                        result.truncated = true;
+                        // Read on briefly first: a query about to finish needs no
+                        // cancel (and one that lands late would stop the next
+                        // query). A write is never stopped: a cancel would roll it
+                        // back, so its extra rows are read and dropped instead.
+                        let (since, dropped) = over_limit.get_or_insert((Instant::now(), 0));
+                        *dropped += 1;
+                        if !writes
+                            && limit_stop.is_none()
+                            && (*dropped >= LIMIT_GRACE_ROWS || since.elapsed() >= LIMIT_GRACE)
+                        {
+                            cancelled_for_limit = true;
+                            limit_stop = Some(self.cancel.stop());
                         }
                         continue;
                     }
@@ -357,10 +373,15 @@ impl PostgresConnection {
                 _ => {}
             }
         }
-        // Let the row limit's cancel land before returning: one still on its way
-        // when the next query starts would stop that query instead.
+        // A row-limit cancel must not reach the next query. Postgres applies a
+        // cancel a moment after taking it, and ignores one that finds the session
+        // idle: so when the query finished before the cancel stopped it, wait for
+        // the cancel to land on the idle session before running anything else.
         if let Some(stop) = limit_stop {
             let _ = stop.await;
+            if !cancel_landed {
+                tokio::time::sleep(CANCEL_SETTLE).await;
+            }
         }
         if let Some(rows) = current.take() {
             // Cut short by the row limit: no CommandComplete arrives.
