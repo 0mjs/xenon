@@ -1,5 +1,6 @@
 pub mod assets;
 mod bench;
+mod code_themes;
 mod columns;
 mod completion;
 mod confirm;

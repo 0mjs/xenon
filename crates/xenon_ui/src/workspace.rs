@@ -700,6 +700,7 @@ impl Workspace {
             prefs.zoom,
             prefs.editor_font,
         );
+        theme::set_code_theme(prefs.code_theme);
         theme::apply(prefs.theme.mode(window), cx);
         window.set_background_appearance(window_material(prefs.frosted));
 
@@ -3930,6 +3931,10 @@ impl Workspace {
             theme::apply(prefs.theme.mode(window), cx);
         }
         let typeface = |p: &Prefs| (p.ui_font, p.code_font, p.zoom, p.editor_font);
+        if prefs.code_theme != old.code_theme {
+            theme::set_code_theme(prefs.code_theme);
+            theme::apply(prefs.theme.mode(window), cx);
+        }
         if typeface(&prefs) != typeface(&old) {
             theme::set_type(
                 prefs.ui_font,

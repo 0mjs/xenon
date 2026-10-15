@@ -149,6 +149,18 @@ pub fn set_type(ui: UiFont, code: CodeFont, zoom: f32, editor: f32) {
     };
 }
 
+static CODE_THEME: std::sync::RwLock<crate::code_themes::CodeTheme> =
+    std::sync::RwLock::new(crate::code_themes::CodeTheme::Xenon);
+
+/// The code theme; [`apply`] then colours the editor with it.
+pub fn set_code_theme(theme: crate::code_themes::CodeTheme) {
+    *CODE_THEME.write().unwrap_or_else(|e| e.into_inner()) = theme;
+}
+
+fn code_theme() -> crate::code_themes::CodeTheme {
+    *CODE_THEME.read().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The interface font's family.
 pub fn ui_font() -> &'static str {
     current().ui.family()
@@ -567,12 +579,23 @@ pub fn apply(mode: Mode, cx: &mut App) {
             json.replace_range(start..end, &part);
         }
     }
-    let registry = gpui_component::ThemeRegistry::global_mut(cx);
-    registry
-        .load_themes_from_str(&json)
-        .expect("bundled steel.json is valid");
-    let dark = registry.themes()["Xenon Dark"].clone();
-    let light = registry.themes()["Xenon Light"].clone();
+    // The chosen code theme's syntax colours.
+    let json = crate::code_themes::apply(&json, code_theme());
+    // Parsed here rather than through the registry, which keeps the first
+    // version of a name it's seen: accent and code theme changes would never
+    // reach the editor.
+    let set: gpui_component::ThemeSet =
+        serde_json::from_str(&json).expect("bundled steel.json is valid");
+    let named = |name: &str| {
+        std::rc::Rc::new(
+            set.themes
+                .iter()
+                .find(|t| t.name.as_ref() == name)
+                .cloned()
+                .expect("steel.json has both modes"),
+        )
+    };
+    let (dark, light) = (named("Xenon Dark"), named("Xenon Light"));
     let component_theme = gpui_component::Theme::global_mut(cx);
     component_theme.dark_theme = dark;
     component_theme.light_theme = light;

@@ -88,6 +88,7 @@ pub(crate) struct Prefs {
     pub layout: Layout,
     pub ui_font: UiFont,
     pub code_font: CodeFont,
+    pub code_theme: crate::code_themes::CodeTheme,
     /// Text size, as a scale (⌘+, ⌘−): one of [`ZOOMS`].
     pub zoom: f32,
     /// The desktop shows, blurred, through the window's frame.
@@ -118,6 +119,7 @@ impl Default for Prefs {
             layout: Layout::default(),
             ui_font: UiFont::default(),
             code_font: CodeFont::default(),
+            code_theme: Default::default(),
             zoom: 1.,
             frosted: true,
             row_limit: 100_000,
@@ -149,6 +151,9 @@ impl Prefs {
         }
         if let Some(value) = get("ui_font") {
             prefs.ui_font = UiFont::parse(&value);
+        }
+        if let Some(value) = get("code_theme") {
+            prefs.code_theme = crate::code_themes::CodeTheme::parse(&value);
         }
         if let Some(value) = get("code_font") {
             prefs.code_font = CodeFont::parse(&value);
@@ -197,6 +202,7 @@ impl Prefs {
             ("layout", self.layout.as_str().to_string()),
             ("ui_font", self.ui_font.as_str().to_string()),
             ("code_font", self.code_font.as_str().to_string()),
+            ("code_theme", self.code_theme.as_str().to_string()),
             ("zoom", self.zoom.to_string()),
             ("frosted", self.frosted.to_string()),
             ("row_limit", self.row_limit.to_string()),
@@ -253,6 +259,54 @@ impl SettingsDialog {
         self.clear_armed = false;
         cx.emit(SettingsEvent::Changed(self.prefs));
         cx.notify();
+    }
+
+    /// Code themes, each with a swatch of its colours in the current mode.
+    fn render_code_themes(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::code_themes::CodeTheme;
+        div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .children(CodeTheme::ALL.into_iter().enumerate().map(|(ix, code)| {
+                let on = code == self.prefs.code_theme;
+                let colors: Vec<gpui::Rgba> = match code.palette(theme.mode) {
+                    Some(p) => p.swatch().into_iter().map(gpui::rgb).collect(),
+                    None => vec![theme.text, theme.acc, theme.ok, theme.warn],
+                };
+                div()
+                    .id(("code-theme", ix))
+                    .w(px(136.))
+                    .h(px(36.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(RADIUS_CONTROL + 1.))
+                    .border_1()
+                    .border_color(if on { theme.acc } else { theme.line })
+                    .bg(if on { theme.acc_wash } else { theme.field })
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(theme.t3))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.change(cx, |p| p.code_theme = code)),
+                    )
+                    .child(
+                        div().flex().flex_none().gap(px(2.)).children(
+                            colors
+                                .into_iter()
+                                .map(|c| div().size(px(7.)).rounded_full().bg(c)),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_size(crate::theme::text(12.))
+                            .truncate()
+                            .text_color(if on { theme.text } else { theme.t2 })
+                            .when(on, |el| el.font_weight(FontWeight::MEDIUM))
+                            .child(code.label()),
+                    )
+            }))
     }
 
     fn render_accents(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -494,6 +548,26 @@ impl Render for SettingsDialog {
                             ),
                     )
                     .child(self.render_accents(&theme, cx))
+                    .into_any_element(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .py(px(10.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().text_color(theme.text).child("Code theme"))
+                            .child(
+                                div()
+                                    .text_size(crate::theme::text(11.5))
+                                    .text_color(theme.t3)
+                                    .child("Syntax colours in the editor, light and dark."),
+                            ),
+                    )
+                    .child(self.render_code_themes(&theme, cx))
                     .into_any_element(),
             ],
         );

@@ -408,6 +408,7 @@ fn snapshots() {
             let prefs = crate::settings::Prefs {
                 ui_font: crate::theme::UiFont::Inter,
                 code_font: crate::theme::CodeFont::JetBrainsMono,
+                code_theme: crate::code_themes::CodeTheme::Dracula,
                 zoom: 1.25,
                 ..w.prefs
             };
@@ -418,6 +419,7 @@ fn snapshots() {
             let prefs = crate::settings::Prefs {
                 ui_font: Default::default(),
                 code_font: Default::default(),
+                code_theme: Default::default(),
                 zoom: 1.,
                 ..w.prefs
             };
