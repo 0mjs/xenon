@@ -3370,12 +3370,15 @@ impl Workspace {
         // As `keeps_history`, by field: `tab` holds `self.tabs` here.
         let keep = session.environment != Environment::Production || self.prefs.production_history;
         let store = self.store.clone().filter(|_| keep);
+        // Production saves stop at the time limit, like queries.
+        let limit = (session.environment == Environment::Production && self.prefs.query_limit > 0)
+            .then(|| std::time::Duration::from_secs(self.prefs.query_limit));
         tab.saving = true;
         tab.flash = None;
         cx.notify();
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
-            let saved = edits::save(conn.as_ref(), &statements);
+            let saved = edits::save_within(conn.as_ref(), &statements, limit);
             if let Some(store) = store {
                 let script = edits::script(conn.as_ref(), &statements);
                 let (rows, error) = match &saved {

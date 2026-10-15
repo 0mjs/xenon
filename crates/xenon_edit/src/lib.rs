@@ -256,11 +256,107 @@ pub fn save(conn: &dyn Connection, statements: &[Statement]) -> Result<usize> {
     }
 }
 
+/// [`save`], stopped and rolled back if it's still running after `limit` (the
+/// production time limit), so a save waiting behind someone's locks can't
+/// hang on.
+pub fn save_within(
+    conn: &dyn Connection,
+    statements: &[Statement],
+    limit: Option<std::time::Duration>,
+) -> Result<usize> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let Some(limit) = limit else {
+        return save(conn, statements);
+    };
+    let (done, timed_out) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let cancel = conn.cancel_handle();
+    {
+        let (done, timed_out) = (done.clone(), timed_out.clone());
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + limit;
+            while !done.load(Ordering::SeqCst) {
+                if std::time::Instant::now() >= deadline {
+                    timed_out.store(true, Ordering::SeqCst);
+                    cancel.cancel();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+    }
+    let saved = save(conn, statements);
+    done.store(true, Ordering::SeqCst);
+    match saved {
+        Err(_) if timed_out.load(Ordering::SeqCst) => Err(anyhow!(
+            "Nothing was saved: the save was still running after the production time limit \
+             ({} s, Settings → Safety), so Xenon stopped it and rolled it back.",
+            limit.as_secs()
+        )),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
     use xenon_sqlite::SqliteConnection;
+
+    #[test]
+    fn a_save_past_the_time_limit_is_rolled_back() {
+        let (db, path) = shop();
+        // A trigger that takes seconds: the save is still running at the limit.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "create trigger slow after update on orders begin
+                     select count(*) from (with recursive c(x) as
+                         (select 1 union all select x + 1 from c where x < 300000000) select x from c);
+                 end;",
+            )
+            .unwrap();
+        let statements = [Statement {
+            sql: "update orders set status = 'lost' where id = 1".into(),
+            exactly_one: true,
+        }];
+        let started = std::time::Instant::now();
+        let err = save_within(
+            &db,
+            &statements,
+            Some(std::time::Duration::from_millis(300)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("time limit"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // Rolled back, and the connection still works.
+        let status = match db
+            .execute("select status from orders where id = 1", 1)
+            .unwrap()
+            .outcome
+        {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(status, Value::Text("paid".into()));
+        // Without a limit (or within it), it's a plain save.
+        let quick = [Statement {
+            sql: "update orders set note = 'quick' where id = 2".into(),
+            exactly_one: true,
+        }];
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("drop trigger slow")
+            .unwrap();
+        assert_eq!(
+            save_within(&db, &quick, Some(std::time::Duration::from_secs(5))).unwrap(),
+            1
+        );
+    }
 
     fn shop() -> (SqliteConnection, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(
@@ -595,27 +691,101 @@ mod live {
         conn.execute(&format!("drop table {table}"), 0).unwrap();
     }
 
+    /// The live tests share the fleet: run them one at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A save held up past the production time limit (by a slow trigger) is
+    /// stopped and rolled back, and the connection works afterwards.
+    fn time_limit(engine: ServerEngine, port: u16) {
+        let conn = fleet(engine, port);
+        let conn = conn.as_ref();
+        let table = format!("xenon_slow_{}", engine.as_str());
+        let _ = conn.execute(&format!("drop table {table}"), 0);
+        conn.execute(
+            &format!("create table {table} (id int primary key, n int)"),
+            0,
+        )
+        .unwrap();
+        conn.execute(&format!("insert into {table} values (1, 1)"), 0)
+            .unwrap();
+        let trigger = match engine {
+            ServerEngine::Postgres => format!(
+                "create or replace function xenon_slow() returns trigger language plpgsql as
+                     $$ begin perform pg_sleep(5); return new; end $$;
+                 create trigger xenon_slow before update on {table}
+                     for each row execute function xenon_slow()"
+            ),
+            // `benchmark`, not `sleep`: a killed `sleep` returns instead of failing.
+            ServerEngine::Mysql => format!(
+                "create trigger xenon_slow_{port} before update on {table} for each row
+                     set @xenon = benchmark(2000000000, sha2('xenon', 256))"
+            ),
+            ServerEngine::SqlServer => format!(
+                "create trigger xenon_slow on {table} after update as waitfor delay '00:00:05'"
+            ),
+        };
+        conn.execute(&trigger, 0).unwrap();
+        let statements = [Statement {
+            sql: format!("update {table} set n = 2 where id = 1"),
+            exactly_one: true,
+        }];
+        let started = std::time::Instant::now();
+        let err = save_within(
+            conn,
+            &statements,
+            Some(std::time::Duration::from_millis(500)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("time limit"), "{engine:?}: {err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "{engine:?} wasn't stopped at the limit"
+        );
+        let data = rows(conn, &format!("select n from {table} where id = 1"));
+        assert_eq!(
+            data.rows[0][0],
+            Value::Integer(1),
+            "{engine:?} kept the change"
+        );
+        conn.execute(&format!("drop table {table}"), 0).unwrap();
+        if let ServerEngine::Postgres = engine {
+            conn.execute("drop function xenon_slow()", 0).unwrap();
+        }
+    }
+
     #[test]
     #[ignore]
     fn postgres() {
+        let _serial = serial();
         check(ServerEngine::Postgres, 55432);
+        time_limit(ServerEngine::Postgres, 55432);
     }
 
     #[test]
     #[ignore]
     fn mysql() {
+        let _serial = serial();
         check(ServerEngine::Mysql, 53306);
+        time_limit(ServerEngine::Mysql, 53306);
     }
 
     #[test]
     #[ignore]
     fn mariadb() {
+        let _serial = serial();
         check(ServerEngine::Mysql, 53307);
+        time_limit(ServerEngine::Mysql, 53307);
     }
 
     #[test]
     #[ignore]
     fn sql_server() {
+        let _serial = serial();
         check(ServerEngine::SqlServer, 51433);
+        time_limit(ServerEngine::SqlServer, 51433);
     }
 }
