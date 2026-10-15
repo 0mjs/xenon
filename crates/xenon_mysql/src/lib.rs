@@ -117,8 +117,24 @@ impl Identity {
             xenon_driver::pkcs8_key(&TlsFiles::read(key, "client key")?)?,
             "client key",
         )?;
-        let pfx = p12::PFX::new(&cert, &key, None, IDENTITY_PASSWORD, "xenon")
-            .ok_or_else(|| anyhow!("Couldn't bundle the client certificate and key."))?;
+        let bundle_error = |_| anyhow!("Couldn't bundle the client certificate and key.");
+        let mut store = p12_keystore::KeyStore::new();
+        store.add_entry(
+            "xenon",
+            p12_keystore::KeyStoreEntry::PrivateKeyChain(p12_keystore::PrivateKeyChain::new(
+                b"xenon".as_slice(),
+                p12_keystore::PrivateKey::from_der(&key).map_err(bundle_error)?,
+                [p12_keystore::Certificate::from_der(&cert).map_err(bundle_error)?],
+            )),
+        );
+        // Triple DES and a SHA-1 MAC: what both OpenSSL 3 and macOS read (not
+        // the RC2 some tools still write, which OpenSSL 3 refuses).
+        let der = store
+            .writer(IDENTITY_PASSWORD)
+            .encryption_algorithm(p12_keystore::EncryptionAlgorithm::PbeWithShaAnd3KeyTripleDesCbc)
+            .mac_algorithm(p12_keystore::MacAlgorithm::HmacSha1)
+            .write()
+            .map_err(bundle_error)?;
         let path = std::env::temp_dir().join(format!(
             "xenon-identity-{}-{}.p12",
             std::process::id(),
@@ -133,7 +149,7 @@ impl Identity {
             .create_new(true)
             .mode(0o600)
             .open(&path)?
-            .write_all(&pfx.to_der())?;
+            .write_all(&der)?;
         Ok(Self { path })
     }
 }

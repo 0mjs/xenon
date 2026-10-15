@@ -9,6 +9,6 @@ license.workspace = true
 anyhow.workspace = true
 mysql.workspace = true
 # Bundling a PEM client certificate as PKCS#12, the form native-TLS reads.
-p12 = "0.6"
+p12-keystore = "0.4"
 pem = "3"
 xenon_driver.workspace = true
