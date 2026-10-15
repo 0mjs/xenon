@@ -178,6 +178,13 @@ pub struct Theme {
     pub scrim: Rgba,
     /// Drop shadow under floating surfaces.
     pub shadow: Rgba,
+    /// The window's frosted frame (title bar, rail, status bar): translucent
+    /// over the blurred desktop.
+    pub frame: Rgba,
+    /// The edge of a card on the frame.
+    pub card_line: Rgba,
+    /// The active tab on the frame.
+    pub pill: Rgba,
 }
 
 impl Global for Theme {}
@@ -216,12 +223,12 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             mode: Mode::Dark,
-            bg: rgb(0x060607),
-            s1: rgb(0x0b0c0e),
-            s2: rgb(0x101114),
-            s3: rgb(0x17191d),
-            line: rgb(0x23252b),
-            line_2: rgb(0x16171b),
+            bg: rgb(0x0a0b0d),
+            s1: rgb(0x131418),
+            s2: rgb(0x15161a),
+            s3: rgb(0x1d1f24),
+            line: rgb(0x26282e),
+            line_2: rgb(0x1c1e23),
             text: rgb(0xeceef2),
             t2: rgb(0xa2a6af),
             t3: rgb(0x686c76),
@@ -232,11 +239,14 @@ impl Theme {
             warn: rgb(0xd8b06a),
             err: rgb(0xe0837a),
             on_acc: rgb(0x0b0c0e),
-            overlay: rgb(0x111215),
-            field: rgb(0x08090a),
-            raised: rgb(0x22252b),
+            overlay: rgb(0x17181c),
+            field: rgb(0x0e0f12),
+            raised: rgb(0x272a31),
             scrim: rgba(0x020203b3),
             shadow: rgba(0x00000099),
+            frame: rgba(0x1011158f),
+            card_line: rgb(0x26282e),
+            pill: rgba(0xffffff1f),
         }
     }
 
@@ -263,6 +273,9 @@ impl Theme {
             raised: rgb(0xffffff),
             scrim: rgba(0x1113182e),
             shadow: rgba(0x1113182e),
+            frame: rgba(0xf6f7fa8c),
+            card_line: rgb(0xdfe2e7),
+            pill: rgba(0xffffffbf),
         }
     }
 }

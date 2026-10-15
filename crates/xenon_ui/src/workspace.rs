@@ -64,6 +64,9 @@ const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
+/// The space between the cards the window is laid out in.
+const CARD_GAP: f32 = 10.;
+const CARD_RADIUS: f32 = 14.;
 const TAB_MAX_WIDTH: f32 = 240.;
 /// Rows from which sorting by an unindexed column asks first.
 const LARGE_TABLE: u64 = 1_000_000;
@@ -3582,6 +3585,9 @@ impl Render for Workspace {
             .flex_row()
             .flex_1()
             .min_h(px(0.))
+            .gap(px(CARD_GAP))
+            .pr(px(CARD_GAP))
+            .pb(px(CARD_GAP))
             .child(self.render_rail(&theme, cx))
             .when(self.show_side_panel, |el| {
                 el.child(self.render_side_panel(&theme, cx))
@@ -3694,7 +3700,7 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.s1)
+            .bg(theme.frame)
             .font_family(UI_FONT)
             .text_color(theme.text)
             .text_size(px(12.))
@@ -3725,11 +3731,8 @@ impl Workspace {
             let active = index == self.active;
             let running = matches!(tab.query, Query::Running { .. });
             let session = tab.session.and_then(|id| self.session(id));
-            // Production tabs are underlined in red instead of the accent.
-            let underline = match session {
-                Some(session) if session.environment == Environment::Production => theme.err,
-                _ => theme.acc,
-            };
+            let production =
+                session.is_some_and(|session| session.environment == Environment::Production);
             let mark = match session {
                 Some(session) => widgets::engine_logo(
                     session.engine,
@@ -3745,18 +3748,17 @@ impl Workspace {
             div()
                 .id(("tab", tab.id))
                 .group("tab")
-                .h_full()
+                .h(px(28.))
                 .max_w(px(TAB_MAX_WIDTH))
-                .pl(px(14.))
-                .pr(px(8.))
+                .pl(px(12.))
+                .pr(px(6.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
                 .relative()
-                .border_r_1()
-                .border_color(theme.line)
+                .rounded(px(8.))
                 .cursor_pointer()
-                .when(active, |el| el.bg(theme.s1).text_color(theme.text))
+                .when(active, |el| el.bg(theme.pill).text_color(theme.text))
                 .when(!active, |el| {
                     el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
                 })
@@ -3809,16 +3811,9 @@ impl Workspace {
                                 .text_color(theme.t2),
                         ),
                 )
-                .when(active, |el| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(2.))
-                            .bg(underline),
-                    )
+                // Production tabs carry a red ring.
+                .when(active && production, |el| {
+                    el.border_1().border_color(theme.err)
                 })
         });
 
@@ -3829,9 +3824,7 @@ impl Workspace {
             .flex()
             .flex_row()
             .items_center()
-            .bg(theme.bg)
-            .border_b_1()
-            .border_color(theme.line)
+            .gap(px(4.))
             // Double-clicking empty title bar space zooms the window, like any Mac app.
             .on_click(|event: &ClickEvent, window, _| {
                 if event.click_count() == 2 {
@@ -3847,8 +3840,7 @@ impl Workspace {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .border_r_1()
-                    .border_color(theme.line)
+                    .rounded(px(8.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.s3))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -3971,9 +3963,6 @@ impl Workspace {
             .items_center()
             .pt(px(8.))
             .gap(px(4.))
-            .bg(theme.bg)
-            .border_r_1()
-            .border_color(theme.line)
             .pb(px(10.))
             .child(item("rail-explorer", "database", SidePanel::Explorer))
             .child(item("rail-history", "clock", SidePanel::History))
@@ -4008,14 +3997,12 @@ impl Workspace {
             SidePanel::History => ("History", self.render_history(theme, cx)),
             SidePanel::Saved => ("Saved queries", self.render_saved_queries(theme, cx)),
         };
-        div()
+        card(theme)
             .w(px(self.side_panel_width))
             .flex_none()
             .relative()
             .flex()
             .flex_col()
-            .border_r_1()
-            .border_color(theme.line)
             .child(
                 div()
                     .flex()
@@ -4055,8 +4042,8 @@ impl Workspace {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .right(px(-3.))
-                    .w(px(6.))
+                    .right(px(-CARD_GAP))
+                    .w(px(CARD_GAP))
                     .cursor_col_resize()
                     .on_mouse_down(
                         MouseButton::Left,
@@ -4077,21 +4064,18 @@ impl Workspace {
 
     fn render_center(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self.active_session().is_none() {
-            return div()
+            return card(theme)
                 .flex_1()
                 .min_w(px(0.))
                 .child(self.render_launcher(theme, cx))
                 .into_any_element();
         }
         let tab = self.active_tab();
-        let editor = div()
+        let editor = card(theme)
             .h(px(self.editor_height))
             .flex_none()
             .flex()
             .flex_col()
-            .bg(theme.s2)
-            .border_b_1()
-            .border_color(theme.line)
             .child(self.render_toolbar(theme, cx))
             .child(
                 div()
@@ -4103,6 +4087,7 @@ impl Workspace {
                     .child(Editor::new(&tab.editor).h_full().appearance(false)),
             );
 
+        let results = card(theme).flex_1().min_h(px(0.)).flex().flex_col();
         div()
             .flex_1()
             .min_w(px(0.))
@@ -4110,11 +4095,10 @@ impl Workspace {
             .flex_col()
             .child(editor)
             .child(
+                // The gap between the cards is the handle.
                 div()
                     .id("split")
-                    .h(px(5.))
-                    .mt(px(-3.))
-                    .mb(px(-2.))
+                    .h(px(CARD_GAP))
                     .flex_none()
                     .cursor_row_resize()
                     .on_mouse_down(
@@ -4132,32 +4116,35 @@ impl Workspace {
                         }),
                     ),
             )
-            .when_some(tab.browse.as_ref(), |el, browse| {
-                el.child(self.render_filter_bar(browse, theme, cx))
-            })
-            .children(
-                tab.browse
-                    .as_ref()
-                    .filter(|b| !b.structure)
-                    .and_then(|_| self.render_filter_builder(theme, cx)),
+            .child(
+                results
+                    .when_some(tab.browse.as_ref(), |el, browse| {
+                        el.child(self.render_filter_bar(browse, theme, cx))
+                    })
+                    .children(
+                        tab.browse
+                            .as_ref()
+                            .filter(|b| !b.structure)
+                            .and_then(|_| self.render_filter_builder(theme, cx)),
+                    )
+                    .map(|el| match tab.browse.as_ref().filter(|b| b.structure) {
+                        Some(browse) => el.child(
+                            div()
+                                .flex_1()
+                                .min_h(px(0.))
+                                .child(self.render_structure(browse, theme, cx)),
+                        ),
+                        None => el
+                            .child(self.render_results_bar(theme, cx))
+                            .children(self.render_edit_bar(theme, cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .child(self.render_results(theme, cx)),
+                            ),
+                    }),
             )
-            .map(|el| match tab.browse.as_ref().filter(|b| b.structure) {
-                Some(browse) => el.child(
-                    div()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .child(self.render_structure(browse, theme, cx)),
-                ),
-                None => el
-                    .child(self.render_results_bar(theme, cx))
-                    .children(self.render_edit_bar(theme, cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h(px(0.))
-                            .child(self.render_results(theme, cx)),
-                    ),
-            })
             .into_any_element()
     }
 
@@ -5178,13 +5165,11 @@ impl Workspace {
 
     fn render_inspector(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
-        let mut panel = div()
+        let mut panel = card(theme)
             .w(px(INSPECTOR_WIDTH))
             .flex_none()
             .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(theme.line);
+            .flex_col();
 
         // The row as it will be once saved: staged values in place of fetched ones.
         let selected = tab
@@ -5312,9 +5297,6 @@ impl Workspace {
             .flex_none()
             .flex()
             .flex_row()
-            .bg(theme.bg)
-            .border_t_1()
-            .border_color(theme.line)
             .font_family(MONO_FONT)
             .text_size(px(10.5));
 
@@ -5460,4 +5442,15 @@ impl Wrap {
 fn refused_in_read_only(err: &anyhow::Error) -> bool {
     let message = format!("{err:#}").to_ascii_lowercase();
     message.contains("read-only transaction") || message.contains("read only transaction")
+}
+
+/// A panel floating on the frosted window: the explorer, editor, results or inspector.
+fn card(theme: &Theme) -> gpui::Div {
+    div()
+        .bg(theme.s1)
+        .rounded(px(CARD_RADIUS))
+        .border_1()
+        .border_color(theme.card_line)
+        .overflow_hidden()
+        .shadow_md()
 }
