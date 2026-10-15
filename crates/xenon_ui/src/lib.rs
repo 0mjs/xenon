@@ -27,6 +27,7 @@ mod structure;
 pub mod theme;
 mod updates;
 mod value_editor;
+mod views;
 mod widgets;
 pub mod workspace;
 

@@ -119,7 +119,7 @@ so it can join the test fleet.
 | ✅ Filter builder (column / operator / value, match all or any) that writes the WHERE field | 0.4 |
 | Pagination with exact counts (where cheap) or estimates | 0.5 |
 | Column visibility, pinning, reordering; remembered per table | 0.5 |
-| Show results as JSON / as records; transpose a single row | 0.5 |
+| ✅ Show results as JSON / as records (which also shows a wide row transposed) | 0.5 |
 | ✅ Aggregates for a selection in the status bar (sum, avg, count, min, max), exact for decimals | 0.5 |
 | Geometry/PostGIS preview on a small map | Later |
 

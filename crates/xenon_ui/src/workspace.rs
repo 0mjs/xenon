@@ -451,6 +451,9 @@ pub(crate) struct Tab {
     pub(crate) sets: Vec<Option<Grid>>,
     /// Which of `sets` is in `grid`.
     pub(crate) shown_set: usize,
+    /// Rows as a grid, as records, or as JSON.
+    pub(crate) view: crate::views::ResultView,
+    pub(crate) json: Option<crate::views::JsonView>,
     /// Set when the production time limit stopped the running query.
     timed_out: Option<std::time::Duration>,
     /// The last SQL run here and where it began in the editor, for "Fetch all".
@@ -853,6 +856,8 @@ impl Workspace {
             previewing: false,
             sets: Vec::new(),
             shown_set: 0,
+            view: Default::default(),
+            json: None,
             last_run: None,
             saved_query: None,
             timed_out: None,
@@ -3926,6 +3931,7 @@ impl Render for Workspace {
                 .is_some_and(|b| focused(&b.filter, cx)),
         };
         let theme = cx.theme().clone();
+        self.refresh_json_view(window, cx);
 
         let open = self.side_panel_open(window);
         let gap = self.card_gap();
@@ -5398,7 +5404,10 @@ impl Workspace {
             })
             .child(div().flex_1())
             .child(self.render_edit_status(theme, cx))
-            .when(can_export, |el| el.child(self.render_export(theme, cx)))
+            .when(can_export, |el| {
+                el.child(self.render_view_switch(theme, cx))
+                    .child(self.render_export(theme, cx))
+            })
     }
 
     /// The Export button and, when open, its menu of formats.
@@ -5505,6 +5514,11 @@ impl Workspace {
         if let Some(grid) = &tab.grid {
             if grid.data.columns.is_empty() {
                 return centered_hint(theme, "The query returned no columns.");
+            }
+            match tab.view {
+                crate::views::ResultView::Records => return self.render_records(grid, theme),
+                crate::views::ResultView::Json => return self.render_json(theme),
+                crate::views::ResultView::Grid => {}
             }
             let widths = results::layout(&grid.natural, &tab.manual_widths(grid));
             let sort = match &tab.browse {

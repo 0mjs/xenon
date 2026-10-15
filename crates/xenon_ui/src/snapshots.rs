@@ -394,6 +394,22 @@ fn snapshots() {
             assert_eq!(numbers.max, "155.38");
         });
         shot.save(&format!("42-totals-{suffix}"));
+        // The rows as records, then as JSON.
+        shot.act(|w, _, cx| w.set_view(crate::views::ResultView::Records, cx));
+        shot.save(&format!("43-records-{suffix}"));
+        shot.act(|w, _, cx| w.set_view(crate::views::ResultView::Json, cx));
+        shot.save(&format!("44-json-{suffix}"));
+        shot.act(|w, _, cx| {
+            let json = w.active_tab().json.as_ref().expect("built when shown");
+            let text = json.editor.read(cx).value().to_string();
+            assert!(
+                text.trim_start().starts_with('['),
+                "{}",
+                &text[..text.len().min(200)]
+            );
+            assert!(text.contains("\"total\""));
+            w.set_view(crate::views::ResultView::Grid, cx);
+        });
         shot.act(|w, window, cx| {
             w.select_cell(2, 2, false, window, cx);
             w.select_cell(5, 4, true, window, cx);
