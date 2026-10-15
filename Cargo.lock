@@ -8349,7 +8349,7 @@ dependencies = [
 
 [[package]]
 name = "xenon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gpui-component",
  "gpui-pre",
@@ -8362,14 +8362,14 @@ dependencies = [
 
 [[package]]
 name = "xenon_driver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "xenon_mssql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -8382,7 +8382,7 @@ dependencies = [
 
 [[package]]
 name = "xenon_mysql"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "mysql",
@@ -8391,7 +8391,7 @@ dependencies = [
 
 [[package]]
 name = "xenon_postgres"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -8404,7 +8404,7 @@ dependencies = [
 
 [[package]]
 name = "xenon_sqlite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -8413,7 +8413,7 @@ dependencies = [
 
 [[package]]
 name = "xenon_ssh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "xenon_driver",
@@ -8421,7 +8421,7 @@ dependencies = [
 
 [[package]]
 name = "xenon_store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
@@ -8431,7 +8431,7 @@ dependencies = [
 
 [[package]]
 name = "xenon_ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
