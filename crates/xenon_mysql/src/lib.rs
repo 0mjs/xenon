@@ -378,6 +378,9 @@ impl Connection for MysqlConnection {
         }
         drop(result);
         let outcome = outcome.ok_or_else(|| anyhow!("nothing to run"))?;
+        // Some killed statements (`sleep()`, `benchmark()`) return a value instead
+        // of failing; after a cancel, that value isn't the answer.
+        let cancelled = cancelled || self.cancel.user.load(std::sync::atomic::Ordering::SeqCst);
         Ok(QueryResult {
             outcome,
             statements,
@@ -797,16 +800,21 @@ mod live {
         decimal: "decimal(12,2)",
         real: "double",
         blob: "blob",
-        // MySQL stops recursive CTEs at 1,000 rows unless told otherwise (MariaDB ignores the hint).
+        // Not a recursive CTE: MySQL and MariaDB both stop those at 1,000 rows by default.
         series: |n| {
+            let digits = "(select 0 d union all select 1 union all select 2 union all select 3 \
+                          union all select 4 union all select 5 union all select 6 \
+                          union all select 7 union all select 8 union all select 9)";
             format!(
-                "with recursive s(i) as (select 1 union all select i + 1 from s where i < {n}) \
-                 select /*+ SET_VAR(cte_max_recursion_depth = 100000000) */ i from s"
+                "select a.d + 10 * b.d + 100 * c.d + 1000 * e.d + 10000 * f.d + 1 as i \
+                 from {digits} a, {digits} b, {digits} c, {digits} e, {digits} f \
+                 having i <= {n} order by i"
             )
         },
         // Not `sleep(5)`: a killed sleep returns 1 instead of failing.
         slow: "select benchmark(2000000000, sha2('xenon', 256))",
         rollback: "rollback",
+        referential_actions: true,
     };
 
     #[test]

@@ -8,7 +8,8 @@ use xenon_store::ServerEngine;
 pub enum Detected {
     /// A server URL (or a libpq `key=value` string for Postgres), ready to connect with.
     Server(ServerEngine, String),
-    Sqlite(PathBuf),
+    /// A database or data file: SQLite, DuckDB, CSV, TSV, Parquet or JSON.
+    File(PathBuf),
     /// Recognised, but Xenon can't open it yet (e.g. "SQL Server").
     NotYet(&'static str),
     Unknown,
@@ -38,32 +39,32 @@ pub fn detect(text: &str) -> Detected {
                 Detected::Server(ServerEngine::Postgres, value.to_string())
             }
             "sqlite" | "sqlite3" => {
-                Detected::Sqlite(expand_home(value.split_once("://").map_or("", |(_, p)| p)))
+                Detected::File(expand_home(value.split_once("://").map_or("", |(_, p)| p)))
             }
             "mysql" | "mariadb" => Detected::Server(ServerEngine::Mysql, value.to_string()),
             "mysqlx" => Detected::NotYet("MySQL X Protocol"),
             "sqlserver" | "mssql" | "jdbc:sqlserver" => {
                 Detected::Server(ServerEngine::SqlServer, value.to_string())
             }
-            "duckdb" => Detected::NotYet("DuckDB"),
+            "duckdb" => Detected::File(expand_home(value.split_once("://").map_or("", |(_, p)| p))),
             "mongodb" | "mongodb+srv" => Detected::NotYet("MongoDB"),
             "redis" | "rediss" => Detected::NotYet("Redis"),
             _ => Detected::Unknown,
         };
     }
     if lower.starts_with("sqlite:") {
-        return Detected::Sqlite(expand_home(&value["sqlite:".len()..]));
+        return Detected::File(expand_home(&value["sqlite:".len()..]));
     }
 
     let looks_like_path =
         value.starts_with('/') || value.starts_with("~/") || value.starts_with("./");
     let extension = lower.rsplit_once('.').map_or("", |(_, ext)| ext);
     match extension {
-        "db" | "sqlite" | "sqlite3" | "db3" | "s3db" | "sl3" => {
-            Detected::Sqlite(expand_home(value))
+        "db" | "sqlite" | "sqlite3" | "db3" | "s3db" | "sl3" => Detected::File(expand_home(value)),
+        "duckdb" | "ddb" | "parquet" | "csv" | "tsv" | "json" | "jsonl" | "ndjson" => {
+            Detected::File(expand_home(value))
         }
-        "duckdb" | "ddb" | "parquet" | "csv" | "tsv" => Detected::NotYet("DuckDB"),
-        _ if looks_like_path => Detected::Sqlite(expand_home(value)),
+        _ if looks_like_path => Detected::File(expand_home(value)),
         _ => Detected::Unknown,
     }
 }
@@ -208,22 +209,32 @@ mod tests {
     fn files() {
         assert_eq!(
             detect("/data/app.db"),
-            Detected::Sqlite("/data/app.db".into())
+            Detected::File("/data/app.db".into())
         );
         assert_eq!(
             detect("sqlite:///data/app.sqlite"),
-            Detected::Sqlite("/data/app.sqlite".into())
+            Detected::File("/data/app.sqlite".into())
         );
         assert_eq!(
             detect("./local.sqlite3"),
-            Detected::Sqlite("./local.sqlite3".into())
+            Detected::File("./local.sqlite3".into())
         );
-        assert_eq!(detect("events.parquet"), Detected::NotYet("DuckDB"));
-        assert_eq!(detect("warehouse.duckdb"), Detected::NotYet("DuckDB"));
+        assert_eq!(
+            detect("events.parquet"),
+            Detected::File("events.parquet".into())
+        );
+        assert_eq!(
+            detect("warehouse.duckdb"),
+            Detected::File("warehouse.duckdb".into())
+        );
+        assert_eq!(
+            detect("duckdb:///data/w.duckdb"),
+            Detected::File("/data/w.duckdb".into())
+        );
         let home = dirs::home_dir().unwrap();
         assert_eq!(
             detect("~/dev/app.db"),
-            Detected::Sqlite(home.join("dev/app.db"))
+            Detected::File(home.join("dev/app.db"))
         );
         assert_eq!(
             tilde(&home.join("dev/app.db").display().to_string()),

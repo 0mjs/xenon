@@ -42,7 +42,7 @@ products.
 | **1** | SQLite ✅ | `rusqlite` | Any `.db` file | 0.1 |
 | **1** | MySQL / MariaDB ✅ | `mysql` | MySQL 5.7–9, MariaDB, TiDB, PlanetScale, Vitess | 0.2 |
 | **1** | SQL Server ✅ | `tiberius` | SQL Server 2017+, Azure SQL | 0.2 |
-| **2** | DuckDB | `duckdb` (bundled) | DuckDB files; CSV / Parquet / JSON opened as tables | 0.2 |
+| **2** | DuckDB ✅ | `duckdb` (prebuilt library) | DuckDB files; CSV / Parquet / JSON opened as tables | 0.2 |
 | **2** | CockroachDB | Postgres driver | Cockroach, YugabyteDB | 0.6 |
 | **2** | Amazon Redshift | Postgres driver | Redshift (old Postgres dialect, no `RETURNING`) | 0.6 |
 | **2** | libSQL / Turso | `libsql` | Remote libSQL, embedded replicas | 0.6 |
@@ -220,10 +220,15 @@ We don't need real production databases to test properly. We need **realistic da
 - **A torture schema** per engine covers every data type, odd identifiers (`"Order Items"`,
   reserved words, emoji), composite and missing primary keys, huge cells, deep JSON, and tables
   with 500 columns. Correct type round-tripping is checked here.
-- **Conformance suite:** `cargo test -p xenon_conformance --features live`. It runs the same
-  checks against every running engine: connect, introspect, every type displays and round-trips,
-  cancel, errors carry positions, edits apply in one transaction, and read-only mode actually
-  blocks writes. GitHub Actions runs it on every PR with service containers.
+- ✅ **Conformance suite:** `xenon_driver::conformance`, one set of checks every driver runs
+  against a live server: values round-trip through literals (quotes, backslashes, emoji,
+  decimals, blobs, NULL), affected rows, row limits, streaming, errors as `QueryError`s, awkward
+  identifiers, rollback, `describe` (keys both ways, indexes), introspection and cancel. SQLite
+  runs it in every `cargo test`; Postgres with `XENON_TEST_PG_URL`; MySQL, MariaDB and SQL Server
+  with the fleet up (`cargo test -p xenon_mysql -p xenon_mssql -- --ignored`).
+- ✅ **CI** (`.github/workflows/ci.yml`), on every push and PR: the drivers against real Postgres,
+  MySQL, MariaDB and SQL Server containers on Linux; formatting, clippy and every unit test on macOS.
+  Still to do: more engine versions (Postgres 12, MySQL 5.7), the torture schema.
 - **UI snapshots:** `cargo test -p xenon_ui snapshots -- --ignored` renders every screen
   headlessly. These later become golden-image tests that fail on unexpected pixel changes.
 

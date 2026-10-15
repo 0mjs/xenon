@@ -38,8 +38,8 @@ jobs:
           XENON_TEST_PG_URL: postgres://xenon:xenon@127.0.0.1:55432/shop
         run: >
           cargo test
-          -p xenon_driver -p xenon_sqlite -p xenon_postgres -p xenon_mysql -p xenon_mssql
-          -- --include-ignored
+          -p xenon_driver -p xenon_sqlite -p xenon_duckdb -p xenon_postgres -p xenon_mysql -p xenon_mssql
+          --no-fail-fast -- --include-ignored
 
       - name: Server logs
         if: failure()

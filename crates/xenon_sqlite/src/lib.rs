@@ -516,6 +516,7 @@ mod tests {
                 slow: "with recursive c(x) as (select 1 union all select x + 1 from c where x < 1000000000) \
                        select count(*) from c",
                 rollback: "rollback",
+                referential_actions: true,
             },
         );
     }

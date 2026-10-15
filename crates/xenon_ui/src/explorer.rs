@@ -217,7 +217,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (engine, local) = match &saved.target {
-            Target::Sqlite { .. } => (Engine::Sqlite, true),
+            Target::Sqlite { path } => (crate::widgets::file_engine(path), true),
             Target::Server { engine, host, .. } => (
                 Engine::from_server(*engine),
                 matches!(host.as_str(), "" | "localhost" | "127.0.0.1" | "::1"),

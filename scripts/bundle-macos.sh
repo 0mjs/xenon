@@ -18,6 +18,10 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/xenon "$app/Contents/MacOS/xenon"
 
+# DuckDB's library, Apple silicon only (its download holds Intel code too, twice the size).
+mkdir -p "$app/Contents/Frameworks"
+lipo target/release/deps/libduckdb.dylib -thin arm64 -output "$app/Contents/Frameworks/libduckdb.dylib"
+
 # Icon: compile the layered Icon Composer icon. macOS 26 renders its light, dark, clear and
 # tinted looks from Assets.car; AppIcon.icns is the fallback for older systems.
 xcrun actool --compile "$PWD/$app/Contents/Resources" --platform macosx --minimum-deployment-target 12.0 \
@@ -48,9 +52,11 @@ PLIST
 identity=${XENON_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}
 if [[ -n "$identity" ]]; then
   echo "signing with: $identity"
+  codesign --force --options runtime --timestamp --sign "$identity" "$app/Contents/Frameworks/libduckdb.dylib"
   codesign --force --options runtime --timestamp --sign "$identity" "$app"
 else
   echo "no Developer ID Application certificate found; signing ad hoc (Gatekeeper will warn on other Macs)"
+  codesign --force --sign - "$app/Contents/Frameworks/libduckdb.dylib"
   codesign --force --sign - "$app"
 fi
 codesign --verify --strict "$app"

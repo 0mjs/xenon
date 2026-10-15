@@ -25,6 +25,8 @@ pub struct Dialect {
     /// A statement that runs for about five seconds, to cancel.
     pub slow: &'static str,
     pub rollback: &'static str,
+    /// Foreign keys take `on delete cascade` (DuckDB's don't).
+    pub referential_actions: bool,
 }
 
 type Check = fn(&dyn Connection, &Dialect) -> Result<()>;
@@ -343,11 +345,17 @@ fn describe(conn: &dyn Connection, d: &Dialect) -> Result<()> {
             text = d.text,
         ),
     )?;
+    let cascade = if d.referential_actions {
+        " on delete cascade"
+    } else {
+        ""
+    };
     exec(
         conn,
         &format!(
-            "create table xenon_conf_child (id {int} primary key, parent_id {int} not null \
-             references xenon_conf_parent (id) on delete cascade, note {text})",
+            // A table constraint, not an inline `references`: MySQL ignores those.
+            "create table xenon_conf_child (id {int} primary key, parent_id {int} not null, \
+             note {text}, foreign key (parent_id) references xenon_conf_parent (id){cascade})",
             int = d.integer,
             text = d.text,
         ),
@@ -371,11 +379,13 @@ fn describe(conn: &dyn Connection, d: &Dialect) -> Result<()> {
         "key points at {}",
         key.ref_table
     );
-    ensure!(
-        key.on_delete.as_deref() == Some("cascade"),
-        "on delete: {:?}",
-        key.on_delete
-    );
+    if d.referential_actions {
+        ensure!(
+            key.on_delete.as_deref() == Some("cascade"),
+            "on delete: {:?}",
+            key.on_delete
+        );
+    }
     ensure!(
         child
             .indexes

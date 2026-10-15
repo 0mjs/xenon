@@ -170,7 +170,12 @@ impl Profile {
     fn connect(&self) -> anyhow::Result<Arc<dyn Connection>> {
         Ok(match &self.target {
             RequestTarget::Sqlite(path) => {
-                Arc::new(SqliteConnection::open(Path::new(path), self.read_only)?)
+                let path = Path::new(path);
+                if xenon_duckdb::FileKind::of(path).is_some() {
+                    Arc::new(xenon_duckdb::DuckDbConnection::open(path, self.read_only)?)
+                } else {
+                    Arc::new(SqliteConnection::open(path, self.read_only)?)
+                }
             }
             RequestTarget::Server(engine, options) => {
                 let mut options = options.clone();
@@ -254,7 +259,7 @@ fn paste_note(text: &str) -> (SharedString, bool) {
             ),
             Err(_) => format!("{} · incomplete URL", engine.label()),
         },
-        Detected::Sqlite(path) => format!("SQLite file · {} · press Enter", path.display()),
+        Detected::File(path) => format!("SQLite file · {} · press Enter", path.display()),
         Detected::NotYet(engine) => {
             return (format!("{engine} · coming soon").into(), true);
         }
@@ -944,6 +949,11 @@ impl Workspace {
                         this.sessions.push(Session {
                             id,
                             engine: match &profile.target {
+                                RequestTarget::Sqlite(_)
+                                    if conn.server_version().starts_with("duckdb") =>
+                                {
+                                    Engine::DuckDb
+                                }
                                 RequestTarget::Sqlite(_) => Engine::Sqlite,
                                 RequestTarget::Server(engine, _) => {
                                     servers::logo(*engine, conn.as_ref())
@@ -1056,7 +1066,7 @@ impl Workspace {
                 Ok(_) => self.connect_url(engine, url, window, cx),
                 Err(err) => self.paste_note = (format!("{err:#}").into(), true),
             },
-            Detected::Sqlite(path) => self.open_path(path, window, cx),
+            Detected::File(path) => self.open_path(path, window, cx),
             Detected::NotYet(engine) => {
                 self.paste_note = (
                     format!("{engine} support is coming soon.").into(),

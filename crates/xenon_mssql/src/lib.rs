@@ -970,6 +970,7 @@ mod live {
                 },
                 slow: "waitfor delay '00:00:05'",
                 rollback: "rollback",
+                referential_actions: true,
             },
         );
     }

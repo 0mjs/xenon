@@ -253,6 +253,22 @@ fn snapshots() {
         shot.act(|w, window, cx| w.new_connection(&crate::NewConnection, window, cx));
         shot.save(&format!("02-connect-dialog-{suffix}"));
 
+        // A CSV file opens through DuckDB as a view named after it.
+        let csv = data.join("signups.csv");
+        std::fs::write(
+            &csv,
+            "id,email,plan,signed_up,mrr\n1,ada@example.com,team,2026-01-04,49.00\n\
+             2,grace@example.com,pro,2026-02-11,19.00\n3,linus@example.com,team,2026-02-28,49.00\n\
+             4,margaret@example.com,free,2026-03-15,0.00\n",
+        )
+        .unwrap();
+        let mut shot = Shot::new(mode, Some(&csv), &root);
+        shot.act(|w, window, cx| {
+            let id = w.sessions[0].id;
+            w.browse(id, "main", "signups", window, cx)
+        });
+        shot.save(&format!("27-duckdb-csv-{suffix}"));
+
         // Last session's tabs come back: a query and a filtered table on shop.db.
         let shop_id = store
             .connections()

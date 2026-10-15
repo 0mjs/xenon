@@ -11,6 +11,7 @@ gpui.workspace = true
 gpui-component.workspace = true
 xenon_driver.workspace = true
 xenon_sqlite.workspace = true
+xenon_duckdb.workspace = true
 anyhow.workspace = true
 xenon_postgres.workspace = true
 xenon_mysql.workspace = true

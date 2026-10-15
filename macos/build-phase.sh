@@ -11,6 +11,14 @@ cargo build --release -p xenon
 mkdir -p "$(dirname "$TARGET_BUILD_DIR/$EXECUTABLE_PATH")" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 cp target/release/xenon "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
 
+# DuckDB's library, Apple silicon only, signed like the app (Xcode re-signs it on export).
+frameworks="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+mkdir -p "$frameworks"
+lipo target/release/deps/libduckdb.dylib -thin arm64 -output "$frameworks/libduckdb.dylib"
+if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
+  codesign --force --options runtime --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$frameworks/libduckdb.dylib"
+fi
+
 # Layered Icon Composer icon: Assets.car for macOS 26's appearances, AppIcon.icns for older systems.
 xcrun actool --compile "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH" --platform macosx \
   --minimum-deployment-target 12.0 --app-icon AppIcon \

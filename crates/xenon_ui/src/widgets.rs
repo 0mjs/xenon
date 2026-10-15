@@ -419,6 +419,22 @@ pub fn overlay_panel(theme: &Theme) -> gpui::Div {
         .shadow(overlay_shadow(theme))
 }
 
+/// The engine for a database file, by its name: DuckDB for `.duckdb` and the
+/// data files it reads, SQLite otherwise. (Connecting looks at the file's
+/// header too, so a DuckDB database named `.db` still opens as DuckDB.)
+pub fn file_engine(path: &str) -> Engine {
+    let extension = path
+        .rsplit_once('.')
+        .map_or("", |(_, ext)| ext)
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "duckdb" | "ddb" | "csv" | "tsv" | "parquet" | "json" | "jsonl" | "ndjson" => {
+            Engine::DuckDb
+        }
+        _ => Engine::Sqlite,
+    }
+}
+
 /// Database engines Xenon shows a logo for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Engine {

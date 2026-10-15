@@ -291,7 +291,16 @@ impl Workspace {
                     this.new_server_connection(ServerEngine::Mysql, window, cx)
                 })),
             )
-            .child(tile("tile-duckdb", "DuckDB", Engine::DuckDb, "File", false))
+            .child(
+                tile(
+                    "tile-duckdb",
+                    "DuckDB",
+                    Engine::DuckDb,
+                    "And CSV, Parquet, JSON",
+                    true,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.open_file(&OpenFile, window, cx))),
+            )
             .child(
                 tile(
                     "tile-sqlserver",
@@ -356,7 +365,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let (engine, detail, local) = match &saved.target {
-            Target::Sqlite { path } => (Engine::Sqlite, tilde(path), true),
+            Target::Sqlite { path } => (crate::widgets::file_engine(path), tilde(path), true),
             Target::Server {
                 engine,
                 host,

@@ -1,0 +1,4 @@
+[env]
+# Link DuckDB's prebuilt library (downloaded once into target/) instead of
+# compiling its C++ from source, which takes many minutes at full CPU.
+DUCKDB_DOWNLOAD_LIB = "1"

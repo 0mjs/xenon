@@ -1,6 +1,6 @@
 # Xenon
 
-A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server and SQLite. Native, written in Rust with
+A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server, SQLite and DuckDB. Native, written in Rust with
 [GPUI](https://gpui.rs). By Carbon Software.
 
 ![Browsing a table in Xenon](docs/screenshots/browse.png)
@@ -11,7 +11,7 @@ A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server and SQL
 - **Safe by default.** Saved connections carry a development / production label and an optional
   read-only mode the database enforces. Risky statements ask first; on production you type the
   connection's name to go ahead. Passwords live in the macOS Keychain.
-- **Postgres, MySQL, MariaDB, SQL Server (and Azure SQL) and SQLite**, with TLS (from `disable`
+- **Postgres, MySQL, MariaDB, SQL Server (and Azure SQL), SQLite and DuckDB**, plus CSV, Parquet and JSON files opened straight into SQL, with TLS (from `disable`
   to `verify-full`), cancel,
   exact numbers, query plans.
 - **Several connections at once**, side by side: every tab says which database it runs on.
@@ -34,7 +34,7 @@ With nothing open, Xenon shows **Connect**: paste a `postgres://`, `mysql://` or
 an ADO.NET `Server=…;Database=…` string, a
 `DATABASE_URL=` line or a database file path and press Enter; pick a database type; reopen a saved
 connection; or use one **found on this Mac** (Docker containers, servers on the usual ports,
-`~/.pgpass`, `~/.pg_service.conf`, or a project's `.env` files). `⌘O` opens a SQLite file, `⌘N`
+`~/.pgpass`, `~/.pg_service.conf`, or a project's `.env` files). `⌘O` opens a SQLite or DuckDB database, or a CSV, Parquet or JSON file, `⌘N`
 connects to a server. Connections stay open side by side: `⇧⌘N` (or **+** in the explorer) brings
 back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 
@@ -44,7 +44,7 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 |---|---|
 | `⌘K` / `⌘P` | Command palette: jump to a table or run any command |
 | `⌘,` | Settings: theme, accent colour, row limits, editor size, safety, history |
-| `⌘O` | Open SQLite file |
+| `⌘O` | Open a database file (SQLite, DuckDB) or a CSV / Parquet / JSON file |
 | `⌘N` | New server connection (Postgres, MySQL / MariaDB, SQL Server) |
 | `⇧⌘N` | Connections: open another database alongside |
 | `⇧⌘W` | Disconnect the current tab's database (or the plug button next to it in the explorer) |
@@ -90,7 +90,7 @@ Needs macOS with Xcode (for Metal) and Rust 1.85+.
 
 ```sh
 cargo run -p xenon                     # empty window
-cargo run -p xenon -- path/to/file.db  # open a SQLite database
+cargo run -p xenon -- path/to/file.db  # open a SQLite or DuckDB database (or a .csv, .parquet)
 cargo run -p xenon -- "postgres://user:pass@localhost/db?sslmode=require"
 
 ./scripts/bundle-macos.sh              # local Xenon.app + DMG, signed ad hoc (this Mac only)

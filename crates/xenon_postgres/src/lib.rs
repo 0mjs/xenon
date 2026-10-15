@@ -924,6 +924,7 @@ mod tests {
                 series: |n| format!("select i from generate_series(1, {n}) as g(i)"),
                 slow: "select pg_sleep(5)",
                 rollback: "rollback",
+                referential_actions: true,
             },
         );
     }
