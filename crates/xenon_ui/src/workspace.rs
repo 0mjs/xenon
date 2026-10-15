@@ -445,7 +445,11 @@ fn watchdog(live: Arc<Live>, cancel: Arc<dyn CancelHandle>, limit: std::time::Du
 struct CellEditor {
     row: RowRef,
     column: usize,
+    /// Which editor the value gets (line, text area, JSON, date, choice…).
+    kind: crate::value_editor::ValueKind,
     input: Entity<InputState>,
+    /// The text area, for long text and JSON.
+    area: Option<Entity<EditorState>>,
     _enter: Subscription,
 }
 
@@ -1672,6 +1676,39 @@ impl Workspace {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn staged_changes(&self) -> usize {
+        self.active_tab().edits.count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_editing(&self) -> bool {
+        self.active_tab().editing.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_edit_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_edit(window, cx);
+    }
+
+    /// Replace the open text area's contents.
+    #[cfg(test)]
+    pub(crate) fn type_into_area(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(area) = self
+            .active_tab()
+            .editing
+            .as_ref()
+            .and_then(|e| e.area.clone())
+        {
+            area.update(cx, |area, cx| area.set_value(text.to_string(), window, cx));
+        }
+    }
+
     /// The active tab's error, for tests.
     #[cfg(test)]
     pub(crate) fn error_text(&self) -> Option<String> {
@@ -2539,8 +2576,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(why) = self.edit_target() {
-            self.flash(why, false, cx);
+        // Why it can't be edited already shows in the results bar.
+        if self.edit_target().is_err() {
             return;
         }
         let tab = &self.tabs[self.active];
@@ -2563,12 +2600,51 @@ impl Workspace {
             Some(Value::Null) => (String::new(), "NULL"),
             Some(value) => (value.display().into_owned(), ""),
         };
+        // The column's type as the table declares it (with an enum's values),
+        // else as the result reports it.
+        let column_info = tab
+            .browse
+            .as_ref()
+            .and_then(|b| b.info.as_ref())
+            .and_then(|info| {
+                info.columns
+                    .iter()
+                    .find(|c| c.name == grid.data.columns[column].name)
+            });
+        let type_name = column_info
+            .map(|c| c.type_name.clone())
+            .or_else(|| grid.data.columns[column].type_name.clone());
+        let options = column_info.map(|c| c.options.clone()).unwrap_or_default();
+        let kind = crate::value_editor::kind_of(type_name.as_deref(), &options, current.as_ref());
+        let area = matches!(
+            kind,
+            crate::value_editor::ValueKind::Text | crate::value_editor::ValueKind::Json
+        )
+        .then(|| {
+            let json = kind == crate::value_editor::ValueKind::Json;
+            let shown = if json {
+                crate::value_editor::pretty(&text)
+            } else {
+                text.clone()
+            };
+            cx.new(|cx| {
+                let state = EditorState::new(window, cx)
+                    .soft_wrap(true)
+                    .line_number(false)
+                    .placeholder(placeholder)
+                    .default_value(shown);
+                if json { state.language("json") } else { state }
+            })
+        });
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(placeholder)
                 .default_value(text)
         });
-        input.update(cx, |input, cx| input.focus(window, cx));
+        match &area {
+            Some(area) => area.update(cx, |area, cx| area.focus(window, cx)),
+            None => input.update(cx, |input, cx| input.focus(window, cx)),
+        }
         let enter = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter { .. } = event {
                 this.commit_edit(false, window, cx);
@@ -2580,7 +2656,9 @@ impl Workspace {
         tab.editing = Some(CellEditor {
             row,
             column,
+            kind,
             input,
+            area,
             _enter: enter,
         });
         cx.notify();
@@ -2594,11 +2672,27 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let tab = &mut self.tabs[self.active];
+        let Some(open) = tab.editing.as_ref() else {
+            return;
+        };
+        let text = match &open.area {
+            Some(area) => area.read(cx).value().to_string(),
+            None => open.input.read(cx).value().to_string(),
+        };
+        // JSON is checked before it's staged; the editor stays open to fix it.
+        if !set_null
+            && open.kind == crate::value_editor::ValueKind::Json
+            && !text.trim().is_empty()
+            && let Some(problem) = crate::value_editor::json_error(&text)
+        {
+            tab.flash = Some((problem.into(), true));
+            cx.notify();
+            return;
+        }
         let Some(editor) = tab.editing.take() else {
             return;
         };
         let Some(grid) = &tab.grid else { return };
-        let text = editor.input.read(cx).value().to_string();
         let original = match editor.row {
             RowRef::Existing(r) => Some(grid.data.rows[r][editor.column].clone()),
             RowRef::New(_) => None,
@@ -2615,11 +2709,19 @@ impl Workspace {
                     .iter()
                     .any(|n| t.contains(n))
                 });
+        // Laid out for editing, JSON reads differently but may mean the same.
+        let same_json = editor.kind == crate::value_editor::ValueKind::Json
+            && original.as_ref().is_some_and(|o| {
+                serde_json::from_str::<serde_json::Value>(&o.display()).ok()
+                    == serde_json::from_str::<serde_json::Value>(&text).ok()
+                    && serde_json::from_str::<serde_json::Value>(&text).is_ok()
+            });
         let value = if set_null {
             Value::Null
-        } else if original
-            .as_ref()
-            .is_some_and(|o| !o.is_null() && o.display() == text)
+        } else if same_json
+            || original
+                .as_ref()
+                .is_some_and(|o| !o.is_null() && o.display() == text)
         {
             original.clone().expect("checked above")
         } else if numeric && text.trim().parse::<f64>().is_ok() {
@@ -2731,7 +2833,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn discard_edits(&mut self, _: &DiscardEdits, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn discard_edits(
+        &mut self,
+        _: &DiscardEdits,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tab = &mut self.tabs[self.active];
         tab.edits = Rc::default();
         tab.editing = None;
@@ -4283,92 +4390,236 @@ impl Workspace {
         )
     }
 
-    /// The cell being edited: its column, its value, and what to do with it.
+    /// The cell being edited: its column, its value in the editor its type
+    /// calls for, and what to do with it.
     fn render_edit_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use crate::value_editor::ValueKind;
         let tab = self.active_tab();
         let editor = tab.editing.as_ref()?;
-        let column = tab
-            .grid
-            .as_ref()?
-            .data
-            .columns
-            .get(editor.column)?
-            .name
-            .clone();
+        let grid = tab.grid.as_ref()?;
+        let column = grid.data.columns.get(editor.column)?.name.clone();
         let small = |button: gpui::Stateful<gpui::Div>| button.h(px(26.)).px(px(10.));
-        Some(
+        let label = |text: String| {
             div()
-                .key_context("CellEditor")
-                .on_action(
-                    cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
-                        this.cancel_edit(window, cx)
-                    }),
-                )
+                .max_w(px(180.))
+                .truncate()
+                .font_family(MONO_FONT)
+                .text_size(px(11.))
+                .text_color(theme.acc)
+                .child(text)
+        };
+        let set_null = small(widgets::button(
+            theme,
+            "cell-null",
+            "Set NULL",
+            ButtonKind::Ghost,
+            true,
+        ))
+        .on_click(cx.listener(|this, _, window, cx| this.commit_edit(true, window, cx)));
+        let cancel = small(widgets::button(
+            theme,
+            "cell-cancel",
+            "Cancel",
+            ButtonKind::Ghost,
+            true,
+        ))
+        .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx)));
+        let done = |keys: &'static str| {
+            small(widgets::button(
+                theme,
+                "cell-done",
+                "Done",
+                ButtonKind::Primary,
+                true,
+            ))
+            .pl(px(10.))
+            .child(kbd_on_accent(theme, keys))
+            .on_click(cx.listener(|this, _, window, cx| this.commit_edit(false, window, cx)))
+        };
+        let bar = div()
+            .key_context("CellEditor")
+            .on_action(
+                cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
+                    this.cancel_edit(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::CommitCell, window, cx| {
+                this.commit_edit(false, window, cx)
+            }))
+            .flex_none()
+            .border_b_1()
+            .border_color(theme.line)
+            .bg(theme.s1);
+        let row = || {
+            div()
                 .h(px(44.))
-                .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .px(px(8.))
-                .border_b_1()
-                .border_color(theme.line)
-                .bg(theme.s1)
-                .child(
-                    field(
-                        theme,
-                        Some(
-                            div()
-                                .max_w(px(180.))
-                                .truncate()
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.))
-                                .text_color(theme.acc)
-                                .child(column)
-                                .into_any_element(),
-                        ),
-                        &editor.input,
-                        true,
+        };
+
+        let element = match &editor.kind {
+            // A text area: long text, or JSON (checked when you press Done).
+            ValueKind::Text | ValueKind::Json => {
+                let area = editor.area.as_ref()?;
+                let json = editor.kind == ValueKind::Json;
+                bar.flex()
+                    .flex_col()
+                    .child(
+                        row()
+                            .child(label(column))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.t3)
+                                    .child(if json { "JSON" } else { "Text" }),
+                            )
+                            .child(div().flex_1())
+                            .child(set_null)
+                            .child(cancel)
+                            .child(done("⌘↵")),
                     )
-                    .flex_1(),
+                    .child(
+                        div().h(px(200.)).mx(px(8.)).mb(px(8.)).child(
+                            Editor::new(area)
+                                .h_full()
+                                .font_family(MONO_FONT)
+                                .text_size(px(12.)),
+                        ),
+                    )
+            }
+            // A pick from the values the column allows.
+            ValueKind::Choice(options) => {
+                let current = editor.input.read(cx).value().to_string();
+                bar.child(
+                    row()
+                        .child(label(column))
+                        .child(div().flex_1().flex().flex_wrap().gap(px(4.)).children(
+                            options.iter().enumerate().map(|(ix, option)| {
+                                let pick = option.clone();
+                                small(widgets::button(
+                                    theme,
+                                    ("cell-option", ix),
+                                    option.clone(),
+                                    if *option == current {
+                                        ButtonKind::Primary
+                                    } else {
+                                        ButtonKind::Secondary
+                                    },
+                                    true,
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.commit_text(pick.clone(), window, cx)
+                                    },
+                                ))
+                            }),
+                        ))
+                        .child(set_null)
+                        .child(cancel),
                 )
-                .child(
+            }
+            ValueKind::Bool { numeric } => {
+                let current = editor.input.read(cx).value().to_string();
+                let choice = |id: &'static str, shown: &'static str, stored: &'static str| {
+                    let on = current == stored || current == shown;
                     small(widgets::button(
                         theme,
-                        "cell-null",
-                        "Set NULL",
-                        ButtonKind::Ghost,
+                        id,
+                        shown,
+                        if on {
+                            ButtonKind::Primary
+                        } else {
+                            ButtonKind::Secondary
+                        },
                         true,
                     ))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.commit_edit(true, window, cx)),
-                    ),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.commit_text(stored.to_string(), window, cx)
+                    }))
+                };
+                let (yes, no) = if *numeric {
+                    ("1", "0")
+                } else {
+                    ("true", "false")
+                };
+                bar.child(
+                    row()
+                        .child(label(column))
+                        .child(choice("cell-true", "true", yes))
+                        .child(choice("cell-false", "false", no))
+                        .child(div().flex_1())
+                        .child(set_null)
+                        .child(cancel),
                 )
-                .child(
-                    small(widgets::button(
-                        theme,
-                        "cell-cancel",
-                        "Cancel",
-                        ButtonKind::Ghost,
-                        true,
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))),
+            }
+            // A line, with how dates are written and a Now button.
+            ValueKind::Line | ValueKind::Date(_) => {
+                let date = match &editor.kind {
+                    ValueKind::Date(kind) => Some(*kind),
+                    _ => None,
+                };
+                bar.child(
+                    row()
+                        .child(
+                            field(
+                                theme,
+                                Some(label(column).into_any_element()),
+                                &editor.input,
+                                true,
+                            )
+                            .flex_1(),
+                        )
+                        .when_some(date, |el, kind| {
+                            el.child(
+                                div()
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(10.5))
+                                    .text_color(theme.t3)
+                                    .child(kind.hint()),
+                            )
+                            .child(
+                                small(widgets::button(
+                                    theme,
+                                    "cell-now",
+                                    "Now",
+                                    ButtonKind::Ghost,
+                                    true,
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.fill_cell(kind.now(), window, cx)
+                                    },
+                                )),
+                            )
+                        })
+                        .child(set_null)
+                        .child(cancel)
+                        .child(done("↵")),
                 )
-                .child(
-                    small(widgets::button(
-                        theme,
-                        "cell-done",
-                        "Done",
-                        ButtonKind::Primary,
-                        true,
-                    ))
-                    .pl(px(10.))
-                    .child(kbd_on_accent(theme, "↵"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.commit_edit(false, window, cx)),
-                    ),
-                )
-                .into_any_element(),
-        )
+            }
+        };
+        Some(element.into_any_element())
+    }
+
+    /// Put `text` in the open edit bar's field.
+    fn fill_cell(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.tabs[self.active].editing {
+            let input = editor.input.clone();
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+    }
+
+    /// Stage `text` as the cell's value (a choice, true / false).
+    pub(crate) fn commit_text(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.fill_cell(text, window, cx);
+        self.commit_edit(false, window, cx);
     }
 
     /// The right of the results bar: staged changes and how to save them, or

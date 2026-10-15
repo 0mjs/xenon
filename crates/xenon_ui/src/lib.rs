@@ -19,6 +19,7 @@ mod servers;
 mod settings;
 mod structure;
 pub mod theme;
+mod value_editor;
 mod widgets;
 pub mod workspace;
 
@@ -69,6 +70,7 @@ actions!(
         ExportResults,
         ToggleStructure,
         SaveQueryAs,
+        CommitCell,
         ShowSaved,
         FocusEditor,
         OpenPalette,
@@ -171,6 +173,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-p", PaletteUp, Some("Palette > Input")),
         KeyBinding::new("ctrl-n", PaletteDown, Some("Palette > Input")),
     ]);
+    // ⌘↵ in a cell's text area stages the value (Enter adds a line there).
+    cx.bind_keys([KeyBinding::new(
+        "cmd-enter",
+        CommitCell,
+        Some("CellEditor > Input"),
+    )]);
     // Reached when the workspace isn't in the focus path (it handles Quit itself
     // otherwise): it still gets to ask about open transactions first.
     cx.on_action(|_: &Quit, cx| {

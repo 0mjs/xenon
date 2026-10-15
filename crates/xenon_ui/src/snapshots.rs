@@ -371,6 +371,58 @@ fn snapshots() {
         });
         shot.save(&format!("19-saved-{suffix}"));
 
+        // Value editors: JSON in a text area, true / false, a date with Now.
+        shot.act(|w, _, cx| {
+            w.naming = None;
+            // Through Xenon, so it sees the new table.
+            let tab = w.active_tab().id;
+            w.execute(
+                tab,
+                "drop table if exists profiles;
+                 create table profiles (id integer primary key, settings json, active boolean, joined date);
+                 insert into profiles values
+                   (1, '{\"theme\":\"dark\",\"alerts\":{\"email\":true,\"sms\":false},\"tags\":[\"beta\",\"vip\"]}', 1, '2026-03-14')"
+                    .into(),
+                None,
+                cx,
+            );
+        });
+        shot.act(|w, window, cx| {
+            let id = w.sessions[0].id;
+            w.browse(id, "main", "profiles", window, cx);
+        });
+        shot.act(|w, window, cx| w.begin_edit(0, 1, window, cx));
+        shot.save(&format!("31-json-editor-{suffix}"));
+        shot.act(|w, window, cx| {
+            // Invalid JSON is refused, and the editor stays open to fix it.
+            w.type_into_area("{\"theme\": ", window, cx);
+            w.commit_edit(false, window, cx);
+            assert!(w.is_editing(), "invalid JSON was staged");
+            let note = w.flash_text().unwrap_or_default();
+            assert!(note.starts_with("Not valid JSON"), "{note}");
+        });
+        shot.act(|w, window, cx| {
+            w.cancel_edit_for_test(window, cx);
+            w.begin_edit(0, 2, window, cx);
+        });
+        shot.save(&format!("32-bool-editor-{suffix}"));
+        shot.act(|w, window, cx| {
+            // Picking a value stages it.
+            w.commit_text("0".into(), window, cx);
+            assert_eq!(w.staged_changes(), 1);
+            w.discard_edits(&crate::DiscardEdits, window, cx);
+        });
+        shot.act(|w, window, cx| {
+            w.cancel_edit_for_test(window, cx);
+            w.begin_edit(0, 3, window, cx);
+        });
+        shot.save(&format!("33-date-editor-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.cancel_edit_for_test(window, cx);
+            let id = w.sessions[0].id;
+            w.browse(id, "main", "orders", window, cx);
+        });
+
         // Autocomplete: columns of the aliased table after `o.`.
         shot.act(|w, window, cx| {
             let editor = w.active_tab().editor.clone();

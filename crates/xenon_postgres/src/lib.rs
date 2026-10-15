@@ -535,7 +535,9 @@ impl Connection for PostgresConnection {
                        else pg_get_expr(d.adbin, d.adrelid) end,
                    exists (select 1 from pg_index i
                            where i.indrelid = c.oid and i.indisprimary and a.attnum = any(i.indkey)),
-                   col_description(c.oid, a.attnum)
+                   col_description(c.oid, a.attnum),
+                   (select array_agg(e.enumlabel::text order by e.enumsortorder)
+                    from pg_enum e where e.enumtypid = a.atttypid)
             from pg_class c
             join pg_namespace n on n.oid = c.relnamespace
             join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
@@ -600,6 +602,7 @@ impl Connection for PostgresConnection {
                     default: row.get(3),
                     primary_key: row.get(4),
                     comment: row.get(5),
+                    options: row.get::<_, Option<Vec<String>>>(6).unwrap_or_default(),
                 });
             }
             for row in self
@@ -1116,7 +1119,10 @@ mod tests {
         let Some(conn) = live() else { return };
         conn.execute(
             "drop table if exists xenon_lines, xenon_heads;
-             create table xenon_heads (id bigint generated always as identity primary key, code text unique);
+             drop type if exists xenon_mood;
+             create type xenon_mood as enum ('calm', 'busy');
+             create table xenon_heads (id bigint generated always as identity primary key, code text unique,
+                                       mood xenon_mood);
              comment on column xenon_heads.code is 'Short code';
              create table xenon_lines (
                  head_id bigint not null references xenon_heads on delete set null,
@@ -1132,6 +1138,7 @@ mod tests {
             Some("generated always as identity")
         );
         assert_eq!(heads.columns[1].comment.as_deref(), Some("Short code"));
+        assert_eq!(heads.columns[2].options, ["calm", "busy"]);
         assert!(heads.indexes[0].primary);
         assert_eq!(heads.referenced_by[0].table, "xenon_lines");
         let lines = conn.describe("public", "xenon_lines").unwrap();
@@ -1139,8 +1146,11 @@ mod tests {
         assert_eq!(lines.foreign_keys[0].on_delete.as_deref(), Some("set null"));
         assert_eq!(lines.indexes[0].columns, ["head_id", "n"]);
         assert_eq!(lines.columns[1].default.as_deref(), Some("1"));
-        conn.execute("drop table xenon_lines, xenon_heads", 10)
-            .unwrap();
+        conn.execute(
+            "drop table xenon_lines, xenon_heads; drop type xenon_mood",
+            10,
+        )
+        .unwrap();
     }
 
     #[test]

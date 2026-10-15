@@ -6,6 +6,7 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono = { workspace = true, features = ["clock"] }
 lsp-types = { version = "0.97", features = ["proposed"] }
 gpui.workspace = true
 gpui-component.workspace = true
@@ -22,6 +23,7 @@ xenon_store.workspace = true
 libc = "0.2"
 dirs.workspace = true
 rust_xlsxwriter = { version = "0.99.1", default-features = false, features = ["constant_memory"] }
+serde_json = "1.0.154"
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

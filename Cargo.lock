@@ -8954,6 +8954,7 @@ name = "xenon_ui"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs 7.0.0",
  "gpui-component",
  "gpui-pre",
@@ -8964,6 +8965,7 @@ dependencies = [
  "lsp-types",
  "rusqlite",
  "rust_xlsxwriter",
+ "serde_json",
  "xenon_driver",
  "xenon_duckdb",
  "xenon_edit",

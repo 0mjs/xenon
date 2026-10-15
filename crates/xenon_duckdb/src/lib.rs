@@ -466,10 +466,12 @@ impl Connection for DuckDbConnection {
         info.columns = columns
             .query_map([schema, table], |row| {
                 let name: String = row.get(0)?;
+                let type_name: String = row.get(1)?;
                 Ok(ColumnInfo {
                     primary_key: primary.contains(&name),
                     name,
-                    type_name: row.get(1)?,
+                    options: xenon_driver::enum_options(&type_name),
+                    type_name,
                     nullable: row.get(2)?,
                     default: row.get(3)?,
                     comment: row.get::<_, Option<String>>(4)?.filter(|c| !c.is_empty()),

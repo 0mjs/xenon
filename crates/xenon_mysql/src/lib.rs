@@ -531,6 +531,7 @@ impl Connection for MysqlConnection {
                 (None, true) => None,
             };
             info.columns.push(ColumnInfo {
+                options: xenon_driver::enum_options(&type_name),
                 name,
                 type_name,
                 nullable,

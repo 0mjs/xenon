@@ -692,6 +692,7 @@ impl Connection for MssqlConnection {
                 default: text(&row[3]).map(|d| unwrap_parens(&d).to_string()),
                 primary_key: yes(&row[4]),
                 comment: text(&row[5]),
+                options: Vec::new(),
             });
         }
         let indexes = rows(format!(

@@ -177,6 +177,7 @@ impl Connection for SqliteConnection {
                     },
                     primary_key: row.get::<_, i64>(4)? > 0,
                     comment: None,
+                    options: Vec::new(),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;

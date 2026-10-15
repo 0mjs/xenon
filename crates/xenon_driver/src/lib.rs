@@ -214,6 +214,40 @@ pub struct ColumnInfo {
     pub default: Option<String>,
     pub primary_key: bool,
     pub comment: Option<String>,
+    /// The values an enum column allows, in order (empty for other types).
+    pub options: Vec<String>,
+}
+
+/// The values of an enum type written as `enum('a','b')` (MySQL's
+/// `column_type`, DuckDB's `ENUM('a', 'b')`); empty for anything else.
+pub fn enum_options(type_text: &str) -> Vec<String> {
+    let lower = type_text.trim().to_ascii_lowercase();
+    if !lower.starts_with("enum(") || !lower.ends_with(')') {
+        return Vec::new();
+    }
+    let inner = &type_text.trim()[5..type_text.trim().len() - 1];
+    let mut options = Vec::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\'' {
+            continue;
+        }
+        let mut value = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                // A doubled quote is a quote; so is a backslash-escaped one.
+                '\'' if chars.peek() == Some(&'\'') => {
+                    chars.next();
+                    value.push('\'');
+                }
+                '\\' => value.extend(chars.next()),
+                '\'' => break,
+                c => value.push(c),
+            }
+        }
+        options.push(value);
+    }
+    options
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -451,5 +485,23 @@ pub trait Connection: Send + Sync {
     /// MySQL's current database, SQLite's `main`), so generated SQL can leave it out.
     fn default_schema(&self) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_options_from_type_text() {
+        assert_eq!(
+            enum_options("enum('paid','refunded')"),
+            ["paid", "refunded"]
+        );
+        assert_eq!(
+            enum_options("ENUM('a', 'it''s', 'b\\'c')"),
+            ["a", "it's", "b'c"]
+        );
+        assert!(enum_options("varchar(20)").is_empty());
     }
 }
