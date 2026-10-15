@@ -13,6 +13,7 @@ mod history;
 mod launcher;
 mod palette;
 mod results;
+mod saved;
 mod servers;
 mod settings;
 mod structure;
@@ -66,6 +67,8 @@ actions!(
         CopySql,
         ExportResults,
         ToggleStructure,
+        SaveQueryAs,
+        ShowSaved,
         FocusEditor,
         OpenPalette,
         PaletteUp,

@@ -246,10 +246,44 @@ fn snapshots() {
     seed_saved(&Store::open(&data.join("xenon.db")).unwrap(), &shop);
 
     for (mode, suffix) in [(Mode::Dark, "dark"), (Mode::Light, "light")] {
+        let store = Store::open(&data.join("xenon.db")).unwrap();
+        store.set_open_tabs(&[]).unwrap();
         let mut shot = Shot::new(mode, None, &root);
         shot.save(&format!("01-connect-{suffix}"));
         shot.act(|w, window, cx| w.new_connection(&crate::NewConnection, window, cx));
         shot.save(&format!("02-connect-dialog-{suffix}"));
+
+        // Last session's tabs come back: a query and a filtered table on shop.db.
+        let shop_id = store
+            .connections()
+            .unwrap()
+            .into_iter()
+            .find(|c| matches!(&c.target, Target::Sqlite { path } if path.ends_with("shop.db")))
+            .map(|c| c.id);
+        if let Some(connection) = shop_id {
+            store
+                .set_open_tabs(&[
+                    xenon_store::OpenTab {
+                        connection,
+                        title: "Big orders".into(),
+                        sql: "select * from orders where total > 500".into(),
+                        ..Default::default()
+                    },
+                    xenon_store::OpenTab {
+                        connection,
+                        title: "customers".into(),
+                        sql: String::new(),
+                        table: Some(("main".into(), "customers".into())),
+                        filter: "plan = 'team'".into(),
+                        active: true,
+                        saved_query: None,
+                    },
+                ])
+                .unwrap();
+            let mut shot = Shot::new(mode, None, &root);
+            shot.save(&format!("26-restored-{suffix}"));
+            store.set_open_tabs(&[]).unwrap();
+        }
 
         let mut shot = Shot::new(mode, Some(&shop), &root);
         shot.act(|w, window, cx| {
@@ -323,6 +357,33 @@ fn snapshots() {
             });
         });
         shot.save(&format!("20-autocomplete-{suffix}"));
+        // Save a query: name it, then see it in the Saved panel.
+        shot.act(|w, window, cx| {
+            w.new_tab(&crate::NewTab, window, cx);
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(
+                    "select status, count(*) from orders group by status",
+                    window,
+                    cx,
+                )
+            });
+            w.run(crate::workspace::RunScope::All, window, cx);
+        });
+        shot.act(|w, window, cx| w.save_query(false, window, cx));
+        shot.act(|w, window, cx| {
+            let input = w.naming.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| {
+                input.set_value("Orders by status", window, cx)
+            });
+        });
+        shot.save(&format!("24-save-query-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.finish_naming(window, cx);
+            w.show_panel(crate::workspace::SidePanel::Saved, window, cx);
+        });
+        shot.save(&format!("25-saved-queries-{suffix}"));
+        shot.act(|w, window, cx| w.show_panel(crate::workspace::SidePanel::Explorer, window, cx));
         shot.act(|w, window, cx| {
             let editor = w.active_tab().editor.clone();
             editor.update(cx, |editor, cx| {

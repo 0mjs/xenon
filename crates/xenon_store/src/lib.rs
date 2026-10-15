@@ -172,6 +172,32 @@ impl SavedConnection {
     }
 }
 
+/// A query the user named and kept.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedQuery {
+    pub id: i64,
+    pub name: String,
+    pub sql: String,
+    /// The saved connection it was written for, if any.
+    pub connection: Option<i64>,
+    /// Milliseconds since the Unix epoch.
+    pub updated_at: i64,
+}
+
+/// A tab that was open when Xenon last quit, to reopen on launch.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpenTab {
+    /// The saved connection the tab ran on.
+    pub connection: i64,
+    pub title: String,
+    pub sql: String,
+    /// A table tab: the table and its WHERE filter.
+    pub table: Option<(String, String)>,
+    pub filter: String,
+    pub active: bool,
+    pub saved_query: Option<i64>,
+}
+
 pub struct Store {
     conn: Mutex<rusqlite::Connection>,
 }
@@ -230,6 +256,24 @@ impl Store {
                  environment text not null default 'none',
                  read_only integer not null default 0,
                  last_used integer not null default 0
+             );
+             create table if not exists saved_queries (
+                 id integer primary key,
+                 name text not null,
+                 sql text not null,
+                 connection integer,
+                 updated_at integer not null
+             );
+             create table if not exists open_tabs (
+                 position integer primary key,
+                 connection integer not null,
+                 title text not null,
+                 sql text not null,
+                 schema_name text,
+                 table_name text,
+                 filter text not null default '',
+                 active integer not null default 0,
+                 saved_query integer
              );",
         )?;
         // Columns added after the table first shipped.
@@ -452,6 +496,110 @@ impl Store {
     }
 
     /// Forget every query run, on every connection.
+    /// Newest first. `filter` matches the name or the SQL, case-insensitively.
+    pub fn saved_queries(&self, filter: &str) -> Result<Vec<SavedQuery>> {
+        let pattern = like_pattern(filter);
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "select id, name, sql, connection, updated_at from saved_queries
+             where name like ?1 escape '\\' or sql like ?1 escape '\\'
+             order by updated_at desc, id desc",
+        )?;
+        let queries = stmt
+            .query_map(params![pattern], |row| {
+                Ok(SavedQuery {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    sql: row.get(2)?,
+                    connection: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(queries)
+    }
+
+    /// Insert (`id` 0) or update a saved query; returns its id.
+    pub fn save_query(&self, query: &SavedQuery) -> Result<i64> {
+        let conn = self.lock();
+        let now = now_ms();
+        if query.id == 0 {
+            conn.execute(
+                "insert into saved_queries (name, sql, connection, updated_at) values (?1, ?2, ?3, ?4)",
+                params![query.name, query.sql, query.connection, now],
+            )?;
+            Ok(conn.last_insert_rowid())
+        } else {
+            conn.execute(
+                "update saved_queries set name = ?2, sql = ?3, connection = ?4, updated_at = ?5 where id = ?1",
+                params![query.id, query.name, query.sql, query.connection, now],
+            )?;
+            Ok(query.id)
+        }
+    }
+
+    pub fn delete_query(&self, id: i64) -> Result<()> {
+        self.lock()
+            .execute("delete from saved_queries where id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// The tabs to reopen, in order.
+    pub fn open_tabs(&self) -> Result<Vec<OpenTab>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select connection, title, sql, schema_name, table_name, filter, active, saved_query
+             from open_tabs order by position",
+        )?;
+        let tabs = stmt
+            .query_map([], |row| {
+                let schema: Option<String> = row.get(3)?;
+                let table: Option<String> = row.get(4)?;
+                Ok(OpenTab {
+                    connection: row.get(0)?,
+                    title: row.get(1)?,
+                    sql: row.get(2)?,
+                    table: schema.zip(table),
+                    filter: row.get(5)?,
+                    active: row.get(6)?,
+                    saved_query: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(tabs)
+    }
+
+    /// Replace the remembered tabs.
+    pub fn set_open_tabs(&self, tabs: &[OpenTab]) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute("delete from open_tabs", [])?;
+        for (position, tab) in tabs.iter().enumerate() {
+            let (schema, table) = match &tab.table {
+                Some((schema, table)) => (Some(schema), Some(table)),
+                None => (None, None),
+            };
+            tx.execute(
+                "insert into open_tabs (position, connection, title, sql, schema_name, table_name,
+                                        filter, active, saved_query)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    position as i64,
+                    tab.connection,
+                    tab.title,
+                    tab.sql,
+                    schema,
+                    table,
+                    tab.filter,
+                    tab.active,
+                    tab.saved_query
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn clear_history(&self) -> Result<()> {
         self.lock().execute("delete from history", [])?;
         Ok(())
@@ -464,13 +612,7 @@ impl Store {
         filter: &str,
         limit: usize,
     ) -> Result<Vec<HistoryEntry>> {
-        let pattern = format!(
-            "%{}%",
-            filter
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        );
+        let pattern = like_pattern(filter);
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
             "select id, connection, sql, ran_at, duration_ms, rows, error from history
@@ -505,6 +647,16 @@ fn next_stamp(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(now_ms().max(latest + 1))
 }
 
+/// A LIKE pattern matching `text` anywhere, with `\` escaping its wildcards.
+fn like_pattern(text: &str) -> String {
+    format!(
+        "%{}%",
+        text.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -514,6 +666,65 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_queries_insert_update_filter_delete() {
+        let store = Store::open_in_memory().unwrap();
+        let mut query = SavedQuery {
+            id: 0,
+            name: "Paid orders".into(),
+            sql: "select * from orders where status = 'paid'".into(),
+            connection: Some(3),
+            updated_at: 0,
+        };
+        query.id = store.save_query(&query).unwrap();
+        store
+            .save_query(&SavedQuery {
+                id: 0,
+                name: "100% done".into(),
+                sql: "select 1".into(),
+                connection: None,
+                updated_at: 0,
+            })
+            .unwrap();
+        assert_eq!(store.saved_queries("").unwrap().len(), 2);
+        assert_eq!(
+            store.saved_queries("STATUS").unwrap()[0].name,
+            "Paid orders"
+        );
+        assert_eq!(store.saved_queries("100%").unwrap().len(), 1);
+        query.name = "Paid".into();
+        assert_eq!(store.save_query(&query).unwrap(), query.id);
+        assert_eq!(store.saved_queries("paid").unwrap()[0].name, "Paid");
+        store.delete_query(query.id).unwrap();
+        assert_eq!(store.saved_queries("").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn open_tabs_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        let tabs = vec![
+            OpenTab {
+                connection: 1,
+                title: "Query 1".into(),
+                sql: "select 1".into(),
+                ..Default::default()
+            },
+            OpenTab {
+                connection: 2,
+                title: "orders".into(),
+                sql: "select * from orders".into(),
+                table: Some(("public".into(), "orders".into())),
+                filter: "id = 3".into(),
+                active: true,
+                saved_query: None,
+            },
+        ];
+        store.set_open_tabs(&tabs).unwrap();
+        assert_eq!(store.open_tabs().unwrap(), tabs);
+        store.set_open_tabs(&tabs[..1]).unwrap();
+        assert_eq!(store.open_tabs().unwrap().len(), 1);
+    }
 
     fn entry<'a>(connection: &'a str, sql: &'a str) -> NewHistoryEntry<'a> {
         NewHistoryEntry {

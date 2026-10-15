@@ -49,8 +49,8 @@ use crate::{
     CopySql, DeleteRows, DiscardEdits, EditCell, Explain, ExportResults, ExtendDown, ExtendLeft,
     ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection,
     NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab, Quit, RunAll, RunQuery,
-    SaveEdits, SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer,
-    ToggleInspector, ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme,
+    SaveEdits, SaveQueryAs, SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ShowSaved,
+    ToggleExplorer, ToggleInspector, ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -235,6 +235,7 @@ pub(crate) struct FieldFocus {
     pub paste: bool,
     pub explorer: bool,
     pub history: bool,
+    pub saved: bool,
     pub browse: bool,
 }
 
@@ -270,6 +271,7 @@ pub(crate) enum Pending {
         origin: Option<usize>,
     },
     Forget(i64),
+    DeleteQuery(i64),
     /// Save a tab's staged changes.
     Save {
         tab_id: usize,
@@ -299,6 +301,7 @@ pub(crate) enum RunScope {
 pub(crate) enum SidePanel {
     Explorer,
     History,
+    Saved,
 }
 
 enum Query {
@@ -316,10 +319,10 @@ enum Query {
 
 /// A tab opened by browsing a table: its query is generated from a filter and
 /// a sort, so header clicks sort on the server rather than in the grid.
-struct Browse {
-    schema: String,
-    table: String,
-    filter: Entity<InputState>,
+pub(crate) struct Browse {
+    pub(crate) schema: String,
+    pub(crate) table: String,
+    pub(crate) filter: Entity<InputState>,
     order: Option<(String, SortDirection)>,
     _filter_enter: Subscription,
     /// Columns, keys and indexes, loaded when the tab opens.
@@ -348,11 +351,13 @@ impl Browse {
 
 /// One query tab: its own editor and its own results.
 pub(crate) struct Tab {
-    id: usize,
+    pub(crate) id: usize,
     /// The connection this tab runs against; `None` shows the Connect screen.
     pub(crate) session: Option<usize>,
-    title: SharedString,
-    browse: Option<Browse>,
+    pub(crate) title: SharedString,
+    pub(crate) browse: Option<Browse>,
+    /// The saved query this tab holds, so ⌘S updates it.
+    pub(crate) saved_query: Option<i64>,
     pub(crate) editor: Entity<EditorState>,
     query: Query,
     grid: Option<Grid>,
@@ -367,7 +372,7 @@ pub(crate) struct Tab {
     /// The cell open in the edit bar.
     editing: Option<CellEditor>,
     /// A short note in the results bar (saved, or why something can't happen), and whether it's an error.
-    flash: Option<(SharedString, bool)>,
+    pub(crate) flash: Option<(SharedString, bool)>,
     saving: bool,
     /// Rows read so far by the running query.
     fetched: usize,
@@ -419,8 +424,8 @@ enum Drag {
 
 pub struct Workspace {
     focus_handle: FocusHandle,
-    tabs: Vec<Tab>,
-    active: usize,
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active: usize,
     next_tab_id: usize,
     pub(crate) sessions: Vec<Session>,
     next_session_id: usize,
@@ -465,7 +470,16 @@ pub struct Workspace {
     pub(crate) explorer_filter: Entity<InputState>,
     show_side_panel: bool,
     show_inspector: bool,
-    _subscriptions: Vec<Subscription>,
+    pub(crate) _subscriptions: Vec<Subscription>,
+    /// The Saved panel: queries matching its filter.
+    pub(crate) saved_queries: Vec<xenon_store::SavedQuery>,
+    pub(crate) saved_filter: Entity<InputState>,
+    /// Asking for a name before saving a query.
+    pub(crate) naming: Option<crate::saved::Naming>,
+    /// Last session's tabs, by saved connection, waiting for it to connect.
+    pub(crate) restoring: HashMap<i64, Vec<xenon_store::OpenTab>>,
+    /// The tabs last written to the store.
+    pub(crate) persisted_tabs: Vec<xenon_store::OpenTab>,
 }
 
 impl Workspace {
@@ -478,6 +492,13 @@ impl Workspace {
         });
 
         let history_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter history"));
+        let saved_filter =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Filter saved queries"));
+        let saved_changes = cx.subscribe(&saved_filter, |this, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.reload_saved_queries(cx);
+            }
+        });
         let explorer_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter tables"));
         let paste_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(
@@ -562,7 +583,18 @@ impl Workspace {
             explorer_filter,
             show_side_panel: true,
             show_inspector: true,
-            _subscriptions: vec![appearance, filter_changes, explorer_changes, paste_events],
+            _subscriptions: vec![
+                appearance,
+                filter_changes,
+                explorer_changes,
+                paste_events,
+                saved_changes,
+            ],
+            saved_queries: Vec::new(),
+            saved_filter,
+            naming: None,
+            restoring: HashMap::new(),
+            persisted_tabs: Vec::new(),
         };
         this.reload_saved();
         this.rediscover(cx);
@@ -572,11 +604,14 @@ impl Workspace {
             this.focus_editor(window, cx)
         });
 
+        this.reload_saved_queries(cx);
         match launch {
             Some(Launch::Sqlite(path)) => this.open_path(path, window, cx),
             Some(Launch::Url(engine, url)) => this.connect_url(engine, url, window, cx),
+            None if this.prefs.restore_tabs => this.restore_tabs(window, cx),
             None => {}
         }
+        this.watch_tabs(cx);
         this
     }
 
@@ -604,7 +639,7 @@ impl Workspace {
         self.active_tab().session.and_then(|id| self.session(id))
     }
 
-    fn add_tab(
+    pub(crate) fn add_tab(
         &mut self,
         browse: Option<(String, String)>,
         session: Option<usize>,
@@ -675,6 +710,7 @@ impl Workspace {
             fetched: 0,
             previewing: false,
             last_run: None,
+            saved_query: None,
         });
         self.active = self.tabs.len() - 1;
         self.hook_completions(self.active, cx);
@@ -692,7 +728,12 @@ impl Workspace {
             .expect("unbounded range")
     }
 
-    fn activate_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn activate_tab(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index < self.tabs.len() {
             let switched = self.tabs[index].session != self.active_tab().session;
             self.active = index;
@@ -767,7 +808,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
         let session = self.active_tab().session;
         self.add_tab(None, session, window, cx);
         self.focus_editor(window, cx);
@@ -786,7 +827,7 @@ impl Workspace {
         self.activate_tab((self.active + len - 1) % len, window, cx);
     }
 
-    fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let editor = self.active_tab().editor.clone();
         editor.update(cx, |editor, cx| editor.focus(window, cx));
     }
@@ -870,6 +911,7 @@ impl Workspace {
             return;
         }
         let store = self.store.clone();
+        let restoring = profile.saved_id;
         self.connecting = Some(profile.name.clone().into());
         cx.notify();
         let task = cx.background_spawn(async move {
@@ -922,10 +964,16 @@ impl Workspace {
                             collapsed_schemas: HashSet::new(),
                             collapsed: false,
                         });
-                        this.attach(id, false, window, cx);
+                        if !this.reopen_tabs(saved_id, id, window, cx) {
+                            this.attach(id, false, window, cx);
+                        }
                         this.bench_start(cx);
                     }
                     Err(err) => {
+                        // Its tabs can't come back this time; stop waiting for them.
+                        if let Some(id) = restoring {
+                            this.restoring.remove(&id);
+                        }
                         let message: SharedString = format!("{err:#}").into();
                         match &this.connect_dialog {
                             Some((dialog, _)) => {
@@ -1263,7 +1311,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_confirm(
+    pub(crate) fn show_confirm(
         &mut self,
         dialog: Entity<ConfirmDialog>,
         pending: Pending,
@@ -1301,6 +1349,7 @@ impl Workspace {
                         }
                         this.reload_saved();
                     }
+                    Pending::DeleteQuery(id) => this.forget_query(id, cx),
                 }
             }
             this.focus_editor(window, cx);
@@ -1802,7 +1851,7 @@ impl Workspace {
     }
 
     /// Fetch the active table tab's columns, keys and indexes in the background.
-    fn load_table_info(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_table_info(&mut self, cx: &mut Context<Self>) {
         let tab = self.active_tab();
         let (Some(session), Some(browse)) = (self.active_session(), &tab.browse) else {
             return;
@@ -1897,7 +1946,7 @@ impl Workspace {
     }
 
     /// Regenerate the active browse tab's query from its filter and sort, and run it.
-    fn run_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn run_browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.guard_edits(cx) {
             return;
         }
@@ -2002,7 +2051,12 @@ impl Workspace {
         }
     }
 
-    fn flash(&mut self, text: impl Into<SharedString>, error: bool, cx: &mut Context<Self>) {
+    pub(crate) fn flash(
+        &mut self,
+        text: impl Into<SharedString>,
+        error: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.tabs[self.active].flash = Some((text.into(), error));
         cx.notify();
     }
@@ -2243,12 +2297,18 @@ impl Workspace {
         self.save_edits_confirming(true, window, cx);
     }
 
+    /// ⌘S: save the active tab's staged changes, or else its query.
     pub(crate) fn save_edits(
         &mut self,
         _: &SaveEdits,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let tab = self.active_tab();
+        if tab.edits.is_empty() && tab.editing.is_none() {
+            self.save_query(false, window, cx);
+            return;
+        }
         self.save_edits_confirming(false, window, cx);
     }
 
@@ -2661,7 +2721,7 @@ impl Workspace {
         }
         // Keys are listed here rather than looked up: several bindings only
         // apply inside the editor or grid, which the palette's focus isn't.
-        let commands: [(&str, &str, Box<dyn gpui::Action>); 31] = [
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 34] = [
             ("Run Statement", "⌘↵", Box::new(RunQuery)),
             ("Run All", "⇧⌘↵", Box::new(RunAll)),
             ("Explain", "⌘E", Box::new(Explain)),
@@ -2688,6 +2748,9 @@ impl Workspace {
             ("Copy Cells as SQL Inserts", "", Box::new(CopySql)),
             ("Export Results…", "⇧⌘S", Box::new(ExportResults)),
             ("Show Table Structure", "", Box::new(ToggleStructure)),
+            ("Save Query", "⌘S", Box::new(SaveEdits)),
+            ("Save Query As…", "", Box::new(SaveQueryAs)),
+            ("Show Saved Queries", "", Box::new(ShowSaved)),
             ("Theme: Match System", "", Box::new(UseSystemTheme)),
             ("Theme: Light", "", Box::new(UseLightTheme)),
             ("Theme: Dark", "", Box::new(UseDarkTheme)),
@@ -2807,7 +2870,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn show_panel(&mut self, panel: SidePanel, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_panel(
+        &mut self,
+        panel: SidePanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.show_side_panel && self.side_panel == panel {
             self.show_side_panel = false;
         } else {
@@ -2874,6 +2942,7 @@ impl Render for Workspace {
             paste: focused(&self.paste_input, cx),
             explorer: focused(&self.explorer_filter, cx),
             history: focused(&self.history_filter, cx),
+            saved: focused(&self.saved_filter, cx),
             browse: self
                 .active_tab()
                 .browse
@@ -2935,6 +3004,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyMarkdown, _, cx| this.copy(Format::Markdown, cx)))
             .on_action(cx.listener(|this, _: &CopySql, _, cx| this.copy(Format::Sql, cx)))
             .on_action(cx.listener(|this, _: &ToggleStructure, _, cx| this.toggle_structure(cx)))
+            .on_action(
+                cx.listener(|this, _: &SaveQueryAs, window, cx| this.save_query(true, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ShowSaved, window, cx| {
+                this.show_panel(SidePanel::Saved, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ExportResults, _, cx| {
                 if this.active_tab().grid.is_some() {
                     this.export_menu = !this.export_menu;
@@ -3005,6 +3080,7 @@ impl Render for Workspace {
             .when_some(self.settings.as_ref(), |el, (settings, _)| {
                 el.child(settings.clone())
             })
+            .children(self.render_naming(&theme, cx))
             .when_some(self.confirm.as_ref(), |el, (dialog, _, _)| {
                 el.child(dialog.clone())
             })
@@ -3270,6 +3346,7 @@ impl Workspace {
             .pb(px(10.))
             .child(item("rail-explorer", "database", SidePanel::Explorer))
             .child(item("rail-history", "clock", SidePanel::History))
+            .child(item("rail-saved", "bookmark", SidePanel::Saved))
             .child(div().flex_1())
             .child(
                 div()
@@ -3298,6 +3375,7 @@ impl Workspace {
         let (label, content) = match self.side_panel {
             SidePanel::Explorer => ("Explorer", self.render_explorer(theme, cx)),
             SidePanel::History => ("History", self.render_history(theme, cx)),
+            SidePanel::Saved => ("Saved queries", self.render_saved_queries(theme, cx)),
         };
         div()
             .w(px(self.side_panel_width))
@@ -3506,7 +3584,26 @@ impl Workspace {
                 .on_click(cx.listener(|this, _, w, cx| this.cancel_query(&CancelQuery, w, cx))),
             );
         } else {
+            let saved = tab.saved_query.is_some();
             bar = bar
+                .child(
+                    small(widgets::button(
+                        theme,
+                        "save-query",
+                        "Save",
+                        ButtonKind::Ghost,
+                        true,
+                    ))
+                    .tooltip(widgets::tooltip(
+                        if saved {
+                            "Update saved query"
+                        } else {
+                            "Save query"
+                        },
+                        "⌘S",
+                    ))
+                    .on_click(cx.listener(|this, _, w, cx| this.save_query(false, w, cx))),
+                )
                 .child(
                     small(widgets::button(
                         theme,

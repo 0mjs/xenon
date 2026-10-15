@@ -87,6 +87,8 @@ pub(crate) struct Prefs {
     /// Ask before statements that change every row or can't be undone, on
     /// connections that aren't production. (Production always asks.)
     pub confirm_risky: bool,
+    /// Reopen last session's tabs (on saved connections) at launch.
+    pub restore_tabs: bool,
 }
 
 impl Default for Prefs {
@@ -98,6 +100,7 @@ impl Default for Prefs {
             browse_limit: 1_000,
             editor_font: 12.5,
             confirm_risky: true,
+            restore_tabs: true,
         }
     }
 }
@@ -125,6 +128,9 @@ impl Prefs {
         if let Some(value) = get("confirm_risky") {
             prefs.confirm_risky = value != "false";
         }
+        if let Some(value) = get("restore_tabs") {
+            prefs.restore_tabs = value != "false";
+        }
         prefs
     }
 
@@ -137,6 +143,7 @@ impl Prefs {
             ("browse_limit", self.browse_limit.to_string()),
             ("editor_font", self.editor_font.to_string()),
             ("confirm_risky", self.confirm_risky.to_string()),
+            ("restore_tabs", self.restore_tabs.to_string()),
         ];
         for (key, value) in values {
             if let Err(err) = store.set_setting(key, &value) {
@@ -434,6 +441,21 @@ impl Render for SettingsDialog {
             &theme,
             "Data",
             vec![
+                row(
+                    &theme,
+                    "Reopen tabs at launch",
+                    Some(
+                        "Reconnects the saved connections you had open and brings back their tabs.",
+                    ),
+                    div()
+                        .id("restore-tabs")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.change(cx, |p| p.restore_tabs = !p.restore_tabs)
+                        }))
+                        .child(widgets::checkbox(&theme, prefs.restore_tabs)),
+                )
+                .into_any_element(),
                 row(
                     &theme,
                     "Query history",

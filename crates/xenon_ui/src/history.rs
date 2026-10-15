@@ -156,14 +156,14 @@ impl Workspace {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// Compact relative time: "now", "5m", "3h", "2d".
-fn ago(elapsed_ms: i64) -> String {
+pub(crate) fn ago(elapsed_ms: i64) -> String {
     let seconds = elapsed_ms.max(0) / 1000;
     match seconds {
         0..60 => "now".into(),

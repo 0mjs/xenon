@@ -52,6 +52,7 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 | `⇧⌘↵` | Run everything in the editor (or the selection) |
 | `⌘E` | Explain the statement under the cursor |
 | `⌘.` | Cancel the running query |
+| `⌘S` | Save the query (or a table's staged changes) |
 | `⇧⌘S` | Export results: CSV, Excel, JSON, SQL inserts, Markdown, TSV |
 | `⌘T` / `⌘W` | New / close query tab |
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab (also `⇧⌘]` / `⇧⌘[`) |
