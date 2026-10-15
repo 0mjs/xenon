@@ -770,6 +770,8 @@ impl Workspace {
             EditorState::new(window, cx)
                 .language("sql")
                 .line_number(true)
+                // ⌘F finds, ⇧⌘F replaces.
+                .searchable(true)
                 .placeholder("-- Write SQL here")
         });
         let (title, browse) = match browse {
@@ -3916,6 +3918,8 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(cx.listener(Self::format_sql))
+            .on_action(cx.listener(Self::toggle_comment))
             .on_action(
                 cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(true, cx)),
             )

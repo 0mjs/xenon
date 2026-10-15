@@ -5,6 +5,7 @@ mod confirm;
 mod connect;
 mod detect;
 mod discover;
+mod editing;
 // Saving staged edits lives in its own crate, so CI can test it against every engine.
 use xenon_edit as edits;
 mod explorer;
@@ -40,6 +41,8 @@ actions!(
         ShowConnections,
         OpenSettings,
         CheckForUpdates,
+        FormatSql,
+        ToggleComment,
         EditCell,
         DeleteRows,
         AddRow,
@@ -157,6 +160,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-i", ToggleInspector, Some("Workspace")),
         KeyBinding::new("cmd-e", Explain, Some("Workspace")),
         KeyBinding::new("cmd-e", Explain, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("alt-shift-f", FormatSql, Some(EDITOR_CONTEXT)),
+        KeyBinding::new("cmd-/", ToggleComment, Some(EDITOR_CONTEXT)),
         KeyBinding::new("up", MoveUp, Some(GRID_CONTEXT)),
         KeyBinding::new("down", MoveDown, Some(GRID_CONTEXT)),
         KeyBinding::new("left", MoveLeft, Some(GRID_CONTEXT)),

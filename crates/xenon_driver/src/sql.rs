@@ -879,9 +879,102 @@ pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> Stri
     out
 }
 
+/// Whether `a` and `b` are the same SQL, differing only in whitespace between
+/// tokens: strings, quoted names, dollar-quoted bodies and comments must match
+/// exactly. A formatter's output is used only when this holds, so it can't, say,
+/// join a line onto a `-- comment` and comment out the code after it.
+pub fn same_code(a: &str, b: &str, mysql: bool) -> bool {
+    let lexing = if mysql {
+        Lexing::Mysql
+    } else {
+        Lexing::Standard
+    };
+    tokens(a, lexing) == tokens(b, lexing)
+}
+
+const OPERATOR: &[u8] = b"<>=!~+-*/%|&^@#:?";
+
+/// `sql` as a sequence of tokens with whitespace between them dropped.
+fn tokens(sql: &str, lexing: Lexing) -> Vec<&str> {
+    let bytes = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(code) = executable_comment_start(bytes, i, lexing) {
+            out.push(&sql[i..code]);
+            i = code;
+            continue;
+        }
+        if let Some(end) = comment_end(bytes, i, lexing) {
+            out.push(sql[i..end].trim_end());
+            i = end;
+            continue;
+        }
+        let end = match bytes[i] {
+            b'\'' | b'"' | b'`' => skip_quoted(bytes, i, backslash_escapes(sql, i, lexing)),
+            b'$' if lexing == Lexing::Standard => skip_dollar_quoted(sql, i),
+            b if b.is_ascii_whitespace() => {
+                i += 1;
+                continue;
+            }
+            // A word or number, as one token.
+            b if b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80 => (i..bytes.len())
+                .find(|&j| {
+                    !(bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] >= 0x80)
+                })
+                .unwrap_or(bytes.len()),
+            // An operator (`<=`, `::`, `->>`), as one token: `< =` isn't `<=`.
+            b if OPERATOR.contains(&b) => (i..bytes.len())
+                .find(|&j| !OPERATOR.contains(&bytes[j]) || comment_end(bytes, j, lexing).is_some())
+                .unwrap_or(bytes.len()),
+            // Brackets, commas, dots, semicolons: one each.
+            _ => i + 1,
+        };
+        out.push(&sql[i..end]);
+        i = end;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_code_ignores_layout_but_nothing_else() {
+        assert!(same_code(
+            "select a,b from t",
+            "select\n  a,\n  b\nfrom\n  t",
+            false
+        ));
+        // String contents, quoted names and comments must be untouched.
+        assert!(!same_code("select 'a  b'", "select 'a b'", false));
+        assert!(!same_code(
+            "select \"two  words\"",
+            "select \"two words\"",
+            false
+        ));
+        assert!(!same_code("select $$ a  b $$", "select $$ a b $$", false));
+        // Joining a line onto a comment would comment out the code after it.
+        assert!(!same_code(
+            "select a -- note\nfrom t",
+            "select a -- note from t",
+            false
+        ));
+        assert!(!same_code(
+            "select a # note\nfrom t",
+            "select a # note from t",
+            true
+        ));
+        assert!(same_code(
+            "select a -- note\nfrom t",
+            "select\n  a -- note\nfrom\n  t",
+            false
+        ));
+        // Splitting or joining tokens changes the code.
+        assert!(!same_code("select a < = b", "select a <= b", false));
+        assert!(!same_code("select ab", "select a b", false));
+    }
 
     #[test]
     fn parameters_are_found_outside_strings_comments_and_casts() {

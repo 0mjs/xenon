@@ -6,9 +6,10 @@ use gpui_component::Root;
 use gpui_platform::application;
 use xenon_ui::{
     CancelQuery, CheckForUpdates, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection,
-    Explain, Launch, NewConnection, NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab,
-    Quit, RunAll, RunQuery, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer,
-    ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme, Workspace,
+    Explain, FormatSql, Launch, NewConnection, NewTab, NextTab, OpenFile, OpenPalette,
+    OpenSettings, PrevTab, Quit, RunAll, RunQuery, ShowConnections, ShowExplorer, ShowHistory,
+    ToggleComment, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme,
+    Workspace,
 };
 
 fn main() {
@@ -87,6 +88,9 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Run All", RunAll),
             MenuItem::action("Explain", Explain),
             MenuItem::action("Cancel", CancelQuery),
+            MenuItem::separator(),
+            MenuItem::action("Format SQL", FormatSql),
+            MenuItem::action("Toggle Comment", ToggleComment),
             MenuItem::separator(),
             MenuItem::action("Copy Cells", CopySelection),
             MenuItem::action("Copy as CSV", CopyCsv),

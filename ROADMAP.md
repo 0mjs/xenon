@@ -100,7 +100,7 @@ so it can join the test fleet.
 | ✅ Run a selection; run several statements and get one result tab each | 0.5 |
 | ✅ Query parameters (`:name`, `$1`, `?`) with a fill-in prompt that remembers values | 0.5 |
 | ✅ Saved queries (⌘S, a Saved panel with filter) and reopening last session's tabs at launch. Still to do: folders | 0.4 |
-| Format SQL (per dialect), comment toggle, multi-cursor, find/replace | 0.5 |
+| ✅ Format SQL (⌥⇧F; checked to change only layout, so a dialect it doesn't know is left alone), comment toggle (⌘/), multi-cursor (⌥⌘↑/↓), find/replace (⌘F, ⇧⌘F) | 0.5 |
 | Inline errors with position, plus "did you mean" for unknown columns and tables | 0.5 |
 | Visual EXPLAIN plan: tree plus timings, slowest node highlighted | 0.6 |
 | Snippets, plus a scratchpad that survives restarts | 1.0 |

@@ -512,6 +512,32 @@ fn snapshots() {
             assert!(w.parameters.is_some(), "no prompt for :status and :min");
             w.fill_parameters(&["refunded", "100"], window, cx);
         });
+        // Format SQL and Toggle Comment, through the editor.
+        shot.act(|w, window, cx| {
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |e, cx| {
+                e.set_value("select a, b from t where a = 1;", window, cx)
+            });
+            w.format_sql(&crate::FormatSql, window, cx);
+            let text = editor.read(cx).value().to_string();
+            assert_eq!(text, "select\n  a,\n  b\nfrom\n  t\nwhere\n  a = 1;");
+            editor.update(cx, |e, cx| e.set_selected_range(0..text.len(), cx));
+            w.toggle_comment(&crate::ToggleComment, window, cx);
+            assert!(editor.read(cx).value().starts_with("-- select\n--   a,"));
+            w.toggle_comment(&crate::ToggleComment, window, cx);
+            assert_eq!(editor.read(cx).value().to_string(), text);
+            editor.update(cx, |e, cx| {
+                e.set_value(
+                    "select id, status, total from orders\n\
+                     where status = :status and total > :min and status = :status\n\
+                     order by id limit 3;",
+                    window,
+                    cx,
+                )
+            });
+            w.run(RunScope::All, window, cx);
+            w.fill_parameters(&["refunded", "100"], window, cx);
+        });
         shot.save(&format!("40-parameters-{suffix}"));
         shot.act(|w, window, cx| w.finish_parameters(window, cx));
         assert!(shot.settle(10, |w| !w.is_running()));
