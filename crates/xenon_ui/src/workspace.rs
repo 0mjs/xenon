@@ -3636,6 +3636,14 @@ impl Workspace {
         }
     }
 
+    /// Freeze the side panel partway through opening, for a snapshot.
+    #[cfg(test)]
+    pub(crate) fn slide_open_for_test(&mut self, seconds_ago: f32) {
+        self.show_side_panel = true;
+        self.side_panel_since =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs_f32(seconds_ago));
+    }
+
     /// How far open the side panel is, from 0 to 1, easing as it slides.
     fn side_panel_open(&self, window: &Window) -> f32 {
         let progress = self.side_panel_since.map_or(1., |since| {
@@ -3712,6 +3720,8 @@ impl Render for Workspace {
                     div()
                         .w(px((self.side_panel_width + gap) * open))
                         .flex_none()
+                        // A row, so the panel stretches to full height as it does unwrapped.
+                        .flex()
                         .overflow_hidden()
                         // Fading a solid panel would show the darker frame through it.
                         .when(!self.classic(), |el| el.opacity(open))

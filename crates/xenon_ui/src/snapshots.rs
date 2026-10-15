@@ -334,6 +334,9 @@ fn snapshots() {
             w.set_prefs(prefs, window, cx);
         });
         shot.save(&format!("35-classic-{suffix}"));
+        // Halfway through sliding open, the panel still fills its height.
+        shot.act(|w, _, _| w.slide_open_for_test(0.06));
+        shot.save(&format!("36-classic-sliding-{suffix}"));
         shot.act(|w, window, cx| {
             let prefs = crate::settings::Prefs {
                 layout: crate::theme::Layout::Floating,
