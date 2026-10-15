@@ -911,6 +911,24 @@ mod tests {
     }
 
     #[test]
+    fn live_conformance() {
+        let Some(conn) = live() else { return };
+        xenon_driver::conformance::run(
+            &conn,
+            &xenon_driver::conformance::Dialect {
+                integer: "integer",
+                text: "text",
+                decimal: "numeric(12,2)",
+                real: "double precision",
+                blob: "bytea",
+                series: |n| format!("select i from generate_series(1, {n}) as g(i)"),
+                slow: "select pg_sleep(5)",
+                rollback: "rollback",
+            },
+        );
+    }
+
+    #[test]
     fn live_describe() {
         let Some(conn) = live() else { return };
         conn.execute(

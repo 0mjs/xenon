@@ -10,8 +10,8 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Batch, InterruptHandle, OpenFlags};
 use xenon_driver::{
     CancelHandle, Column, ColumnInfo, Connection, Feed, ForeignKey, IndexInfo, ObjectColumn,
-    ObjectKind, Progress, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject, TableInfo,
-    Value, referential_action,
+    ObjectKind, Progress, QueryError, QueryOutcome, QueryResult, ResultSet, Schema, SchemaObject,
+    TableInfo, Value, referential_action,
 };
 
 pub struct SqliteConnection {
@@ -104,74 +104,7 @@ impl Connection for SqliteConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
-        let conn = self.lock()?;
-        let started = Instant::now();
-        let mut feed = Feed::new(progress);
-        let mut cancelled = false;
-        let mut batch = Batch::new(&conn, sql);
-        let mut outcome = None;
-        let mut statements = 0;
-
-        while let Some(mut stmt) = batch.next()? {
-            statements += 1;
-            if stmt.column_count() == 0 {
-                outcome = Some(QueryOutcome::Affected(stmt.execute([])? as u64));
-                continue;
-            }
-
-            let columns: Vec<Column> = stmt
-                .columns()
-                .iter()
-                .map(|c| Column {
-                    name: c.name().to_string(),
-                    type_name: c.decl_type().map(str::to_string),
-                })
-                .collect();
-            let width = columns.len();
-            let mut result = ResultSet {
-                columns,
-                ..Default::default()
-            };
-            feed.next_set();
-            let mut rows = stmt.query([])?;
-            loop {
-                let row = match rows.next() {
-                    Ok(Some(row)) => row,
-                    Ok(None) => break,
-                    // Interrupted (cancel) while reading: keep the rows read.
-                    Err(rusqlite::Error::SqliteFailure(err, _))
-                        if err.code == rusqlite::ErrorCode::OperationInterrupted
-                            && !result.rows.is_empty() =>
-                    {
-                        cancelled = true;
-                        result.truncated = true;
-                        break;
-                    }
-                    Err(err) => return Err(err.into()),
-                };
-                if result.rows.len() == row_limit {
-                    result.truncated = true;
-                    break;
-                }
-                let mut values = Vec::with_capacity(width);
-                for ix in 0..width {
-                    values.push(to_value(row.get_ref(ix)?));
-                }
-                result.rows.push(values);
-                feed.read(&result, |_| {});
-            }
-            outcome = Some(QueryOutcome::Rows(result));
-            if cancelled {
-                break;
-            }
-        }
-
-        Ok(QueryResult {
-            outcome: outcome.ok_or_else(|| anyhow!("nothing to run"))?,
-            statements,
-            elapsed: started.elapsed(),
-            cancelled,
-        })
+        self.run(sql, row_limit, progress).map_err(query_error)
     }
 
     fn introspect(&self) -> Result<Vec<Schema>> {
@@ -389,6 +322,101 @@ impl Connection for SqliteConnection {
     }
 }
 
+impl SqliteConnection {
+    fn run(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult> {
+        let conn = self.lock()?;
+        let started = Instant::now();
+        let mut feed = Feed::new(progress);
+        let mut cancelled = false;
+        let mut batch = Batch::new(&conn, sql);
+        let mut outcome = None;
+        let mut statements = 0;
+
+        while let Some(mut stmt) = batch.next()? {
+            statements += 1;
+            if stmt.column_count() == 0 {
+                outcome = Some(QueryOutcome::Affected(stmt.execute([])? as u64));
+                continue;
+            }
+
+            let columns: Vec<Column> = stmt
+                .columns()
+                .iter()
+                .map(|c| Column {
+                    name: c.name().to_string(),
+                    type_name: c.decl_type().map(str::to_string),
+                })
+                .collect();
+            let width = columns.len();
+            let mut result = ResultSet {
+                columns,
+                ..Default::default()
+            };
+            feed.next_set();
+            let mut rows = stmt.query([])?;
+            loop {
+                let row = match rows.next() {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    // Interrupted (cancel) while reading: keep the rows read.
+                    Err(rusqlite::Error::SqliteFailure(err, _))
+                        if err.code == rusqlite::ErrorCode::OperationInterrupted
+                            && !result.rows.is_empty() =>
+                    {
+                        cancelled = true;
+                        result.truncated = true;
+                        break;
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                if result.rows.len() == row_limit {
+                    result.truncated = true;
+                    break;
+                }
+                let mut values = Vec::with_capacity(width);
+                for ix in 0..width {
+                    values.push(to_value(row.get_ref(ix)?));
+                }
+                result.rows.push(values);
+                feed.read(&result, |_| {});
+            }
+            outcome = Some(QueryOutcome::Rows(result));
+            if cancelled {
+                break;
+            }
+        }
+
+        Ok(QueryResult {
+            outcome: outcome.ok_or_else(|| anyhow!("nothing to run"))?,
+            statements,
+            elapsed: started.elapsed(),
+            cancelled,
+        })
+    }
+}
+
+/// SQLite's own message as a [`QueryError`], like the other engines' errors.
+fn query_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast::<rusqlite::Error>() {
+        Ok(rusqlite::Error::SqliteFailure(_, Some(message))) => QueryError {
+            message,
+            position: None,
+        }
+        .into(),
+        Ok(other) => QueryError {
+            message: other.to_string(),
+            position: None,
+        }
+        .into(),
+        Err(err) => err,
+    }
+}
+
 fn to_value(value: ValueRef<'_>) -> Value {
     match value {
         ValueRef::Null => Value::Null,
@@ -466,6 +494,29 @@ mod tests {
                 .indexes
                 .iter()
                 .any(|i| i.unique && i.columns == ["email"])
+        );
+    }
+
+    #[test]
+    fn conformance() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        xenon_driver::conformance::run(
+            &db,
+            &xenon_driver::conformance::Dialect {
+                integer: "integer",
+                text: "text",
+                decimal: "numeric",
+                real: "real",
+                blob: "blob",
+                series: |n| {
+                    format!(
+                        "with recursive s(i) as (select 1 union all select i + 1 from s where i < {n}) select i from s"
+                    )
+                },
+                slow: "with recursive c(x) as (select 1 union all select x + 1 from c where x < 1000000000) \
+                       select count(*) from c",
+                rollback: "rollback",
+            },
         );
     }
 

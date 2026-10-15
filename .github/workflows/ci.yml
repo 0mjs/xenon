@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Every driver against a real server of each engine: the shared conformance
+  # suite (xenon_driver::conformance) plus each driver's own live tests.
+  drivers:
+    name: Drivers × real databases
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start the test fleet
+        run: |
+          python3 dev/seed/generate.py --size small
+          docker compose -f dev/fleet/compose.yml up -d --wait postgres mysql mariadb mssql
+          # SQL Server has no init-script folder: load its seed by hand.
+          docker compose -f dev/fleet/compose.yml exec -T mssql \
+            /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Xenon-fleet-1 -C -b \
+            -f 65001 -i /seed/mssql.sql -o /dev/null
+
+      - name: Test drivers
+        env:
+          XENON_TEST_PG_URL: postgres://xenon:xenon@127.0.0.1:55432/shop
+        run: >
+          cargo test
+          -p xenon_driver -p xenon_sqlite -p xenon_postgres -p xenon_mysql -p xenon_mssql
+          -- --include-ignored
+
+      - name: Server logs
+        if: failure()
+        run: docker compose -f dev/fleet/compose.yml logs --tail 200
+
+  # The app: formatting, lints and every unit test, on the platform it ships for.
+  app:
+    name: macOS build, lints and tests
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace

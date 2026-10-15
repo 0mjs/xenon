@@ -951,6 +951,29 @@ mod tests {
 mod live {
     use super::*;
 
+    #[test]
+    #[ignore]
+    fn conformance() {
+        xenon_driver::conformance::run(
+            &fleet(),
+            &xenon_driver::conformance::Dialect {
+                integer: "int",
+                text: "nvarchar(max)",
+                decimal: "decimal(12,2)",
+                real: "float",
+                blob: "varbinary(max)",
+                series: |n| {
+                    format!(
+                        "select top ({n}) row_number() over (order by (select null)) as i \
+                         from sys.all_objects a cross join sys.all_objects b"
+                    )
+                },
+                slow: "waitfor delay '00:00:05'",
+                rollback: "rollback",
+            },
+        );
+    }
+
     fn fleet() -> MssqlConnection {
         MssqlConnection::connect_options(&ConnectOptions {
             host: "127.0.0.1".into(),

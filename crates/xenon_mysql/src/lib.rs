@@ -791,6 +791,36 @@ mod tests {
 mod live {
     use super::*;
 
+    const DIALECT: xenon_driver::conformance::Dialect = xenon_driver::conformance::Dialect {
+        integer: "int",
+        text: "text",
+        decimal: "decimal(12,2)",
+        real: "double",
+        blob: "blob",
+        // MySQL stops recursive CTEs at 1,000 rows unless told otherwise (MariaDB ignores the hint).
+        series: |n| {
+            format!(
+                "with recursive s(i) as (select 1 union all select i + 1 from s where i < {n}) \
+                 select /*+ SET_VAR(cte_max_recursion_depth = 100000000) */ i from s"
+            )
+        },
+        // Not `sleep(5)`: a killed sleep returns 1 instead of failing.
+        slow: "select benchmark(2000000000, sha2('xenon', 256))",
+        rollback: "rollback",
+    };
+
+    #[test]
+    #[ignore]
+    fn conformance_mysql() {
+        xenon_driver::conformance::run(&fleet(53306), &DIALECT);
+    }
+
+    #[test]
+    #[ignore]
+    fn conformance_mariadb() {
+        xenon_driver::conformance::run(&fleet(53307), &DIALECT);
+    }
+
     fn fleet(port: u16) -> MysqlConnection {
         MysqlConnection::connect_options(&ConnectOptions {
             host: "127.0.0.1".into(),

@@ -5,6 +5,7 @@
 //! a separate [`CancelHandle`] so it can be triggered while a query holds the
 //! connection.
 
+pub mod conformance;
 pub mod export;
 pub mod sql;
 
