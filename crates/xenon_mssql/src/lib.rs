@@ -1018,9 +1018,16 @@ mod tests {
 mod live {
     use super::*;
 
+    /// The live tests share one server and its catalog: run them one at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     #[ignore]
     fn lock_wait_gives_up_even_after_a_reconnect() {
+        let _serial = serial();
         let holder = fleet();
         let waiter = MssqlConnection::connect_options(&ConnectOptions {
             lock_timeout: Some(Duration::from_millis(500)),
@@ -1060,6 +1067,7 @@ mod live {
     #[test]
     #[ignore]
     fn read_only_refuses_writes() {
+        let _serial = serial();
         let conn = MssqlConnection::connect_options(&ConnectOptions {
             read_only: true,
             ..fleet().options.clone()
@@ -1080,6 +1088,7 @@ mod live {
     #[test]
     #[ignore]
     fn conformance() {
+        let _serial = serial();
         xenon_driver::conformance::run(
             &fleet(),
             &xenon_driver::conformance::Dialect {
@@ -1124,6 +1133,7 @@ mod live {
     #[test]
     #[ignore]
     fn everything_against_the_fleet() {
+        let _serial = serial();
         let conn = fleet();
         assert!(
             conn.server_version().starts_with("sqlserver 16."),

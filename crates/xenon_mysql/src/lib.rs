@@ -632,15 +632,14 @@ impl Connection for MysqlConnection {
     }
 
     fn in_transaction(&self) -> Option<bool> {
-        let query = if self.mariadb {
-            "select @@in_transaction"
-        } else {
-            // Needs the PROCESS privilege; without it, Xenon can't tell.
-            "select count(*) > 0 from information_schema.innodb_trx \
-             where trx_mysql_thread_id = connection_id()"
-        };
+        // MySQL has no reliable way to ask (`information_schema.innodb_trx` is a
+        // snapshot refreshed every 100 ms, and needs PROCESS): Xenon follows
+        // `begin` / `commit` in what ran instead. MariaDB can say.
+        if !self.mariadb {
+            return None;
+        }
         self.lock()
-            .query_first::<i64, _>(query)
+            .query_first::<i64, _>("select @@in_transaction")
             .ok()
             .flatten()
             .map(|open| open != 0)
@@ -877,6 +876,12 @@ mod tests {
 mod live {
     use super::*;
 
+    /// The live tests share one server and its catalog: run them one at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     const DIALECT: xenon_driver::conformance::Dialect = xenon_driver::conformance::Dialect {
         integer: "int",
         text: "text",
@@ -904,12 +909,14 @@ mod live {
     #[test]
     #[ignore]
     fn conformance_mysql() {
+        let _serial = serial();
         xenon_driver::conformance::run(&fleet(53306), &DIALECT);
     }
 
     #[test]
     #[ignore]
     fn conformance_mariadb() {
+        let _serial = serial();
         xenon_driver::conformance::run(
             &fleet(53307),
             &xenon_driver::conformance::Dialect {
@@ -1064,12 +1071,14 @@ mod live {
     #[test]
     #[ignore]
     fn mysql() {
+        let _serial = serial();
         check(53306, false);
     }
 
     #[test]
     #[ignore]
     fn mariadb() {
+        let _serial = serial();
         check(53307, true);
     }
 
@@ -1077,6 +1086,7 @@ mod live {
     #[test]
     #[ignore]
     fn tls_modes() {
+        let _serial = serial();
         for port in [53306, 53307] {
             let with = |ssl| {
                 MysqlConnection::connect_options(&ConnectOptions {
@@ -1101,6 +1111,7 @@ mod live {
     #[test]
     #[ignore]
     fn read_only_refuses_writes_and_schema_changes() {
+        let _serial = serial();
         for port in [53306, 53307] {
             let conn = MysqlConnection::connect_options(&ConnectOptions {
                 host: "127.0.0.1".into(),
@@ -1136,6 +1147,7 @@ mod live {
     #[test]
     #[ignore]
     fn lock_wait_gives_up() {
+        let _serial = serial();
         for port in [53306, 53307] {
             let open = |lock_timeout| {
                 MysqlConnection::connect_options(&ConnectOptions {

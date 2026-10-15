@@ -4,9 +4,17 @@ Xenon is built to be pointed at databases that matter. This page says what it do
 them, how to set it up for production, and what is still missing before we call it
 production-safe without caveats. It describes what the code does today, not what we hope it does.
 
-**Short version:** with a **read-only database role**, Xenon is safe to use on production
-today. Writing to production through Xenon is guarded (typed confirmation, transactional edits,
-conflict checks), but several gaps below still matter. Read them before you rely on it.
+**Short version:** with a **read-only database role**, Xenon is safe to use on production.
+Writing to production through Xenon is guarded (typed confirmation, server-enforced read-only
+reads, all-or-nothing scripts, transactional edits with conflict checks), and every guard below
+names the automated test that proves it. What isn't proven yet is listed as a gap.
+
+How this page is kept honest: each claim was checked by an independent audit of the code
+(every path that sends SQL, every claim here, and attempts to slip a write past the checks),
+the problems it found were fixed, and each guard now has a test that fails if it breaks. CI
+runs them on every push (`.github/workflows/ci.yml`): the drivers and editing against real
+Postgres, MySQL, MariaDB and SQL Server on Linux, SQLite and DuckDB everywhere, and the app's
+guards in a headless test on macOS.
 
 ## Set up a production connection
 
@@ -23,61 +31,40 @@ conflict checks), but several gaps below still matter. Read them before you rely
 
 ## What Xenon guards today
 
-| Guard | How | Notes |
+| Guard | How | Proven by |
 |---|---|---|
-| **Read-only connections** | Postgres: every transaction is read-only (`default_transaction_read_only`), and statements that switch it back (`begin read write`, `set … read write`) are refused. MySQL / MariaDB: the session is read-only, schema changes are refused, and so is switching back. SQLite and DuckDB: the file is opened read-only. SQL Server: statements recognised as writes are refused. | SQL Server has no read-only session, so its guard depends on recognising writes (see gaps). The role is the real guarantee everywhere. |
-| **Production asks first** | Any statement recognised as a write (insert, update, delete, merge, DDL, grants, `exec`/`call`/`do`, `select … into`, `explain analyze` of a write) shows the SQL and needs the connection's name typed. | Recognition reads the SQL text; see gaps. |
-| **Risky statements ask everywhere** | `DROP`, `TRUNCATE`, `ALTER`, and `UPDATE`/`DELETE` with no `WHERE` ask on every connection (Settings → Safety). | On by default. |
-| **Editing data** | Changes are staged (amber) and shown as SQL before saving. Saving runs them in **one transaction**: every update and delete must touch **exactly one row**, found by its primary key, and an update only applies if the cells you edited **still hold what you loaded**. Otherwise nothing is saved and it says why. | Tables without a primary key, views and query results can't be edited. Production always shows the review. |
-| **Scripts on production are all or nothing** | On production, a script of several statements that writes runs as one transaction: if any statement fails, it's rolled back and Xenon says nothing was kept; when it succeeds, it says it ran as one. Scripts that manage their own transaction (`begin`, `commit`, `savepoint`…) are left alone. | MySQL commits schema changes (`create`, `alter`…) on its own, so a script mixing them isn't atomic there. |
-| **Production time limits** | A query on production is stopped after 1 minute, and a statement waits at most 5 seconds for another session's lock (Postgres `lock_timeout`, MySQL `innodb_lock_wait_timeout` / `lock_wait_timeout`, SQL Server `LOCK_TIMEOUT`), so nothing hangs or queues others behind it. | Both in Settings → Safety; the lock wait applies from the next connect. |
-| **Open transactions are shown** | After every query Xenon asks the server whether a transaction is open. If one is, the status bar says **transaction open** with Commit and Roll back, and disconnecting asks first. | DuckDB can't say, so it shows nothing; MySQL needs the `PROCESS` privilege to tell (MariaDB doesn't). Quitting doesn't ask yet. |
-| **Row limits never undo a write** | When a write returns rows (`delete … returning`, SQL Server's `output`), Xenon reads and drops the rows past the limit rather than stopping the statement, which would roll it back. | Checked by the conformance suite on every engine that can. |
-| **Cancel stops the server, not just the screen** | ⌘. cancels on the server (Postgres cancel request, `KILL QUERY`, SQLite/DuckDB interrupt, SQL Server `KILL`). Stopping a query at the row limit waits for the cancel to land, so it can't hit the next query. | SQL Server ends the session to cancel; see gaps. |
-| **Secrets** | Passwords and SSH passphrases live in the macOS Keychain, never in Xenon's files. SSH host keys are checked against Xenon's own `known_hosts`; a new key is recorded, a changed one is refused. | |
-| **Nothing phones home** | Xenon talks only to the databases and bastions you connect to. No telemetry, no analytics, no update pings. | |
-| **Signed and notarized** | Releases are signed with a Developer ID and notarized by Apple. | |
-| **Tested against real servers** | One conformance suite (values round-trip exactly, affected rows, row limits, streaming, errors, quoting, rollback, keys, cancel, capped writes) runs against Postgres, MySQL, MariaDB, SQL Server, SQLite and DuckDB on every push. | See `.github/workflows/ci.yml`. |
+| **Spotting writes** | Deny by default: only statements known to read (`select` without `into`, `show`, `explain` without `analyze`, `use`, transaction control…) pass, and only when no data-changing verb or side-effect function (`delete`, `drop`, `exec`, `nextval`, `pg_terminate_backend`, `xp_cmdshell`…) appears anywhere in them. Each script is read as standard SQL and again as MySQL reads it (`#` comments, backslash escapes, `/*! … */` and `/*M! … */` run as code), and the worse reading counts. This drives the production prompt, SQL Server read-only and the wrapping below. | `xenon_driver` `sql::tests`: `mysql_quoting_tricks_cant_hide_a_write`, `sql_server_batches_without_semicolons_count_every_statement`, `anything_not_known_to_read_counts_as_a_write`, `assess_flags_writes_and_destruction` |
+| **Read-only connections** | Postgres: every transaction read-only, switching back refused, and after every statement Xenon checks the session is still read-only (however it was switched, it goes straight back, with an error). MySQL / MariaDB: a read-only session, every recognised write refused (so DDL, `prepare … execute`, `call`), switching back refused, and the same check after every statement. SQLite: the file opened read-only. DuckDB: database files opened read-only, and every recognised write refused (so CSV and Parquet files, and `copy … to`, too). SQL Server: every recognised write refused. | `xenon_postgres::live_read_only_refuses_writes` (including `set_config` and a `do` block that builds the statement at run time); `xenon_mysql::live::read_only_refuses_writes_and_schema_changes` (MySQL and MariaDB); `xenon_mssql::live::read_only_refuses_writes`; `xenon_duckdb::read_only_holds_for_files_and_never_fetches_extensions`; `xenon_sqlite::open_rejects_missing_and_non_database_files` |
+| **Production asks first** | Every way SQL leaves the editor (Run, Run all, a selection, Explain, Fetch all, history, saved queries, browsing and filters) goes through one guard: a recognised write shows the SQL and needs the connection's name typed. Nothing else runs while a prompt is open, and the statement shown is the one that runs. | `xenon_ui` headless test (`snapshots.rs`): a production write and Fetch all re-running one both ask |
+| **Production reads can't write** | On Postgres, MySQL and MariaDB, what looks like a read runs in `start transaction read only`, so a write hidden in it (a function that writes) is refused by the server. | `xenon_driver::conformance` `read_only_transaction` (Postgres, MySQL, MariaDB) |
+| **Scripts on production are all or nothing** | A script of several statements that writes runs as one transaction; if any statement fails, it's rolled back and Xenon says nothing was kept. If the transaction can't start, nothing runs. | `xenon_ui` headless test: a failing production script reports nothing kept, and its first change is gone |
+| **One query at a time per connection** | A second run on a connection that's busy is refused, so one tab's transaction can't swallow another's statements. | Reviewed in the audit; no automated test yet (see gaps) |
+| **Production time limits** | A production query is stopped after 1 minute (except on SQL Server inside a transaction, where stopping would end the session: there it says so instead), and a statement waits at most 5 seconds for a lock. Both in Settings → Safety. | Lock wait: `xenon_postgres::live_lock_wait_gives_up`, `xenon_mysql::live::lock_wait_gives_up` (MySQL and MariaDB), `xenon_mssql::live::lock_wait_gives_up_even_after_a_reconnect`. Time limit: reviewed, no automated test yet |
+| **Open transactions are shown and kept** | After every query Xenon asks the server; MySQL (which has no reliable way to say) and DuckDB are followed through `begin` / `commit` in what ran. With one open: the status bar says so with Commit and Roll back; disconnecting, quitting (⌘Q, the menu or closing the window) and cancelling on SQL Server ask first; saving grid edits waits until it's ended; and on SQL Server the row limit reads on instead of ending the session. | `xenon_driver::conformance` `transactions` (Postgres, MariaDB, SQL Server, SQLite); `sql::tests::transaction_effect_follows_the_last_begin_or_commit`; headless test: the badge and the quit prompt |
+| **Editing data** | Staged, saved in one transaction; each update and delete must touch exactly one row, found by its primary key, and only if the row still holds what you loaded (edited cells for an update, every column for a delete). Production always shows the SQL first; elsewhere, Review SQL does. | `xenon_edit` tests (SQLite and DuckDB) including `an_edit_never_overwrites_someone_elses_change` and `a_delete_never_removes_a_row_someone_else_changed`; `xenon_edit::live` against Postgres, MySQL, MariaDB and SQL Server |
+| **Row limits never undo a write** | A write that returns more rows than the limit (`delete … returning`, SQL Server `output`) reads and drops the rest instead of stopping, which would roll it back. | `xenon_driver::conformance` `capped_write` (Postgres, MariaDB, SQL Server, SQLite, DuckDB) |
+| **Cancel stops the server, not the next query** | ⌘. cancels on the server; a row-limit stop waits until it has landed. | `conformance` `cancel` and `row_limit` (20 rounds) on every engine |
+| **Values are written back exactly** | Values round-trip through Xenon's SQL literals exactly (quotes, backslashes, emoji, decimals, blobs, NULL), whatever Postgres's `standard_conforming_strings` or MySQL's `NO_BACKSLASH_ESCAPES`. | `conformance` `round_trip` on every engine (numbers compared exactly) |
+| **Pasted URLs keep their guards** | A pasted or launched URL for a saved database takes that connection's production label and read-only flag. | Reviewed in the audit; no automated test yet |
+| **Secrets** | Passwords live in the macOS Keychain, never in Xenon's files; SSH host keys are checked against Xenon's own `known_hosts`, new ones recorded, changed ones refused (`StrictHostKeyChecking=accept-new`). | Reviewed in the audit; no automated test in CI yet (see gaps) |
+| **Nothing phones home** | Xenon talks only to the databases and bastions you connect to; DuckDB is set never to download or load extensions by itself. | `xenon_duckdb::read_only_holds_for_files_and_never_fetches_extensions`; no other networking code in Xenon |
+| **Signed and notarized** | Releases are signed with a Developer ID and notarized by Apple. | `spctl` check in `scripts/release-macos.sh` (run by hand for each release) |
 
 ## Known gaps
 
-What stood between Xenon and "safe on production, no caveats", most important first, and the
-release that closes each. Every fixable gap is closed for **0.3** (✅: done on `main`, shipping
-in 0.3); the last three are inherent and stay documented.
+What's still between Xenon and "safe on production, no caveats", most important first.
 
-| # | Gap | Severity | Plan | Fixed in |
-|---|---|---|---|---|
-| 1 | **Recognising writes reads the SQL, not the server.** Side effects inside reads (`select nextval(…)`, `select setval(…)`, `select pg_terminate_backend(…)`, `dblink_exec`, a function that writes) don't count as writes: production may not ask, and a read-only SQL Server connection may let them through. | High | On production, run statements recognised as reads inside a read-only transaction (Postgres, MySQL, MariaDB), so the server refuses a hidden write. SQL Server has no read-only transaction: there the read-only role stays the guarantee. | ✅ 0.3 |
-| 2 | **Opening a table can be expensive.** Sorting a browsed table adds `order by`; on a very large table without an index on that column, that's a full scan. | High | Warn before sorting large tables on unindexed columns, from the Structure view's index list. | ✅ 0.3 |
-| 3 | **TLS defaults to `prefer`**, which encrypts but doesn't verify the server, so it is open to interception on an untrusted network. | Medium | `verify-full` by default for production connections; a warning when production uses less. | ✅ 0.3 |
-| 4 | **History keeps SQL on disk.** Query history and reopened tabs store SQL text, including values typed into it, in `~/Library/Application Support/Xenon/xenon.db`, protected by your macOS account (and FileVault). Today: Settings → Data → Clear history. | Medium | An option not to record history for production connections. | ✅ 0.3 |
-| 5 | **Quitting with a transaction open doesn't ask.** Disconnecting does; quitting ends the session, which rolls the transaction back. | Medium | Ask before quitting, as disconnecting does. | ✅ 0.3 |
-| 6 | **Cancelling on SQL Server ends the session**, which also rolls back an open transaction and loses temporary tables and session settings. | Medium | Say so before cancelling when a transaction is open. | ✅ 0.3 |
-| 7 | **Deletes don't check the row is unchanged.** Updates from the grid only apply if the edited cells still hold what you loaded; a delete only checks the row still exists. | Medium | The same check for deletes. | ✅ 0.3 |
-| 8 | **Saving edits on real servers isn't in CI.** Editing is tested against SQLite in CI and the other engines locally (`dev/fleet`); the driver-level suite runs on all of them in CI. | Low | Move saving into a crate CI can build on Linux, and run it against every engine. | ✅ 0.3 |
-| 9 | **SQL Server `money`** is exact only below about 900 billion (the driver decodes it as a floating-point number). | Low | Read it exactly, upstream in the driver or by fetching it as text. | 1.0 at the latest |
-| 10 | **Results leave the database when you ask them to.** Copying, exporting and the inspector put data on your clipboard or disk, unencrypted. | By design | That's what they're for; treat exports of production data accordingly. | Documented |
-| 11 | **SSH tunnels listen on `127.0.0.1`.** While a tunnel is open, any process running as you can use it. | By design | The same as `ssh -L`, which Xenon uses. | Documented |
-
-## Checklist to "production-ready"
-
-- [x] Read-only enforced by every engine's session or file mode (and by refusing writes on SQL Server) (0.2)
-- [x] Production confirms every recognised write, with the connection's name typed (0.1)
-- [x] Grid edits: one transaction, exactly one row each, primary key required, no lost updates (0.2)
-- [x] Row limits never roll back a write; a row-limit cancel can't stop the next query (0.2)
-- [x] Secrets in the Keychain; SSH host keys checked (0.1)
-- [x] Conformance suite against every engine in CI (0.2)
-- [x] Statement and lock timeouts, with production defaults (0.2)
-- [x] Open-transaction indicator, with Commit / Roll back, and a prompt before disconnecting (0.2)
-- [x] Scripts as one transaction on production; a failed one says nothing was kept (0.2)
-- [x] Use the server's read-only mode for production reads where it has one (0.3)
-- [x] Warn before sorting large tables on unindexed columns (0.3)
-- [x] `verify-full` by default for production; warn on weaker TLS (0.3)
-- [x] History off for production connections (0.3)
-- [x] A prompt before quitting with a transaction open (0.3)
-- [x] A warning before cancelling on SQL Server with a transaction open (0.3)
-- [x] Deletes from the grid check the row is unchanged (0.3)
-- [x] Editing tests against every engine in CI (0.3)
+| # | Gap | Severity | Plan |
+|---|---|---|---|
+| 1 | **Spotting writes on SQL Server reads the SQL text.** Deny by default makes it strict, but SQL Server has no read-only session or transaction, so a read-only SQL Server connection rests on Xenon reading the SQL right. Use a `db_datareader` login for read-only work. | Medium | Inherent to SQL Server; documented |
+| 2 | **Some guards have no automated test yet:** one query per connection, the production time limit, pasted URLs keeping their guards, the Keychain, and SSH host keys (the SSH tests run locally against the fleet's bastion, not in CI). | Medium | 0.3: tests for each |
+| 3 | **Conflict checks skip some column types.** An edit or delete doesn't check JSON, XML, spatial, floating-point or SQL Server `text` / `ntext` / `image` columns for changes made meanwhile, because they can't be compared exactly. | Low | 0.4: compare them where the engine can |
+| 4 | **The production time limit doesn't cover saving edits** or Commit / Roll back; the lock wait does. | Low | 0.4 |
+| 5 | **History is kept by default.** Settings → Data → Keep history for production turns it off for production connections. | Low | Documented |
+| 6 | **`verify-full` is the default only for new production connections.** An existing connection switched to Production shows a warning instead. | Low | Documented |
+| 7 | **SQL Server `money`** is exact only below about 900 billion (the driver decodes it as a floating-point number). | Low | 1.0 at the latest |
+| 8 | **Results leave the database when you ask them to.** Copying, exporting and the inspector put data on your clipboard or disk, unencrypted. | By design | Documented |
+| 9 | **SSH tunnels listen on `127.0.0.1`.** While a tunnel is open, any process running as you can use it, as with `ssh -L`. | By design | Documented |
 
 ## Reporting a security problem
 
