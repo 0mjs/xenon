@@ -8441,6 +8441,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "libc",
+ "lsp-types",
  "rusqlite",
  "xenon_driver",
  "xenon_mssql",

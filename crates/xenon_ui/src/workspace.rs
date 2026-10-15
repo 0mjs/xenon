@@ -2,6 +2,7 @@
 //! or history), editor and results, inspector, status bar.
 //! Layout follows PLAN.md, "Design direction".
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -26,6 +27,7 @@ use xenon_store::{
 };
 
 use crate::assets;
+use crate::completion::{Catalog, SqlCompletions};
 use crate::confirm::{ConfirmDialog, ConfirmEvent};
 use crate::connect::{ConnectDialog, ConnectEvent, Request, RequestTarget, Subject};
 use crate::detect::{Detected, detect};
@@ -98,6 +100,9 @@ pub(crate) struct Session {
     pub expanded: HashSet<String>,
     pub collapsed_schemas: HashSet<String>,
     pub collapsed: bool,
+    /// What the editor completes against; shared with every tab on this
+    /// connection, and replaced when the schema changes.
+    pub catalog: Rc<RefCell<Option<Rc<Catalog>>>>,
 }
 
 /// Everything needed to open (and maybe remember) a connection.
@@ -624,6 +629,7 @@ impl Workspace {
             saving: false,
         });
         self.active = self.tabs.len() - 1;
+        self.hook_completions(self.active, cx);
         cx.notify();
     }
 
@@ -664,12 +670,27 @@ impl Workspace {
     /// Point a tab at session `id` after connecting: the Connect tab you're on
     /// becomes a query tab for it; otherwise an existing tab for an already
     /// open connection comes forward, or a new query tab opens.
+    /// Point a tab's editor at its connection's schema for autocomplete.
+    fn hook_completions(&self, tab_index: usize, cx: &mut Context<Self>) {
+        let tab = &self.tabs[tab_index];
+        let Some(session) = tab.session.and_then(|id| self.session(id)) else {
+            return;
+        };
+        let provider = Rc::new(SqlCompletions {
+            catalog: session.catalog.clone(),
+        });
+        tab.editor.update(cx, |editor, _| {
+            editor.lsp_mut().completion_provider = Some(provider);
+        });
+    }
+
     fn attach(&mut self, id: usize, existing: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_tab().session.is_none() {
             let number = self.free_query_number();
             let tab = &mut self.tabs[self.active];
             tab.session = Some(id);
             tab.title = format!("Query {number}").into();
+            self.hook_completions(self.active, cx);
         } else if let Some(index) = existing
             .then(|| self.tabs.iter().position(|tab| tab.session == Some(id)))
             .flatten()
@@ -839,6 +860,10 @@ impl Workspace {
                                 }
                             },
                             version: conn.server_version(),
+                            catalog: Rc::new(RefCell::new(Some(Rc::new(Catalog::new(
+                                schemas.clone(),
+                                conn.clone(),
+                            ))))),
                             conn,
                             schemas,
                             name: profile.name,
@@ -1438,6 +1463,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if let (Some(session), Some(schemas)) = (self.session_mut(session_id), schemas) {
+            *session.catalog.borrow_mut() =
+                Some(Rc::new(Catalog::new(schemas.clone(), session.conn.clone())));
             session.schemas = schemas;
         }
         self.reload_history(cx);

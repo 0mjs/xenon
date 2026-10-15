@@ -67,6 +67,10 @@ editor.
 **Browsing a table** (click it in the explorer) opens it in its own tab with a `WHERE` filter;
 sorting there runs on the server, so you see the true top rows.
 
+**Autocomplete** suggests tables after `FROM` / `JOIN`, columns of the tables in your statement
+(through their aliases: `o.` lists `orders`' columns), other schemas' tables, functions and
+keywords, as you type; `⌃Space` opens it anywhere.
+
 **Editing a table:** double-click a cell (or select it and press `↵`), type, and press `↵`; **Set
 NULL** is next to the field. **+ Row** adds a row (empty cells take the column's default), `⌘⌫`
 marks the selected rows for deletion. Changes stay staged, tinted in the grid, until you press

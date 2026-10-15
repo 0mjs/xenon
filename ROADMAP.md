@@ -96,7 +96,7 @@ so it can join the test fleet.
 | Feature | Target |
 |---|---|
 | ✅ Highlighting, run statement under cursor / all, cancel, explain, history, tabs, palette | 0.1 |
-| Autocomplete from the live schema: tables, columns (alias-aware), functions, keywords | 0.4 |
+| ✅ Autocomplete from the live schema: tables, columns (alias-aware), functions, keywords | 0.4 |
 | Run a selection; run several statements and get one result tab each | 0.4 |
 | Query parameters (`:name`, `$1`, `?`) with a fill-in prompt that remembers values | 0.4 |
 | Saved queries in folders, per connection or global; open recent | 0.4 |

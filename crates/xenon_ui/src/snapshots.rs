@@ -289,6 +289,28 @@ fn snapshots() {
         });
         shot.save(&format!("19-saved-{suffix}"));
 
+        // Autocomplete: columns of the aliased table after `o.`.
+        shot.act(|w, window, cx| {
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(
+                    "select o.st\nfrom orders o\njoin customers c on c.id = o.customer_id",
+                    window,
+                    cx,
+                );
+                editor.set_selected_range(11..11, cx);
+                editor.focus(window, cx);
+                editor.show_completions(window, cx);
+            });
+        });
+        shot.save(&format!("20-autocomplete-{suffix}"));
+        shot.act(|w, window, cx| {
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value("select * from orders", window, cx)
+            });
+        });
+
         shot.act(|w, window, cx| w.open_settings(&crate::OpenSettings, window, cx));
         shot.save(&format!("15-settings-{suffix}"));
         shot.act(|w, _, cx| {

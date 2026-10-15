@@ -1,5 +1,6 @@
 pub mod assets;
 mod bench;
+mod completion;
 mod confirm;
 mod connect;
 mod detect;
@@ -102,6 +103,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-n", ShowConnections, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-s", SaveEdits, None),
+        // Autocomplete opens as you type; ⌃Space opens it on demand.
+        KeyBinding::new(
+            "ctrl-space",
+            gpui_component::input::ShowCompletions,
+            Some("Input"),
+        ),
         KeyBinding::new("enter", EditCell, Some(GRID_CONTEXT)),
         KeyBinding::new("cmd-backspace", DeleteRows, Some(GRID_CONTEXT)),
         KeyBinding::new(
