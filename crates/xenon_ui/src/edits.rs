@@ -134,10 +134,25 @@ pub fn statements(
             .join(" and ")
     };
 
+    // `and col = <loaded value>` for each of `columns` that can be compared: the
+    // statement then matches nothing if someone else changed the row meanwhile,
+    // and the save stops instead of overwriting or deleting their change.
+    let unchanged = |row: usize, columns: &mut dyn Iterator<Item = usize>| -> String {
+        columns
+            .filter(|col| !target.key.contains(col) && comparable(conn, &data.columns[*col]))
+            .map(|col| match &data.rows[row][col] {
+                Value::Null => format!(" and {} is null", column(col)),
+                Value::Real(_) => String::new(),
+                old => format!(" and {} = {}", column(col), conn.literal(old)),
+            })
+            .collect()
+    };
+
     let mut out = Vec::new();
     for &row in &edits.deleted {
+        let check = unchanged(row, &mut (0..data.columns.len()));
         out.push(Statement {
-            sql: format!("delete from {name} where {}", key_of(row)),
+            sql: format!("delete from {name} where {}{check}", key_of(row)),
             exactly_one: true,
         });
     }
@@ -153,18 +168,8 @@ pub fn statements(
             .map(|(col, value)| format!("{} = {}", column(*col), conn.literal(value)))
             .collect::<Vec<_>>()
             .join(", ");
-        // Only if the edited cells still hold what was loaded: a row someone
-        // else changed meanwhile then matches nothing, and the save stops
-        // instead of overwriting their change.
-        let unchanged: String = cells
-            .iter()
-            .filter(|(col, _)| !target.key.contains(col) && comparable(conn, &data.columns[*col]))
-            .map(|(col, _)| match &data.rows[row][*col] {
-                Value::Null => format!(" and {} is null", column(*col)),
-                Value::Real(_) => String::new(),
-                old => format!(" and {} = {}", column(*col), conn.literal(old)),
-            })
-            .collect();
+        // Only if the edited cells still hold what was loaded.
+        let unchanged = unchanged(row, &mut cells.iter().map(|(col, _)| *col));
         out.push(Statement {
             sql: format!(
                 "update {name} set {assignments} where {}{unchanged}",
@@ -343,7 +348,8 @@ mod tests {
         assert_eq!(
             sql,
             [
-                "delete from orders where id = 1",
+                // Only if the row is as it was loaded.
+                "delete from orders where id = 1 and status = 'paid' and note is null",
                 // Saved only if the edited cells still hold what was loaded.
                 "update orders set status = 'o''clock', note = NULL \
                  where id = 2 and status = 'pending' and note = 'it''s'",
@@ -386,6 +392,21 @@ mod tests {
         assert!(err.to_string().starts_with("Nothing was saved"), "{err}");
         // Row 1's update was rolled back with it.
         assert_eq!(fetch(&conn).rows[0][1], Value::Text("paid".into()));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_delete_never_removes_a_row_someone_else_changed() {
+        let (conn, path) = shop();
+        let data = fetch(&conn);
+        let mut edits = Edits::default();
+        edits.deleted.insert(0);
+        // Someone else updates the row after we loaded it.
+        conn.execute("update orders set note = 'keep me' where id = 1", 0)
+            .unwrap();
+        let err = save(&conn, &statements(&conn, &target(), &data, &edits)).unwrap_err();
+        assert!(err.to_string().starts_with("Nothing was saved"), "{err}");
+        assert_eq!(fetch(&conn).rows.len(), data.rows.len());
         std::fs::remove_file(path).ok();
     }
 
