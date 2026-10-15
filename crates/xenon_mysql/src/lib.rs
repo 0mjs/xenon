@@ -136,15 +136,24 @@ impl CancelHandle for MyCancel {
 }
 
 impl MyCancel {
+    /// Stop the running query from another thread, without waiting.
     fn stop(&self) {
-        let opts = self.opts.clone();
-        let id = self.connection_id;
-        std::thread::spawn(move || {
-            // Nothing to report if the kill doesn't land: the query just runs on.
-            if let Ok(mut conn) = Conn::new(opts) {
-                let _ = conn.query_drop(format!("KILL QUERY {id}"));
-            }
-        });
+        let (opts, id) = (self.opts.clone(), self.connection_id);
+        std::thread::spawn(move || kill_query(opts, id));
+    }
+
+    /// Stop the running query and wait until the server has, so the kill can't
+    /// land on the next query instead (MySQL clears a kill that finds the
+    /// connection idle before its next statement).
+    fn stop_now(&self) {
+        kill_query(self.opts.clone(), self.connection_id);
+    }
+}
+
+fn kill_query(opts: Opts, id: u32) {
+    // Nothing to report if the kill doesn't land: the query just runs on.
+    if let Ok(mut conn) = Conn::new(opts) {
+        let _ = conn.query_drop(format!("KILL QUERY {id}"));
     }
 }
 
@@ -358,7 +367,7 @@ impl Connection for MysqlConnection {
                         // Stop the server instead of reading rows we'd discard.
                         rows.truncated = true;
                         cancelled_for_limit = true;
-                        self.cancel.stop();
+                        self.cancel.stop_now();
                     }
                     continue;
                 }

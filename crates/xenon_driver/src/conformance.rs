@@ -226,7 +226,13 @@ fn row_limit(conn: &dyn Connection, d: &Dialect) -> Result<()> {
         "uncapped: {} rows",
         whole.rows.len()
     );
-    // The connection is still usable after a query was stopped part-way.
+    // Stopping a capped query must not stop the one after it (a late cancel
+    // would), however quickly the next one starts.
+    for round in 0..20 {
+        rows(conn, &(d.series)(50), 10).with_context(|| format!("capped query, round {round}"))?;
+        rows(conn, &(d.series)(3), 10)
+            .with_context(|| format!("query after a capped one, round {round}"))?;
+    }
     let after = rows(conn, &(d.series)(3), 10)?;
     ensure!(
         after.rows.len() == 3,

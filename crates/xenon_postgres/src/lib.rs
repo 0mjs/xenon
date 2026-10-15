@@ -81,19 +81,20 @@ struct PgCancel {
 impl CancelHandle for PgCancel {
     fn cancel(&self) {
         self.user.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.stop();
+        drop(self.stop());
     }
 }
 
 impl PgCancel {
-    /// Ask the server to stop the running query.
-    fn stop(&self) {
+    /// Ask the server to stop the running query. The request goes over its own
+    /// connection; the returned task finishes once the server has taken it.
+    fn stop(&self) -> tokio::task::JoinHandle<()> {
         let token = self.token.clone();
         let tls = self.tls.clone();
         runtime().spawn(async move {
             // The server doesn't report whether a cancel landed; nothing to do on failure.
             let _ = token.cancel_query(tls).await;
-        });
+        })
     }
 }
 
@@ -264,6 +265,7 @@ impl PostgresConnection {
         let mut outcome = None;
         let mut current: Option<ResultSet> = None;
         let mut cancelled_for_limit = false;
+        let mut limit_stop = None;
         let mut cancelled = false;
 
         while let Some(message) = stream.next().await {
@@ -309,7 +311,7 @@ impl PostgresConnection {
                             // Stop the server instead of streaming rows we'd discard.
                             result.truncated = true;
                             cancelled_for_limit = true;
-                            self.cancel.stop();
+                            limit_stop = Some(self.cancel.stop());
                         }
                         continue;
                     }
@@ -335,6 +337,11 @@ impl PostgresConnection {
                 }
                 _ => {}
             }
+        }
+        // Let the row limit's cancel land before returning: one still on its way
+        // when the next query starts would stop that query instead.
+        if let Some(stop) = limit_stop {
+            let _ = stop.await;
         }
         if let Some(rows) = current.take() {
             // Cut short by the row limit: no CommandComplete arrives.
