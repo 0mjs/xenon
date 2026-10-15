@@ -342,6 +342,43 @@ fn snapshots() {
             assert!(error.is_none(), "{error:?}");
             w.clear_filter_for_test(window, cx);
         });
+        // Typed into the WHERE field, then Enter.
+        shot.act(|w, window, cx| {
+            let filter = w.active_tab().browse.as_ref().unwrap().filter.clone();
+            filter.update(cx, |input, cx| {
+                input.set_value("status = 'refunded'", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        shot.cx
+            .update_window(shot.window, |_, window, cx| {
+                window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+            })
+            .expect("press enter");
+        assert!(shot.settle(5, |w| !w.is_running()));
+        shot.act(|w, _, cx| {
+            let sql = w.active_tab().editor.read(cx).value().to_string();
+            assert!(sql.contains("where status = 'refunded'"), "{sql}");
+        });
+        // Typed, then Run (⌘↵): the new filter applies, not the old query.
+        shot.act(|w, window, cx| {
+            let filter = w.active_tab().browse.as_ref().unwrap().filter.clone();
+            filter.update(cx, |input, cx| {
+                input.set_value("status = 'paid'", window, cx);
+                input.focus(window, cx);
+            });
+        });
+        shot.cx
+            .update_window(shot.window, |_, window, cx| {
+                window.dispatch_keystroke(gpui::Keystroke::parse("cmd-enter").unwrap(), cx);
+            })
+            .expect("press cmd-enter");
+        assert!(shot.settle(5, |w| !w.is_running()));
+        shot.act(|w, window, cx| {
+            let sql = w.active_tab().editor.read(cx).value().to_string();
+            assert!(sql.contains("where status = 'paid'"), "{sql}");
+            w.clear_filter_for_test(window, cx);
+        });
         shot.act(|w, _, cx| {
             w.export_menu = true;
             cx.notify();

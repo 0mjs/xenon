@@ -364,6 +364,8 @@ pub(crate) struct Browse {
     pub(crate) filter: Entity<InputState>,
     order: Option<(String, SortDirection)>,
     _filter_enter: Subscription,
+    /// The filter the rows were last loaded with.
+    applied: String,
     /// Columns, keys and indexes, loaded when the tab opens.
     pub(crate) info: Option<Rc<TableInfo>>,
     /// The filter builder, when open.
@@ -771,6 +773,7 @@ impl Workspace {
                         filter,
                         order: None,
                         _filter_enter: filter_enter,
+                        applied: String::new(),
                         info: None,
                         info_error: None,
                         structure: false,
@@ -1650,11 +1653,15 @@ impl Workspace {
     // ------------------------------------------------------------- running
 
     fn run_statement(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
-        self.run(RunScope::Statement, window, cx);
+        if !self.apply_pending_filter(window, cx) {
+            self.run(RunScope::Statement, window, cx);
+        }
     }
 
     fn run_all(&mut self, _: &RunAll, window: &mut Window, cx: &mut Context<Self>) {
-        self.run(RunScope::All, window, cx);
+        if !self.apply_pending_filter(window, cx) {
+            self.run(RunScope::All, window, cx);
+        }
     }
 
     fn explain(&mut self, _: &Explain, window: &mut Window, cx: &mut Context<Self>) {
@@ -2517,6 +2524,7 @@ impl Workspace {
             return;
         };
         let conn = session.conn.clone();
+        let filter = browse.filter.read(cx).value().to_string();
         // Leave out the schema names resolve to anyway: `from orders`, not `from "public"."orders"`.
         let schema = (conn.default_schema().as_deref() != Some(browse.schema.as_str()))
             .then_some(browse.schema.as_str());
@@ -2524,7 +2532,7 @@ impl Workspace {
             |ident| conn.ident(ident),
             schema,
             &browse.table,
-            &browse.filter.read(cx).value(),
+            &filter,
             browse
                 .order
                 .as_ref()
@@ -2543,7 +2551,23 @@ impl Workspace {
             return;
         }
         editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));
+        if let Some(browse) = &mut self.tabs[self.active].browse {
+            browse.applied = filter;
+        }
         self.run(RunScope::All, window, cx);
+    }
+
+    /// Running a table tab whose WHERE field was typed in but not applied: apply it,
+    /// rather than re-run the old query.
+    fn apply_pending_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let pending =
+            self.active_tab().browse.as_ref().is_some_and(|browse| {
+                browse.filter.read(cx).value().trim() != browse.applied.trim()
+            });
+        if pending {
+            self.run_browse(window, cx);
+        }
+        pending
     }
 
     fn clear_browse_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4366,7 +4390,7 @@ impl Workspace {
                         ButtonKind::Ghost,
                         true,
                     ))
-                    .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::All, w, cx))),
+                    .on_click(cx.listener(|this, _, w, cx| this.run_all(&RunAll, w, cx))),
                 )
                 .child(
                     small(widgets::button(
@@ -4378,7 +4402,7 @@ impl Workspace {
                     ))
                     .pl(px(8.))
                     .child(kbd_on_accent(theme, "⌘↵"))
-                    .on_click(cx.listener(|this, _, w, cx| this.run(RunScope::Statement, w, cx))),
+                    .on_click(cx.listener(|this, _, w, cx| this.run_statement(&RunQuery, w, cx))),
                 );
         }
         bar
