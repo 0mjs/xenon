@@ -428,30 +428,53 @@ mod tests {
 
 /// Saving edits on every server engine in the test fleet:
 /// `dev/fleet/up.sh postgres mysql mariadb mssql`, then
-/// `cargo test -p xenon_ui edits::live -- --ignored`.
+/// `cargo test -p xenon_edit -- --ignored`.
 #[cfg(test)]
 mod live {
     use super::*;
     use xenon_driver::ConnectOptions;
-    use xenon_store::ServerEngine;
 
-    fn fleet(engine: ServerEngine, port: u16) -> std::sync::Arc<dyn Connection> {
+    #[derive(Clone, Copy, Debug)]
+    enum ServerEngine {
+        Postgres,
+        Mysql,
+        SqlServer,
+    }
+
+    impl ServerEngine {
+        fn as_str(self) -> &'static str {
+            match self {
+                ServerEngine::Postgres => "postgres",
+                ServerEngine::Mysql => "mysql",
+                ServerEngine::SqlServer => "sqlserver",
+            }
+        }
+    }
+
+    fn fleet(engine: ServerEngine, port: u16) -> Box<dyn Connection> {
         let (user, password) = match engine {
             ServerEngine::SqlServer => ("sa", "Xenon-fleet-1"),
             _ => ("xenon", "xenon"),
         };
-        crate::servers::connect(
-            engine,
-            &ConnectOptions {
-                host: "127.0.0.1".into(),
-                port: Some(port),
-                database: "shop".into(),
-                user: user.into(),
-                password: password.into(),
-                ..Default::default()
-            },
-        )
-        .expect("is the fleet up?")
+        let options = ConnectOptions {
+            host: "127.0.0.1".into(),
+            port: Some(port),
+            database: "shop".into(),
+            user: user.into(),
+            password: password.into(),
+            ..Default::default()
+        };
+        let conn: anyhow::Result<Box<dyn Connection>> = match engine {
+            ServerEngine::Postgres => xenon_postgres::PostgresConnection::connect_options(&options)
+                .map(|c| Box::new(c) as _),
+            ServerEngine::Mysql => {
+                xenon_mysql::MysqlConnection::connect_options(&options).map(|c| Box::new(c) as _)
+            }
+            ServerEngine::SqlServer => {
+                xenon_mssql::MssqlConnection::connect_options(&options).map(|c| Box::new(c) as _)
+            }
+        };
+        conn.expect("is the fleet up?")
     }
 
     fn rows(conn: &dyn Connection, sql: &str) -> ResultSet {

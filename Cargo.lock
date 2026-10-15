@@ -8874,6 +8874,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "xenon_edit"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "xenon_driver",
+ "xenon_mssql",
+ "xenon_mysql",
+ "xenon_postgres",
+ "xenon_sqlite",
+]
+
+[[package]]
 name = "xenon_mssql"
 version = "0.2.0"
 dependencies = [
@@ -8952,6 +8965,7 @@ dependencies = [
  "rust_xlsxwriter",
  "xenon_driver",
  "xenon_duckdb",
+ "xenon_edit",
  "xenon_mssql",
  "xenon_mysql",
  "xenon_postgres",

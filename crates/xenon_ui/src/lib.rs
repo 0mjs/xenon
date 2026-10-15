@@ -5,7 +5,8 @@ mod confirm;
 mod connect;
 mod detect;
 mod discover;
-mod edits;
+// Saving staged edits lives in its own crate, so CI can test it against every engine.
+use xenon_edit as edits;
 mod explorer;
 mod export;
 pub mod fonts;

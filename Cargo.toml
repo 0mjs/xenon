@@ -16,6 +16,7 @@ xenon_mysql = { path = "crates/xenon_mysql" }
 xenon_ssh = { path = "crates/xenon_ssh" }
 xenon_driver = { path = "crates/xenon_driver" }
 xenon_duckdb = { path = "crates/xenon_duckdb" }
+xenon_edit = { path = "crates/xenon_edit" }
 xenon_postgres = { path = "crates/xenon_postgres" }
 xenon_sqlite = { path = "crates/xenon_sqlite" }
 xenon_store = { path = "crates/xenon_store" }
