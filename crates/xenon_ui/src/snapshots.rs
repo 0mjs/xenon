@@ -513,6 +513,10 @@ fn snapshots() {
             cx.notify();
         });
         shot.save(&format!("37-update-available-{suffix}"));
+        // The status bar's connection menu.
+        shot.act(|w, _, cx| w.toggle_switcher(cx));
+        shot.save(&format!("49-switcher-{suffix}"));
+        shot.act(|w, _, cx| w.toggle_switcher(cx));
         shot.act(|w, _, cx| {
             w.update = Default::default();
             cx.notify();

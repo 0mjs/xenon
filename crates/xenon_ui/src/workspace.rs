@@ -62,6 +62,8 @@ const SIDE_PANEL_WIDTH: f32 = 240.;
 const MIN_SIDE_PANEL_WIDTH: f32 = 180.;
 const MAX_SIDE_PANEL_WIDTH: f32 = 520.;
 const INSPECTOR_WIDTH: f32 = 260.;
+const MIN_INSPECTOR_WIDTH: f32 = 200.;
+const MAX_INSPECTOR_WIDTH: f32 = 640.;
 const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
@@ -548,6 +550,8 @@ enum Drag {
     Split { start_y: Pixels, start_height: f32 },
     /// The side panel's right edge.
     SidePanel { start_x: Pixels, start_width: f32 },
+    /// The inspector's left edge.
+    Inspector { start_x: Pixels, start_width: f32 },
 }
 
 pub struct Workspace {
@@ -560,6 +564,8 @@ pub struct Workspace {
     next_run: u64,
     /// A problem opening a database, shown on the Connect screen and in the explorer.
     pub(crate) notice: Option<SharedString>,
+    /// The status bar's connection menu is open.
+    pub(crate) switcher: bool,
     /// A header's right-click menu: which display column, and where.
     pub(crate) column_menu: Option<(usize, gpui::Point<Pixels>)>,
     /// Totals for the selected cells, kept until the selection, rows or their
@@ -588,6 +594,7 @@ pub struct Workspace {
     bench_frame_requested: bool,
     editor_height: f32,
     side_panel_width: f32,
+    inspector_width: f32,
     /// Which text fields have focus, refreshed each render, for focus rings.
     pub(crate) field_focus: FieldFocus,
     /// The launcher's "paste anything" field and what it recognised (text, is_error).
@@ -700,6 +707,7 @@ impl Workspace {
             update: Default::default(),
             selection_stats: RefCell::new(None),
             column_menu: None,
+            switcher: false,
             connecting: None,
             store,
             history: Vec::new(),
@@ -719,6 +727,7 @@ impl Workspace {
             }),
             editor_height: EDITOR_HEIGHT,
             side_panel_width: SIDE_PANEL_WIDTH,
+            inspector_width: INSPECTOR_WIDTH,
             field_focus: FieldFocus::default(),
             paste_input,
             paste_note: (SharedString::default(), false),
@@ -733,7 +742,8 @@ impl Workspace {
             saved: Vec::new(),
             folded_folders: HashSet::new(),
             explorer_filter,
-            show_side_panel: true,
+            // Closed on the connect screen; it opens with the first connection.
+            show_side_panel: false,
             titlebar_pressed: false,
             side_panel_since: None,
             show_inspector: true,
@@ -952,7 +962,13 @@ impl Workspace {
         });
     }
 
-    fn attach(&mut self, id: usize, existing: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn attach(
+        &mut self,
+        id: usize,
+        existing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_tab().session.is_none() {
             let number = self.free_query_number();
             let tab = &mut self.tabs[self.active];
@@ -1174,6 +1190,9 @@ impl Workspace {
                         }
                         this.next_session_id += 1;
                         let id = this.next_session_id;
+                        if this.sessions.is_empty() {
+                            this.set_side_panel(true);
+                        }
                         this.sessions.push(Session {
                             id,
                             profile: profile.clone(),
@@ -3677,6 +3696,15 @@ impl Workspace {
                     .clamp(MIN_SIDE_PANEL_WIDTH, MAX_SIDE_PANEL_WIDTH)
                     .round();
             }
+            Drag::Inspector {
+                start_x,
+                start_width,
+            } => {
+                // Its left edge: dragging left widens it.
+                self.inspector_width = (start_width - f32::from(event.position.x - *start_x))
+                    .clamp(MIN_INSPECTOR_WIDTH, MAX_INSPECTOR_WIDTH)
+                    .round();
+            }
             Drag::Split {
                 start_y,
                 start_height,
@@ -4190,6 +4218,7 @@ impl Render for Workspace {
             .children(self.render_parameters(&theme, cx))
             .children(self.render_import(&theme, cx))
             .children(self.render_column_menu(&theme, cx))
+            .children(self.render_switcher(&theme, cx))
             .when_some(self.confirm.as_ref(), |el, (dialog, _, _)| {
                 el.child(dialog.clone())
             })
@@ -4492,7 +4521,8 @@ impl Workspace {
             .when(self.classic(), |el| {
                 el.border_r_1().border_color(theme.line)
             })
-            .pb(px(10.))
+            // Settings sits at the very bottom: level with the card's foot (Floating).
+            .pb(px(if self.classic() { 6. } else { CARD_GAP }))
             .child(item("rail-explorer", "database", SidePanel::Explorer))
             .child(item("rail-history", "clock", SidePanel::History))
             .child(item("rail-saved", "bookmark", SidePanel::Saved))
@@ -5852,12 +5882,38 @@ impl Workspace {
     fn render_inspector(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         let mut panel = div()
-            .w(px(INSPECTOR_WIDTH))
+            .w(px(self.inspector_width))
             .flex_none()
+            .relative()
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(theme.line);
+            .border_color(theme.line)
+            .child(
+                // Drag the edge to resize; double-click to reset.
+                div()
+                    .id("inspector-edge")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(-3.))
+                    .w(px(6.))
+                    .cursor_col_resize()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                            if event.click_count >= 2 {
+                                this.inspector_width = INSPECTOR_WIDTH;
+                                cx.notify();
+                            } else {
+                                this.drag = Some(Drag::Inspector {
+                                    start_x: event.position.x,
+                                    start_width: this.inspector_width,
+                                });
+                            }
+                        }),
+                    ),
+            );
 
         // The row as it will be once saved: staged values in place of fetched ones.
         let selected = tab
@@ -5995,6 +6051,11 @@ impl Workspace {
             Some(session) => bar
                 .child(
                     cell("".into(), theme.t2)
+                        .id("connection-menu")
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.s3))
+                        .when(self.switcher, |el| el.bg(theme.s3))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_switcher(cx)))
                         .gap(px(6.))
                         .child(div().size(px(6.)).rounded_full().bg(theme.ok))
                         .child(session.name.clone())
@@ -6059,7 +6120,13 @@ impl Workspace {
                             .child(action("txn-rollback", "Roll back", false)),
                     )
                 }),
-            None => bar.child(cell("no connection".into(), theme.t3)),
+            None => bar.child(
+                cell("no connection".into(), theme.t3)
+                    .id("connection-menu")
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.s3))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_switcher(cx))),
+            ),
         };
         let open = self.sessions.len();
         bar = bar.when(open > 1, |bar| {

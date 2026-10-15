@@ -84,7 +84,7 @@ so it can join the test fleet.
 | ✅ Discover local databases (Docker, ports, `.pgpass`, `pg_service.conf`, `.env`) | 0.2 |
 | ✅ Several connections open at once; tabs bound to a connection | 0.2 |
 | ✅ SSH tunnels: password, key, agent, `~/.ssh/config` hosts, jump hosts (`ProxyJump`) | 0.2 |
-| Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.5 |
+| ✅ Client certificates (mTLS) for Postgres and MySQL/MariaDB, a private CA for every TLS engine, `verify-full` for every TLS engine | 0.5 |
 | ✅ Reconnect after sleep or network loss, keeping tabs and unsaved edits; never re-runs a query by itself | 0.5 |
 | ✅ Connection colours and folders (a slash in a name files it); import connections from a pasted list of URLs or file paths. Still to do: import other clients' exports | 0.5 |
 | Cloud auth: AWS RDS IAM tokens, Azure AD, GCP Cloud SQL IAM | 1.0 |
@@ -192,7 +192,7 @@ Each release is shippable on its own. The order puts the most-used workflows fir
 | **0.2** ✅ | Connect to more | Several connections, MySQL/MariaDB, DuckDB + files, SQL Server, SSH (M9–M12 in PLAN.md). Also shipped, pulled forward: editing, autocomplete, streaming, export, structure view, FK navigation, saved queries, session restore, CI conformance and production safety (M13–M19) |
 | **0.3** ✅ | Production-safe | Every fixable gap in [SAFETY.md](SAFETY.md) closed and proven: writes spotted deny-by-default, server-enforced read-only reads on production, read-only rechecked after every statement, production time limits and lock waits, open transactions shown and kept, all-or-nothing scripts, conflict-checked edits and deletes, an independent audit, and a test in CI behind every guard |
 | **0.4** ✅ | Change data | Value editors (long text, JSON, dates, enums), filter builder. Also: a Floating layout and frosted window, alongside Classic |
-| **0.5** | Write queries faster | Parameters, formatting, saved-query folders (autocomplete, saved queries and session restore shipped in 0.2) |
+| **0.5** ✅ | Write queries faster | Parameters, formatting, several results per script, inline errors with fixes, reconnect after sleep, column arranging, paging, mutual TLS, colours and folders |
 | **0.6** | Understand and change schema | Full object tree, table designer with DDL preview, visual EXPLAIN (structure view shipped in 0.2) |
 | **0.7** | Wider SQL | CockroachDB, Redshift, libSQL, ClickHouse, Oracle |
 | **0.8** | Beyond SQL | MongoDB, Redis, DynamoDB, Cassandra |

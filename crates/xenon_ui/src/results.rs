@@ -753,7 +753,16 @@ fn render_row(
         };
         el.when(state.deleted, |el| el.line_through().text_color(theme.t3))
             .when(selected, |el| el.bg(theme.acc_wash))
-            .when(focused, |el| el.border_1().border_color(theme.acc))
+            .when(focused, |el| {
+                // An outline drawn over the cell, not a border: nothing moves.
+                el.relative().child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_1()
+                        .border_color(theme.acc),
+                )
+            })
     };
 
     div()

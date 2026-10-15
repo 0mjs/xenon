@@ -119,8 +119,14 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(3.))
-            .border_b_1()
-            .border_color(theme.line_2)
+            // Classic: rows split by hairlines. Floating: rounded, set in.
+            .map(|el| {
+                if self.classic() {
+                    el.border_b_1().border_color(theme.line_2)
+                } else {
+                    el.mx(px(6.)).px(px(8.)).rounded(px(6.))
+                }
+            })
             .cursor_pointer()
             .hover(|s| s.bg(theme.s3))
             .on_click(

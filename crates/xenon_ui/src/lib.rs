@@ -28,6 +28,7 @@ mod servers;
 mod settings;
 mod stats;
 mod structure;
+mod switcher;
 pub mod theme;
 mod updates;
 mod value_editor;

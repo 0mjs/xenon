@@ -261,6 +261,7 @@ impl Workspace {
         }
         let now = now_ms();
         let open: Option<i64> = self.active_tab().saved_query;
+        let classic = self.classic();
         let entry = |query: &xenon_store::SavedQuery, nested: bool, cx: &mut Context<Self>| {
             let preview: String = query
                 .sql
@@ -282,8 +283,17 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(3.))
-                .border_b_1()
-                .border_color(theme.line_2)
+                // Classic: rows split by hairlines. Floating: rounded, set in.
+                .map(|el| {
+                    if classic {
+                        el.border_b_1().border_color(theme.line_2)
+                    } else {
+                        el.mx(px(6.))
+                            .pl(px(if nested { 24. } else { 8. }))
+                            .pr(px(8.))
+                            .rounded(px(6.))
+                    }
+                })
                 .cursor_pointer()
                 .when(active, |el| el.bg(theme.acc_wash))
                 .hover(|s| s.bg(theme.s3))
