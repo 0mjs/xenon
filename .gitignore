@@ -4,3 +4,6 @@
 xcuserdata/
 /dev/seed/out
 /dev/fleet/ssh
+
+# Private notes (pricing, competitors): never committed
+/.private
