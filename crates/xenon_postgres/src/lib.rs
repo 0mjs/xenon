@@ -602,6 +602,10 @@ impl Connection for PostgresConnection {
         self.cancel.clone()
     }
 
+    fn begin_read_only(&self) -> Option<&'static str> {
+        Some("start transaction read only")
+    }
+
     fn in_transaction(&self) -> Option<bool> {
         // `now()` is when the transaction began; outside one, that's this statement.
         match runtime().block_on(

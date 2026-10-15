@@ -1610,17 +1610,28 @@ impl Workspace {
         let began = std::time::Instant::now();
         // On production, a script of several statements that writes runs as one
         // transaction: if one fails, none of it is kept.
-        let atomic = session.environment == Environment::Production
+        let production = session.environment == Environment::Production
             && !session.in_transaction
-            && xenon_driver::sql::split_statements(&sql).len() > 1
-            && xenon_driver::sql::writes(&sql)
             && !xenon_driver::sql::controls_transaction(&sql);
+        let atomic = production
+            && xenon_driver::sql::split_statements(&sql).len() > 1
+            && xenon_driver::sql::writes(&sql);
+        // On production, what looks like a read runs in a transaction the server
+        // keeps read-only, so a hidden write (a function that writes) is refused.
+        let guarded = production && !xenon_driver::sql::writes(&sql);
+        let wrap = if atomic {
+            Some(Wrap::Atomic(conn.begin()))
+        } else if guarded {
+            conn.begin_read_only().map(Wrap::ReadOnly)
+        } else {
+            None
+        };
         let live = Arc::new(Live::default());
         let feed = live.clone();
         let last_sql = sql.clone();
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
-            let begun = !atomic || conn.execute(conn.begin(), 1).is_ok();
+            let begun = wrap.is_some_and(|wrap| conn.execute(wrap.begin(), 1).is_ok());
             let result = conn.execute_streaming(&sql, row_limit, &mut |progress| match progress {
                 xenon_driver::Progress::Preview(rows) => {
                     *feed.preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows);
@@ -1629,18 +1640,15 @@ impl Workspace {
                     feed.rows.store(n, std::sync::atomic::Ordering::Relaxed);
                 }
             });
-            let result = if atomic && begun {
-                match result {
+            let result = match (wrap, begun) {
+                (Some(wrap), true) => match result {
                     Ok(done) => conn.execute("commit", 1).map(|_| done),
                     Err(err) => {
                         let _ = conn.execute("rollback", 1);
-                        Err(err.context(
-                            "The script ran as one transaction (production), so nothing it did was kept",
-                        ))
+                        Err(wrap.explain(err))
                     }
-                }
-            } else {
-                result
+                },
+                _ => result,
             };
             feed.done.store(true, std::sync::atomic::Ordering::SeqCst);
             crate::trace("execute query", started);
@@ -4752,4 +4760,42 @@ fn time_limit_note(limit: Option<std::time::Duration>) -> String {
         "Stopped after {shown}: the time limit for queries on production. \
          Change it in Settings → Safety."
     )
+}
+
+/// How a production statement is wrapped in a transaction.
+#[derive(Clone, Copy)]
+enum Wrap {
+    /// A script that writes: all of it or none.
+    Atomic(&'static str),
+    /// What looks like a read: in a transaction the server keeps read-only.
+    ReadOnly(&'static str),
+}
+
+impl Wrap {
+    fn begin(self) -> &'static str {
+        match self {
+            Wrap::Atomic(begin) | Wrap::ReadOnly(begin) => begin,
+        }
+    }
+
+    /// The error, with what the wrapping did about it.
+    fn explain(self, err: anyhow::Error) -> anyhow::Error {
+        match self {
+            Wrap::Atomic(_) => err.context(
+                "The script ran as one transaction (production), so nothing it did was kept",
+            ),
+            Wrap::ReadOnly(_) if refused_in_read_only(&err) => err.context(
+                "Production reads run in a read-only transaction, and this one tried to write, so \
+                 the server refused it. To run it anyway, wrap it in begin … commit",
+            ),
+            Wrap::ReadOnly(_) => err,
+        }
+    }
+}
+
+/// The server's "you can't write in a read-only transaction" (Postgres 25006,
+/// MySQL 1792).
+fn refused_in_read_only(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}").to_ascii_lowercase();
+    message.contains("read-only transaction") || message.contains("read only transaction")
 }

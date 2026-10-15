@@ -413,6 +413,12 @@ pub trait Connection: Send + Sync {
         None
     }
 
+    /// The statement that starts a transaction the server keeps read-only,
+    /// refusing any write inside it. `None` for engines without one.
+    fn begin_read_only(&self) -> Option<&'static str> {
+        None
+    }
+
     /// The statement that starts a transaction.
     fn begin(&self) -> &'static str {
         "begin"

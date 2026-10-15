@@ -108,6 +108,9 @@ impl Connection for Tunneled {
     fn in_transaction(&self) -> Option<bool> {
         self.inner.in_transaction()
     }
+    fn begin_read_only(&self) -> Option<&'static str> {
+        self.inner.begin_read_only()
+    }
     fn cancel_handle(&self) -> Arc<dyn xenon_driver::CancelHandle> {
         self.inner.cancel_handle()
     }

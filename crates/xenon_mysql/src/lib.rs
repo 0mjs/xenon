@@ -596,6 +596,10 @@ impl Connection for MysqlConnection {
         self.cancel.clone()
     }
 
+    fn begin_read_only(&self) -> Option<&'static str> {
+        Some("start transaction read only")
+    }
+
     fn in_transaction(&self) -> Option<bool> {
         let query = if self.mariadb {
             "select @@in_transaction"

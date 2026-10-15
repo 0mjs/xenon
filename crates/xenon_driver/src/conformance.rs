@@ -36,7 +36,11 @@ type Check = fn(&dyn Connection, &Dialect) -> Result<()>;
 
 /// Run every check, then fail with the list of those that didn't pass.
 pub fn run(conn: &dyn Connection, dialect: &Dialect) {
-    let checks: [(&str, Check); 11] = [
+    let checks: [(&str, Check); 12] = [
+        (
+            "a read-only transaction refuses writes",
+            read_only_transaction,
+        ),
         (
             "a write returning more rows than the limit still happens",
             capped_write,
@@ -186,6 +190,36 @@ fn round_trip(conn: &dyn Connection, d: &Dialect) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn read_only_transaction(conn: &dyn Connection, d: &Dialect) -> Result<()> {
+    let Some(begin) = conn.begin_read_only() else {
+        return Ok(());
+    };
+    let table = "xenon_conf_values";
+    exec(
+        conn,
+        &format!("create table {table} (id {} primary key)", d.integer),
+    )?;
+    exec(conn, begin)?;
+    let read = rows(conn, &format!("select count(*) from {table}"), 10);
+    let write = conn.execute(&format!("insert into {table} (id) values (1)"), 10);
+    exec(conn, d.rollback)?;
+    read.context("a read inside a read-only transaction")?;
+    let err = write
+        .err()
+        .ok_or_else(|| anyhow!("a write inside a read-only transaction went through"))?;
+    let message = format!("{err:#}").to_ascii_lowercase();
+    ensure!(
+        message.contains("read-only transaction") || message.contains("read only transaction"),
+        "refused, but not recognisably: {err:#}"
+    );
+    let left = rows(conn, &format!("select count(*) from {table}"), 10)?;
+    ensure!(
+        normal(&left.rows[0][0]) == normal(&Value::Integer(0)),
+        "the write stuck"
+    );
     Ok(())
 }
 
