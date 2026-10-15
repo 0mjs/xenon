@@ -1713,9 +1713,6 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(session) = self.active_session() else {
-            return;
-        };
         let tab = &self.tabs[self.active];
 
         let editor = tab.editor.read(cx);
