@@ -5,10 +5,10 @@ use gpui::{
 use gpui_component::Root;
 use gpui_platform::application;
 use xenon_ui::{
-    CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection, Explain, Launch,
-    NewConnection, NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab, Quit, RunAll,
-    RunQuery, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer, ToggleInspector,
-    UseDarkTheme, UseLightTheme, UseSystemTheme, Workspace,
+    CancelQuery, CheckForUpdates, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection,
+    Explain, Launch, NewConnection, NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab,
+    Quit, RunAll, RunQuery, ShowConnections, ShowExplorer, ShowHistory, ToggleExplorer,
+    ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme, Workspace,
 };
 
 fn main() {
@@ -65,6 +65,8 @@ fn main() {
 fn set_menus(cx: &mut App) {
     cx.set_menus([
         Menu::new("Xenon").items([
+            MenuItem::action("Check for Updates…", CheckForUpdates),
+            MenuItem::separator(),
             MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),

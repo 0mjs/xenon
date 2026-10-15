@@ -324,6 +324,19 @@ fn snapshots() {
             w.select_cell(5, 4, true, window, cx);
         });
         shot.save(&format!("03-browse-{suffix}"));
+        // A newer release is out: the status bar links to it.
+        shot.act(|w, _, cx| {
+            w.update = crate::updates::UpdateState::Available(crate::updates::Release {
+                version: "0.4.1".into(),
+                url: "https://github.com/0mjs/xenon/releases/tag/v0.4.1".into(),
+            });
+            cx.notify();
+        });
+        shot.save(&format!("37-update-available-{suffix}"));
+        shot.act(|w, _, cx| {
+            w.update = Default::default();
+            cx.notify();
+        });
         // The Classic layout, solid: the original edge-to-edge design.
         shot.act(|w, window, cx| {
             let prefs = crate::settings::Prefs {

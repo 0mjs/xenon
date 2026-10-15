@@ -102,6 +102,8 @@ pub(crate) struct Prefs {
     pub lock_wait: u64,
     /// Keep history (and reopened tabs) for production connections.
     pub production_history: bool,
+    /// Ask GitHub for a newer release at launch (at most daily).
+    pub check_updates: bool,
 }
 
 impl Default for Prefs {
@@ -119,6 +121,7 @@ impl Default for Prefs {
             query_limit: 60,
             lock_wait: 5,
             production_history: true,
+            check_updates: true,
         }
     }
 }
@@ -164,6 +167,9 @@ impl Prefs {
         if let Some(value) = get("production_history") {
             prefs.production_history = value != "false";
         }
+        if let Some(value) = get("check_updates") {
+            prefs.check_updates = value != "false";
+        }
         prefs
     }
 
@@ -182,6 +188,7 @@ impl Prefs {
             ("query_limit", self.query_limit.to_string()),
             ("lock_wait", self.lock_wait.to_string()),
             ("production_history", self.production_history.to_string()),
+            ("check_updates", self.check_updates.to_string()),
         ];
         for (key, value) in values {
             if let Err(err) = store.set_setting(key, &value) {
@@ -574,6 +581,22 @@ impl Render for SettingsDialog {
                             this.change(cx, |p| p.production_history = !p.production_history)
                         }))
                         .child(widgets::checkbox(&theme, prefs.production_history)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Check for updates at launch",
+                    Some(
+                        "Once a day, asks GitHub whether a newer Xenon is out. Nothing about you \
+                         or your databases is sent. Xenon → Check for Updates… asks any time.",
+                    ),
+                    div()
+                        .id("check-updates")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.change(cx, |p| p.check_updates = !p.check_updates)
+                        }))
+                        .child(widgets::checkbox(&theme, prefs.check_updates)),
                 )
                 .into_any_element(),
                 row(

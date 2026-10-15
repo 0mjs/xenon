@@ -20,6 +20,7 @@ mod servers;
 mod settings;
 mod structure;
 pub mod theme;
+mod updates;
 mod value_editor;
 mod widgets;
 pub mod workspace;
@@ -36,6 +37,7 @@ actions!(
         NewConnection,
         ShowConnections,
         OpenSettings,
+        CheckForUpdates,
         EditCell,
         DeleteRows,
         AddRow,

@@ -39,18 +39,20 @@ use crate::results::{self, Grid, Selection};
 use crate::servers;
 use crate::settings::{Prefs, SettingsDialog, SettingsEvent, ThemeChoice};
 use crate::theme::{self, ActiveTheme, Layout, MONO_FONT, Mode, Theme, UI_FONT};
+use crate::updates::UpdateState;
 use crate::widgets::{
     self as widgets, ButtonKind, Engine, RADIUS_CONTROL, centered_hint, connection_tags,
     empty_hint, env_tag, field, format_duration, group_digits, kbd, kbd_on_accent, panel_label,
     pretty_json,
 };
 use crate::{
-    AddRow, CancelQuery, CloseConnection, CloseTab, CopyCsv, CopyJson, CopyMarkdown, CopySelection,
-    CopySql, DeleteRows, DiscardEdits, EditCell, Explain, ExportResults, ExtendDown, ExtendLeft,
-    ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection,
-    NewTab, NextTab, OpenFile, OpenPalette, OpenSettings, PrevTab, Quit, RunAll, RunQuery,
-    SaveEdits, SaveQueryAs, SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ShowSaved,
-    ToggleExplorer, ToggleInspector, ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme,
+    AddRow, CancelQuery, CheckForUpdates, CloseConnection, CloseTab, CopyCsv, CopyJson,
+    CopyMarkdown, CopySelection, CopySql, DeleteRows, DiscardEdits, EditCell, Explain,
+    ExportResults, ExtendDown, ExtendLeft, ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft,
+    MoveRight, MoveUp, NewConnection, NewTab, NextTab, OpenFile, OpenPalette, OpenSettings,
+    PrevTab, Quit, RunAll, RunQuery, SaveEdits, SaveQueryAs, SelectAllCells, ShowConnections,
+    ShowExplorer, ShowHistory, ShowSaved, ToggleExplorer, ToggleInspector, ToggleStructure,
+    UseDarkTheme, UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -511,6 +513,8 @@ pub struct Workspace {
     next_run: u64,
     /// A problem opening a database, shown on the Connect screen and in the explorer.
     pub(crate) notice: Option<SharedString>,
+    /// Whether a newer Xenon is out, shown in the status bar.
+    pub(crate) update: crate::updates::UpdateState,
     /// The connection being opened, while it opens.
     pub(crate) connecting: Option<SharedString>,
     pub(crate) store: Option<Arc<Store>>,
@@ -634,6 +638,7 @@ impl Workspace {
             next_session_id: 0,
             next_run: 0,
             notice: None,
+            update: Default::default(),
             connecting: None,
             store,
             history: Vec::new(),
@@ -707,6 +712,7 @@ impl Workspace {
                 .update(cx, |this, cx| this.may_quit(window, cx))
                 .unwrap_or(true)
         });
+        this.check_for_updates_at_launch(cx);
         this
     }
 
@@ -3805,6 +3811,9 @@ impl Render for Workspace {
             )
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_settings))
+            .on_action(
+                cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(true, cx)),
+            )
             .on_action(cx.listener(Self::edit_cell))
             .on_action(cx.listener(Self::delete_rows))
             .on_action(cx.listener(Self::add_row))
@@ -5611,13 +5620,47 @@ impl Workspace {
                 .child(cell(format!("{open} connections open").into(), theme.t3).border_l_1())
         });
 
-        bar.when(open <= 1, |bar| bar.child(div().flex_1())).child(
-            cell(
-                concat!("xenon ", env!("CARGO_PKG_VERSION")).into(),
-                theme.t3,
+        let update = match &self.update {
+            UpdateState::Idle => None,
+            UpdateState::Checking => {
+                Some(cell("checking for updates…".into(), theme.t3).into_any_element())
+            }
+            UpdateState::Latest => {
+                Some(cell("xenon is up to date".into(), theme.t3).into_any_element())
+            }
+            UpdateState::Failed(message) => {
+                Some(cell(message.clone(), theme.err).into_any_element())
+            }
+            UpdateState::Available(release) => {
+                let url = release.url.clone();
+                Some(
+                    cell(
+                        format!("xenon {} is out ↗", release.version).into(),
+                        theme.acc,
+                    )
+                    .id("update")
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.s3))
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+                    .into_any_element(),
+                )
+            }
+        };
+        bar.when(open <= 1, |bar| bar.child(div().flex_1()))
+            .children(update.map(|cell| {
+                div()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(theme.line)
+                    .child(cell)
+            }))
+            .child(
+                cell(
+                    concat!("xenon ", env!("CARGO_PKG_VERSION")).into(),
+                    theme.t3,
+                )
+                .border_l_1(),
             )
-            .border_l_1(),
-        )
     }
 }
 

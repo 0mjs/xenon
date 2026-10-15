@@ -8966,6 +8966,7 @@ dependencies = [
  "rusqlite",
  "rust_xlsxwriter",
  "serde_json",
+ "ureq",
  "xenon_driver",
  "xenon_duckdb",
  "xenon_edit",
