@@ -98,7 +98,7 @@ so it can join the test fleet.
 | ✅ Highlighting, run statement under cursor / all, cancel, explain, history, tabs, palette | 0.1 |
 | ✅ Autocomplete from the live schema: tables, columns (alias-aware), functions, keywords | 0.4 |
 | ✅ Run a selection; run several statements and get one result tab each | 0.5 |
-| Query parameters (`:name`, `$1`, `?`) with a fill-in prompt that remembers values | 0.5 |
+| ✅ Query parameters (`:name`, `$1`, `?`) with a fill-in prompt that remembers values | 0.5 |
 | ✅ Saved queries (⌘S, a Saved panel with filter) and reopening last session's tabs at launch. Still to do: folders | 0.4 |
 | Format SQL (per dialect), comment toggle, multi-cursor, find/replace | 0.5 |
 | Inline errors with position, plus "did you mean" for unknown columns and tables | 0.5 |

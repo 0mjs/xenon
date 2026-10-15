@@ -496,6 +496,42 @@ fn snapshots() {
             assert_eq!(columns(w), ["status", "orders"]);
         });
         shot.save(&format!("39-result-sets-{suffix}"));
+        // Parameters: asked for, then written in as literals.
+        shot.act(|w, window, cx| {
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| {
+                editor.set_value(
+                    "select id, status, total from orders\n\
+                     where status = :status and total > :min and status = :status\n\
+                     order by id limit 3;",
+                    window,
+                    cx,
+                )
+            });
+            w.run(RunScope::All, window, cx);
+            assert!(w.parameters.is_some(), "no prompt for :status and :min");
+            w.fill_parameters(&["refunded", "100"], window, cx);
+        });
+        shot.save(&format!("40-parameters-{suffix}"));
+        shot.act(|w, window, cx| w.finish_parameters(window, cx));
+        assert!(shot.settle(10, |w| !w.is_running()));
+        shot.act(|w, _, _| {
+            assert!(w.parameters.is_none());
+            let sql = w.last_run_sql().unwrap_or_default();
+            assert!(
+                sql.contains("status = 'refunded' and total > 100 and status = 'refunded'"),
+                "{sql}"
+            );
+            assert!(w.error_text().is_none(), "{:?}", w.error_text());
+            let grid = w.active_tab().grid.as_ref().expect("rows");
+            assert!(!grid.data.rows.is_empty());
+            assert!(
+                grid.data
+                    .rows
+                    .iter()
+                    .all(|row| row[1].display() == "refunded")
+            );
+        });
         shot.act(|w, window, cx| {
             w.close_tab_at(w.active, window, cx);
             w.activate_tab(back_to, window, cx);

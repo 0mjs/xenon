@@ -781,9 +781,166 @@ fn same_line(sql: &str, a: usize, b: usize) -> bool {
     !sql[lo..hi].contains('\n')
 }
 
+/// The placeholders an engine takes besides `:name`, which every engine gets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParamStyle {
+    /// `$1`, `$2`… (Postgres, DuckDB).
+    pub dollar: bool,
+    /// `?` (MySQL, SQLite, DuckDB; on Postgres it's a JSON operator).
+    pub question: bool,
+    /// Read quotes and comments as MySQL does.
+    pub mysql: bool,
+}
+
+/// A placeholder in a query, filled in before it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Param {
+    pub range: Range<usize>,
+    /// What it's asked for and remembered by: `:status`, `$1`, or `?1` for
+    /// the first `?`. The same `:name` twice is one parameter.
+    pub key: String,
+}
+
+/// The placeholders in `sql`, in order, skipping strings, quoted names,
+/// comments, dollar-quoted bodies, `::casts`, `:=` and slices like `a[1:n]`.
+pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
+    let lexing = if style.mysql {
+        Lexing::Mysql
+    } else {
+        Lexing::Standard
+    };
+    let bytes = sql.as_bytes();
+    let mut params = Vec::new();
+    let mut questions = 0;
+    let mut i = 0;
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    while i < bytes.len() {
+        if let Some(code) = executable_comment_start(bytes, i, lexing) {
+            i = code;
+            continue;
+        }
+        if let Some(end) = comment_end(bytes, i, lexing) {
+            i = end;
+            continue;
+        }
+        let after_word = i > 0 && (ident(bytes[i - 1]) || bytes[i - 1] >= 0x80);
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i, backslash_escapes(sql, i, lexing)),
+            b'$' if style.dollar
+                && !after_word
+                && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) =>
+            {
+                let end = (i + 1..bytes.len())
+                    .find(|&j| !bytes[j].is_ascii_digit())
+                    .unwrap_or(bytes.len());
+                params.push(Param {
+                    range: i..end,
+                    key: sql[i..end].to_string(),
+                });
+                i = end;
+            }
+            b'$' if lexing == Lexing::Standard => i = skip_dollar_quoted(sql, i),
+            // `::cast` and `:=` aren't placeholders.
+            b':' if bytes.get(i + 1) == Some(&b':') => i += 2,
+            b':' if !after_word
+                && bytes
+                    .get(i + 1)
+                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') =>
+            {
+                let end = (i + 1..bytes.len())
+                    .find(|&j| !ident(bytes[j]))
+                    .unwrap_or(bytes.len());
+                params.push(Param {
+                    range: i..end,
+                    key: sql[i..end].to_string(),
+                });
+                i = end;
+            }
+            b'?' if style.question => {
+                questions += 1;
+                params.push(Param {
+                    range: i..i + 1,
+                    key: format!("?{questions}"),
+                });
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    params
+}
+
+/// `sql` with each placeholder replaced by the SQL literal `value` gives for its key.
+pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> String {
+    let mut out = sql.to_string();
+    for param in params.iter().rev() {
+        out.replace_range(param.range.clone(), &value(&param.key));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parameters_are_found_outside_strings_comments_and_casts() {
+        let keys = |sql: &str, style: ParamStyle| {
+            parameters(sql, style)
+                .into_iter()
+                .map(|p| p.key)
+                .collect::<Vec<_>>()
+        };
+        let pg = ParamStyle {
+            dollar: true,
+            ..Default::default()
+        };
+        let mysql = ParamStyle {
+            question: true,
+            mysql: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            keys("select * from t where a = :status and b = :status", pg),
+            [":status", ":status"]
+        );
+        assert_eq!(keys("select $1, $2 from t", pg), ["$1", "$2"]);
+        // Casts, assignments, slices, strings, quoted names and comments.
+        assert_eq!(
+            keys(
+                "select x::int, a[1:n], ':no', \":no\", $$ :no $$ -- :no\n /* :no */ from t where y = :yes",
+                pg
+            ),
+            [":yes"]
+        );
+        // `?` is a JSON operator on Postgres, a placeholder elsewhere.
+        assert!(keys("select data ? 'k' from t", pg).is_empty());
+        assert_eq!(
+            keys("select ? , ? from t where c = :c", mysql),
+            ["?1", "?2", ":c"]
+        );
+        assert!(keys("set @a := 1; select '\\' ? '", mysql).is_empty());
+        assert!(keys("select 'it''s :not' from t", ParamStyle::default()).is_empty());
+    }
+
+    #[test]
+    fn binding_replaces_each_placeholder() {
+        let sql = "select * from t where a = :a and b = $1 and c = :a";
+        let style = ParamStyle {
+            dollar: true,
+            ..Default::default()
+        };
+        let params = parameters(sql, style);
+        let bound = bind(sql, &params, |key| match key {
+            ":a" => "'x''y'".into(),
+            "$1" => "42".into(),
+            other => panic!("{other}"),
+        });
+        assert_eq!(
+            bound,
+            "select * from t where a = 'x''y' and b = 42 and c = 'x''y'"
+        );
+    }
 
     #[test]
     fn mysql_quoting_tricks_cant_hide_a_write() {

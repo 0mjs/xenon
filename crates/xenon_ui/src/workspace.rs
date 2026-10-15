@@ -577,6 +577,8 @@ pub struct Workspace {
     pub(crate) saved_filter: Entity<InputState>,
     /// Asking for a name before saving a query.
     pub(crate) naming: Option<crate::saved::Naming>,
+    /// Asking for a query's parameters before it runs.
+    pub(crate) parameters: Option<crate::params::Prompt>,
     /// Last session's tabs, by saved connection, waiting for it to connect.
     pub(crate) restoring: HashMap<i64, Vec<xenon_store::OpenTab>>,
     /// The tabs last written to the store.
@@ -699,6 +701,7 @@ impl Workspace {
             saved_queries: Vec::new(),
             saved_filter,
             naming: None,
+            parameters: None,
             restoring: HashMap::new(),
             persisted_tabs: Vec::new(),
         };
@@ -1736,6 +1739,32 @@ impl Workspace {
         if sql.trim().is_empty() {
             return;
         }
+        let tab_id = tab.id;
+        if self.ask_parameters(tab_id, &sql, scope, window, cx) {
+            return;
+        }
+        self.run_sql(tab_id, sql, origin, scope, window, cx);
+    }
+
+    /// Run SQL taken from a tab's editor (with any parameters filled in).
+    pub(crate) fn run_sql(
+        &mut self,
+        tab_id: usize,
+        sql: String,
+        origin: Option<usize>,
+        scope: RunScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.session)
+            .and_then(|id| self.session(id))
+        else {
+            return;
+        };
         // Explaining a script would run everything after its first statement.
         if scope == RunScope::Explain && xenon_driver::sql::split_statements(&sql).len() > 1 {
             self.flash(
@@ -1749,8 +1778,16 @@ impl Workspace {
             RunScope::Explain => session.conn.explain(sql.trim().trim_end_matches(';')),
             _ => sql,
         };
-        let tab_id = tab.id;
         self.guard(tab_id, sql, origin, None, window, cx);
+    }
+
+    /// What the active tab last ran, for tests.
+    #[cfg(test)]
+    pub(crate) fn last_run_sql(&self) -> Option<String> {
+        self.active_tab()
+            .last_run
+            .as_ref()
+            .map(|(sql, _)| sql.clone())
     }
 
     /// The active tab's note (beside the results), for tests.
@@ -3949,6 +3986,7 @@ impl Render for Workspace {
                 el.child(settings.clone())
             })
             .children(self.render_naming(&theme, cx))
+            .children(self.render_parameters(&theme, cx))
             .when_some(self.confirm.as_ref(), |el, (dialog, _, _)| {
                 el.child(dialog.clone())
             })

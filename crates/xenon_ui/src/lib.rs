@@ -14,6 +14,7 @@ pub mod fonts;
 mod history;
 mod launcher;
 mod palette;
+mod params;
 mod reconnect;
 mod results;
 mod saved;
