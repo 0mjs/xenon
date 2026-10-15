@@ -12,7 +12,10 @@ dir="${RUNNER_TEMP:-/tmp}/duckdb-$version"
 mkdir -p "$dir"
 curl -fsSL -o "$dir/$archive" "https://github.com/duckdb/duckdb/releases/download/v$version/$archive"
 unzip -oq "$dir/$archive" -d "$dir"
+# Cargo only puts library folders inside target/ on the loader path for tests.
 {
   echo "DUCKDB_LIB_DIR=$dir"
   echo "DUCKDB_INCLUDE_DIR=$dir"
+  echo "LD_LIBRARY_PATH=$dir"
+  echo "DYLD_FALLBACK_LIBRARY_PATH=$dir"
 } >> "$GITHUB_ENV"
