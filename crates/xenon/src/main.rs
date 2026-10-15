@@ -6,10 +6,10 @@ use gpui_component::Root;
 use gpui_platform::application;
 use xenon_ui::{
     CancelQuery, CheckForUpdates, CloseConnection, CloseTab, CopyCsv, CopyJson, CopySelection,
-    Explain, FormatSql, Launch, NewConnection, NewTab, NextTab, OpenFile, OpenPalette,
-    OpenSettings, PrevTab, Quit, RunAll, RunQuery, ShowConnections, ShowExplorer, ShowHistory,
-    ToggleComment, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme, UseSystemTheme,
-    Workspace,
+    Explain, FormatSql, ImportConnections, Launch, NewConnection, NewTab, NextTab, OpenFile,
+    OpenPalette, OpenSettings, PrevTab, Quit, RunAll, RunQuery, ShowConnections, ShowExplorer,
+    ShowHistory, ToggleComment, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme,
+    UseSystemTheme, Workspace,
 };
 
 fn main() {
@@ -81,6 +81,7 @@ fn set_menus(cx: &mut App) {
             MenuItem::action("Connections…", ShowConnections),
             MenuItem::action("Open SQLite File…", OpenFile),
             MenuItem::action("New Connection…", NewConnection),
+            MenuItem::action("Import Connections…", ImportConnections),
             MenuItem::action("Disconnect", CloseConnection),
         ]),
         Menu::new("Query").items([

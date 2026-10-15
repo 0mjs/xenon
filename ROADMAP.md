@@ -86,7 +86,7 @@ so it can join the test fleet.
 | ✅ SSH tunnels: password, key, agent, `~/.ssh/config` hosts, jump hosts (`ProxyJump`) | 0.2 |
 | Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.5 |
 | ✅ Reconnect after sleep or network loss, keeping tabs and unsaved edits; never re-runs a query by itself | 0.5 |
-| ✅ Connection colours and folders (a slash in a name files it). Still to do: import connections from a URL list or other clients' exports | 0.5 |
+| ✅ Connection colours and folders (a slash in a name files it); import connections from a pasted list of URLs or file paths. Still to do: import other clients' exports | 0.5 |
 | Cloud auth: AWS RDS IAM tokens, Azure AD, GCP Cloud SQL IAM | 1.0 |
 | Per-connection settings: row limit, statement timeout, auto-commit vs manual transactions | 1.0 |
 | Kerberos / LDAP | Later |

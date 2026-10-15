@@ -16,6 +16,7 @@ mod filter;
 mod folders;
 pub mod fonts;
 mod history;
+mod import;
 mod launcher;
 mod pages;
 mod palette;
@@ -47,6 +48,7 @@ actions!(
         ShowConnections,
         OpenSettings,
         CheckForUpdates,
+        ImportConnections,
         FormatSql,
         ToggleComment,
         EditCell,

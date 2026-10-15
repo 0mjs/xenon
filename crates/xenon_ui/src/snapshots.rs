@@ -694,6 +694,29 @@ fn snapshots() {
             assert_eq!(hint.at, Some(11..16));
         });
         shot.save(&format!("41-did-you-mean-{suffix}"));
+        // Importing a pasted list (no passwords: they'd go to the real Keychain).
+        shot.act(|w, window, cx| {
+            w.open_import(window, cx);
+            let editor = w.import.as_ref().unwrap().editor.clone();
+            // A host per pass: the second pass would find the first's already saved.
+            let list = format!(
+                "postgres://reports@warehouse-{suffix}.acme.dev:5432/sales\nnot a url\n\
+                 mysql://app@shop-{suffix}.acme.dev/shop"
+            );
+            editor.update(cx, |e, cx| e.set_value(list, window, cx));
+        });
+        shot.save(&format!("48-import-{suffix}"));
+        let before = shot.cx.read_entity(&shot.workspace, |w, _| w.saved.len());
+        shot.act(|w, _, cx| w.finish_import(cx));
+        assert!(shot.settle(5, |w| w.import.is_none()));
+        shot.act(|w, _, _| {
+            assert_eq!(w.saved.len(), before + 2);
+            let notice = w.notice.clone().unwrap_or_default();
+            assert!(
+                notice.contains("Imported 2 connections") && notice.contains("Line 2"),
+                "{notice}"
+            );
+        });
         shot.act(|w, window, cx| {
             w.fix_error(window, cx);
             let text = w.active_tab().editor.read(cx).value().to_string();

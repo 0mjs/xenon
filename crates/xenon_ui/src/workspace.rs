@@ -48,11 +48,11 @@ use crate::widgets::{
 use crate::{
     AddRow, CancelQuery, CheckForUpdates, CloseConnection, CloseTab, CopyCsv, CopyJson,
     CopyMarkdown, CopySelection, CopySql, DeleteRows, DiscardEdits, EditCell, Explain,
-    ExportResults, ExtendDown, ExtendLeft, ExtendRight, ExtendUp, FocusEditor, MoveDown, MoveLeft,
-    MoveRight, MoveUp, NewConnection, NewTab, NextTab, OpenFile, OpenPalette, OpenSettings,
-    PrevTab, Quit, RunAll, RunQuery, SaveEdits, SaveQueryAs, SelectAllCells, ShowConnections,
-    ShowExplorer, ShowHistory, ShowSaved, ToggleExplorer, ToggleInspector, ToggleStructure,
-    UseDarkTheme, UseLightTheme, UseSystemTheme,
+    ExportResults, ExtendDown, ExtendLeft, ExtendRight, ExtendUp, FocusEditor, ImportConnections,
+    MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection, NewTab, NextTab, OpenFile, OpenPalette,
+    OpenSettings, PrevTab, Quit, RunAll, RunQuery, SaveEdits, SaveQueryAs, SelectAllCells,
+    ShowConnections, ShowExplorer, ShowHistory, ShowSaved, ToggleExplorer, ToggleInspector,
+    ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -615,6 +615,8 @@ pub struct Workspace {
     pub(crate) saved_filter: Entity<InputState>,
     /// Asking for a name before saving a query.
     pub(crate) naming: Option<crate::saved::Naming>,
+    /// File → Import Connections…, when open.
+    pub(crate) import: Option<crate::import::Import>,
     /// Asking for a query's parameters before it runs.
     pub(crate) parameters: Option<crate::params::Prompt>,
     /// Last session's tabs, by saved connection, waiting for it to connect.
@@ -743,6 +745,7 @@ impl Workspace {
             saved_filter,
             naming: None,
             parameters: None,
+            import: None,
             restoring: HashMap::new(),
             persisted_tabs: Vec::new(),
         };
@@ -4107,6 +4110,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::format_sql))
+            .on_action(
+                cx.listener(|this, _: &ImportConnections, window, cx| this.open_import(window, cx)),
+            )
             .on_action(cx.listener(Self::toggle_comment))
             .on_action(
                 cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(true, cx)),
@@ -4176,6 +4182,7 @@ impl Render for Workspace {
             })
             .children(self.render_naming(&theme, cx))
             .children(self.render_parameters(&theme, cx))
+            .children(self.render_import(&theme, cx))
             .children(self.render_column_menu(&theme, cx))
             .when_some(self.confirm.as_ref(), |el, (dialog, _, _)| {
                 el.child(dialog.clone())
