@@ -84,8 +84,8 @@ so it can join the test fleet.
 | ✅ Discover local databases (Docker, ports, `.pgpass`, `pg_service.conf`, `.env`) | 0.2 |
 | ✅ Several connections open at once; tabs bound to a connection | 0.2 |
 | ✅ SSH tunnels: password, key, agent, `~/.ssh/config` hosts, jump hosts (`ProxyJump`) | 0.2 |
-| Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.4 |
-| Reconnect after sleep or network loss, keep tabs and unsaved edits | 0.4 |
+| Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.5 |
+| Reconnect after sleep or network loss, keep tabs and unsaved edits | 0.5 |
 | Connection colours and folders; import connections from a URL list or other clients' exports | 0.5 |
 | Cloud auth: AWS RDS IAM tokens, Azure AD, GCP Cloud SQL IAM | 1.0 |
 | Per-connection settings: row limit, statement timeout, auto-commit vs manual transactions | 1.0 |
@@ -117,7 +117,7 @@ so it can join the test fleet.
 | ✅ Value editors per type: JSON (highlighted, checked), long text, dates (with Now), enums (pick a value), booleans. Still to do: a JSON tree, bytea (hex/image), arrays | 0.4 |
 | ✅ Click-through foreign keys: open the referenced row from the grid or inspector. Still to do: rows that reference this one | 0.3 |
 | ✅ Filter builder (column / operator / value, match all or any) that writes the WHERE field | 0.4 |
-| Pagination with exact counts (where cheap) or estimates | 0.4 |
+| Pagination with exact counts (where cheap) or estimates | 0.5 |
 | Column visibility, pinning, reordering; remembered per table | 0.5 |
 | Show results as JSON / as records; transpose a single row | 0.5 |
 | Aggregates for a selection in the status bar (sum, avg, count, min, max) | 0.5 |
@@ -153,6 +153,7 @@ so it can join the test fleet.
 | Feature | Target |
 |---|---|
 | ✅ Command palette, light/dark/system themes, keyboard shortcuts, menus | 0.1 |
+| ✅ Appearance: Classic or Floating layout, Solid or Frosted (blurred) window, six accents | 0.4 |
 | Restore session: open connections, tabs, editor contents, scroll positions | 0.5 |
 | Multiple windows; drag a tab out into its own window | 1.0 |
 | Customisable keybindings (JSON file + a UI); Vim mode in the editor | 1.0 |
@@ -190,7 +191,7 @@ Each release is shippable on its own. The order puts the most-used workflows fir
 |---|---|---|
 | **0.2** ✅ | Connect to more | Several connections, MySQL/MariaDB, DuckDB + files, SQL Server, SSH (M9–M12 in PLAN.md). Also shipped, pulled forward: editing, autocomplete, streaming, export, structure view, FK navigation, saved queries, session restore, CI conformance and production safety (M13–M19) |
 | **0.3** ✅ | Production-safe | Every fixable gap in [SAFETY.md](SAFETY.md) closed and proven: writes spotted deny-by-default, server-enforced read-only reads on production, read-only rechecked after every statement, production time limits and lock waits, open transactions shown and kept, all-or-nothing scripts, conflict-checked edits and deletes, an independent audit, and a test in CI behind every guard |
-| **0.4** | Change data | Value editors (long text, JSON, dates, enums), filter builder |
+| **0.4** ✅ | Change data | Value editors (long text, JSON, dates, enums), filter builder. Also: a Floating layout and frosted window, alongside Classic |
 | **0.5** | Write queries faster | Parameters, formatting, saved-query folders (autocomplete, saved queries and session restore shipped in 0.2) |
 | **0.6** | Understand and change schema | Full object tree, table designer with DDL preview, visual EXPLAIN (structure view shipped in 0.2) |
 | **0.7** | Wider SQL | CockroachDB, Redshift, libSQL, ClickHouse, Oracle |
