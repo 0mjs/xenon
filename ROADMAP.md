@@ -188,9 +188,9 @@ Each release is shippable on its own. The order puts the most-used workflows fir
 
 | Release | Theme | Headline |
 |---|---|---|
-| **0.2** | Connect to more | Several connections, MySQL/MariaDB, DuckDB + files, SQL Server, SSH (M9–M12 in PLAN.md) |
-| **0.3** | Change data | Streaming results, inline editing with staged changes, value editors, FK navigation, filter builder |
-| **0.4** | Write queries faster | Autocomplete, parameters, saved queries, formatting, session restore |
+| **0.2** ✅ | Connect to more | Several connections, MySQL/MariaDB, DuckDB + files, SQL Server, SSH (M9–M12 in PLAN.md). Also shipped, pulled forward: editing, autocomplete, streaming, export, structure view, FK navigation, saved queries, session restore, CI conformance and production safety (M13–M19) |
+| **0.3** | Production-safe, change data | Close every fixable gap in [SAFETY.md](SAFETY.md) (server-enforced read-only reads, unindexed-sort warning, `verify-full` for production, no history on production, quit and cancel prompts, checked deletes, editing tests in CI); value editors, filter builder |
+| **0.4** | Write queries faster | Parameters, formatting, saved-query folders (autocomplete, saved queries and session restore shipped in 0.2) |
 | **0.5** | Understand and change schema | Full object tree, structure view, table designer with DDL preview, visual EXPLAIN |
 | **0.6** | Wider SQL | CockroachDB, Redshift, libSQL, ClickHouse, Oracle |
 | **0.7** | Beyond SQL | MongoDB, Redis, DynamoDB, Cassandra |

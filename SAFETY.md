@@ -41,69 +41,43 @@ conflict checks), but several gaps below still matter. Read them before you rely
 
 ## Known gaps
 
-What still stands between Xenon and "safe on production, no caveats", most important first.
+What still stands between Xenon and "safe on production, no caveats", most important first,
+and the release that closes each. The goal: every fixable gap closed in **0.3**; the last
+three are inherent and stay documented.
 
-### High
-
-1. **Recognising writes is a reading of the SQL, not a guarantee.** It misses side effects
-   inside reads, such as `select nextval(…)`, `select setval(…)`, `select pg_terminate_backend(…)`,
-   `dblink_exec`, or a function that writes. Production may not ask for those, and on SQL Server
-   a read-only connection may let them through. *Fix:* a read-only role; and, planned, using
-   the server's own answer where it has one (for example running production reads in a
-   read-only transaction on Postgres).
-2. **Opening a table can be expensive.** Browsing runs `select … limit 1000`, and sorting by a
-   column adds `order by`; on a very large table without an index on that column, that's a
-   full scan. *Planned:* warn before sorting large tables on unindexed columns (from the
-   Structure view's index list).
-
-### Medium
-
-3. **TLS defaults to `prefer`**, which encrypts but doesn't verify the server, so it is open to
-   interception on an untrusted network. *Planned:* `verify-full` by default for production
-   connections, and a warning when production uses less.
-4. **History keeps SQL on disk.** Query history and reopened tabs store SQL text, including any
-   values typed into it, in `~/Library/Application Support/Xenon/xenon.db`, protected only by
-   your macOS account (and FileVault). *Planned:* an option not to record history for
-   production connections. Today: Settings → Data → Clear history.
-5. **Quitting with a transaction open doesn't ask.** Disconnecting does; quitting ends the
-   session, which rolls the transaction back. *Planned:* ask before quitting too.
-6. **Cancelling on SQL Server ends the session.** That also rolls back a transaction you had
-   open and loses temporary tables and session settings. *Planned:* say so before cancelling
-   when a transaction is open.
-7. **Deletes don't check the row is unchanged.** Updates from the grid only apply if the
-   edited cells still hold what you loaded; a delete only checks the row still exists.
-8. **Results leave the database when you ask them to.** Copying, exporting and the inspector
-    put data on your clipboard or disk, unencrypted. That's the point of them, but treat
-    exports of production data accordingly.
-
-### Low
-
-9. **SSH tunnels listen on `127.0.0.1`.** While a tunnel is open, any process running as you
-    can use it.
-10. **Saving edits on real servers isn't in CI yet.** The editing tests run against SQLite in
-    CI and against the other engines locally (`dev/fleet`); the driver-level suite runs on all
-    of them in CI.
-11. **SQL Server `money`** is exact only below about 900 billion (the driver decodes it as a
-    floating-point number).
+| # | Gap | Severity | Plan | Fixed in |
+|---|---|---|---|---|
+| 1 | **Recognising writes reads the SQL, not the server.** Side effects inside reads (`select nextval(…)`, `select setval(…)`, `select pg_terminate_backend(…)`, `dblink_exec`, a function that writes) don't count as writes: production may not ask, and a read-only SQL Server connection may let them through. | High | On production, run statements recognised as reads inside a read-only transaction (Postgres, MySQL, MariaDB), so the server refuses a hidden write. SQL Server has no read-only transaction: there the read-only role stays the guarantee. | 0.3 |
+| 2 | **Opening a table can be expensive.** Sorting a browsed table adds `order by`; on a very large table without an index on that column, that's a full scan. | High | Warn before sorting large tables on unindexed columns, from the Structure view's index list. | 0.3 |
+| 3 | **TLS defaults to `prefer`**, which encrypts but doesn't verify the server, so it is open to interception on an untrusted network. | Medium | `verify-full` by default for production connections; a warning when production uses less. | 0.3 |
+| 4 | **History keeps SQL on disk.** Query history and reopened tabs store SQL text, including values typed into it, in `~/Library/Application Support/Xenon/xenon.db`, protected by your macOS account (and FileVault). Today: Settings → Data → Clear history. | Medium | An option not to record history for production connections. | 0.3 |
+| 5 | **Quitting with a transaction open doesn't ask.** Disconnecting does; quitting ends the session, which rolls the transaction back. | Medium | Ask before quitting, as disconnecting does. | 0.3 |
+| 6 | **Cancelling on SQL Server ends the session**, which also rolls back an open transaction and loses temporary tables and session settings. | Medium | Say so before cancelling when a transaction is open. | 0.3 |
+| 7 | **Deletes don't check the row is unchanged.** Updates from the grid only apply if the edited cells still hold what you loaded; a delete only checks the row still exists. | Medium | The same check for deletes. | 0.3 |
+| 8 | **Saving edits on real servers isn't in CI.** Editing is tested against SQLite in CI and the other engines locally (`dev/fleet`); the driver-level suite runs on all of them in CI. | Low | Move saving into a crate CI can build on Linux, and run it against every engine. | 0.3 |
+| 9 | **SQL Server `money`** is exact only below about 900 billion (the driver decodes it as a floating-point number). | Low | Read it exactly, upstream in the driver or by fetching it as text. | 1.0 at the latest |
+| 10 | **Results leave the database when you ask them to.** Copying, exporting and the inspector put data on your clipboard or disk, unencrypted. | By design | That's what they're for; treat exports of production data accordingly. | Documented |
+| 11 | **SSH tunnels listen on `127.0.0.1`.** While a tunnel is open, any process running as you can use it. | By design | The same as `ssh -L`, which Xenon uses. | Documented |
 
 ## Checklist to "production-ready"
 
-- [x] Read-only enforced by every engine's session or file mode (and by refusing writes on SQL Server)
-- [x] Production confirms every recognised write, with the connection's name typed
-- [x] Grid edits: one transaction, exactly one row each, primary key required, no lost updates
-- [x] Row limits never roll back a write; a row-limit cancel can't stop the next query
-- [x] Secrets in the Keychain; SSH host keys checked
-- [x] Conformance suite against every engine in CI
-- [x] Statement and lock timeouts, with production defaults
-- [x] Open-transaction indicator, with Commit / Roll back, and a prompt before disconnecting
-- [ ] A prompt before quitting with a transaction open
-- [x] Scripts as one transaction on production; a failed one says nothing was kept
-- [ ] `verify-full` by default for production; warn on weaker TLS
-- [ ] Use the server's read-only mode for production reads where it has one
-- [ ] History off (or cleared on quit) for production connections
-- [ ] Warn before sorting large tables on unindexed columns
-- [ ] Deletes from the grid check the row is unchanged
-- [ ] Editing tests against every engine in CI
+- [x] Read-only enforced by every engine's session or file mode (and by refusing writes on SQL Server) (0.2)
+- [x] Production confirms every recognised write, with the connection's name typed (0.1)
+- [x] Grid edits: one transaction, exactly one row each, primary key required, no lost updates (0.2)
+- [x] Row limits never roll back a write; a row-limit cancel can't stop the next query (0.2)
+- [x] Secrets in the Keychain; SSH host keys checked (0.1)
+- [x] Conformance suite against every engine in CI (0.2)
+- [x] Statement and lock timeouts, with production defaults (0.2)
+- [x] Open-transaction indicator, with Commit / Roll back, and a prompt before disconnecting (0.2)
+- [x] Scripts as one transaction on production; a failed one says nothing was kept (0.2)
+- [ ] Use the server's read-only mode for production reads where it has one (0.3)
+- [ ] Warn before sorting large tables on unindexed columns (0.3)
+- [ ] `verify-full` by default for production; warn on weaker TLS (0.3)
+- [ ] History off for production connections (0.3)
+- [ ] A prompt before quitting with a transaction open (0.3)
+- [ ] A warning before cancelling on SQL Server with a transaction open (0.3)
+- [ ] Deletes from the grid check the row is unchanged (0.3)
+- [ ] Editing tests against every engine in CI (0.3)
 
 ## Reporting a security problem
 
