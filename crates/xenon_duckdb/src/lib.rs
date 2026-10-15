@@ -162,6 +162,7 @@ impl DuckDbConnection {
         self.cancel.user.store(false, Ordering::SeqCst);
         let started = Instant::now();
         let mut feed = Feed::new(progress);
+        let writes = xenon_driver::sql::writes(sql);
         let mut outcome = None;
         let mut statements = 0;
         let mut cancelled = false;
@@ -230,6 +231,10 @@ impl DuckDbConnection {
                 };
                 if result.rows.len() == row_limit {
                     result.truncated = true;
+                    // A write's rows are all read, so it surely finishes.
+                    if writes {
+                        continue;
+                    }
                     break;
                 }
                 let mut values = Vec::with_capacity(width);
@@ -782,6 +787,7 @@ mod tests {
                 slow: "select count(*) from range(10000000000) a",
                 rollback: "rollback",
                 referential_actions: false,
+                delete_returning: Some("delete from {table} returning id"),
             },
         );
     }

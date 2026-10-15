@@ -92,6 +92,23 @@ pub struct Statement {
     pub exactly_one: bool,
 }
 
+/// Whether a column's loaded value can be checked with `=` before saving:
+/// not JSON (Postgres's `json` has no `=`), XML, spatial or SQL Server's legacy
+/// `text`/`ntext`/`image`.
+fn comparable(conn: &dyn Connection, column: &xenon_driver::Column) -> bool {
+    let kind = column
+        .type_name
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let legacy = conn.uses_top() && matches!(kind.as_str(), "text" | "ntext" | "image");
+    !(legacy
+        || kind.contains("json")
+        || kind.contains("xml")
+        || kind.contains("geometry")
+        || kind.contains("geography"))
+}
+
 /// The statements that save `edits`: deletes, then updates, then inserts.
 pub fn statements(
     conn: &dyn Connection,
@@ -136,8 +153,23 @@ pub fn statements(
             .map(|(col, value)| format!("{} = {}", column(*col), conn.literal(value)))
             .collect::<Vec<_>>()
             .join(", ");
+        // Only if the edited cells still hold what was loaded: a row someone
+        // else changed meanwhile then matches nothing, and the save stops
+        // instead of overwriting their change.
+        let unchanged: String = cells
+            .iter()
+            .filter(|(col, _)| !target.key.contains(col) && comparable(conn, &data.columns[*col]))
+            .map(|(col, _)| match &data.rows[row][*col] {
+                Value::Null => format!(" and {} is null", column(*col)),
+                Value::Real(_) => String::new(),
+                old => format!(" and {} = {}", column(*col), conn.literal(old)),
+            })
+            .collect();
         out.push(Statement {
-            sql: format!("update {name} set {assignments} where {}", key_of(row)),
+            sql: format!(
+                "update {name} set {assignments} where {}{unchanged}",
+                key_of(row)
+            ),
             exactly_one: true,
         });
     }
@@ -195,7 +227,8 @@ pub fn save(conn: &dyn Connection, statements: &[Statement]) -> Result<usize> {
             };
             if statement.exactly_one && affected != 1 {
                 let why = if affected == 0 {
-                    "a row was changed or deleted after it was loaded".to_string()
+                    "a row was changed or deleted after it was loaded (reload the table to see it now)"
+                        .to_string()
                 } else {
                     format!("its key matched {affected} rows, not one")
                 };
@@ -311,7 +344,9 @@ mod tests {
             sql,
             [
                 "delete from orders where id = 1",
-                "update orders set status = 'o''clock', note = NULL where id = 2",
+                // Saved only if the edited cells still hold what was loaded.
+                "update orders set status = 'o''clock', note = NULL \
+                 where id = 2 and status = 'pending' and note = 'it''s'",
                 "insert into orders (status) values ('pending')",
             ]
         );
@@ -351,6 +386,21 @@ mod tests {
         assert!(err.to_string().starts_with("Nothing was saved"), "{err}");
         // Row 1's update was rolled back with it.
         assert_eq!(fetch(&conn).rows[0][1], Value::Text("paid".into()));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn an_edit_never_overwrites_someone_elses_change() {
+        let (conn, path) = shop();
+        let data = fetch(&conn);
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(0), 1, Value::Text("refunded".into()), None);
+        // Someone else changes the same cell after we loaded it.
+        conn.execute("update orders set status = 'shipped' where id = 1", 0)
+            .unwrap();
+        let err = save(&conn, &statements(&conn, &target(), &data, &edits)).unwrap_err();
+        assert!(err.to_string().starts_with("Nothing was saved"), "{err}");
+        assert_eq!(fetch(&conn).rows[0][1], Value::Text("shipped".into()));
         std::fs::remove_file(path).ok();
     }
 }

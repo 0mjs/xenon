@@ -348,6 +348,7 @@ impl MssqlConnection {
         let mut sets: Vec<ResultSet> = Vec::new();
         let mut types: Vec<ColumnType> = Vec::new();
         let mut over_limit = false;
+        let writes = xenon_driver::sql::writes(sql);
         let mut cancelled = false;
         loop {
             let item = match stream.try_next().await {
@@ -386,6 +387,11 @@ impl MssqlConnection {
                     let Some(set) = sets.last_mut() else { continue };
                     if set.rows.len() == row_limit {
                         set.truncated = true;
+                        // A write must finish (ending the session would roll it
+                        // back), so its extra rows are read and dropped instead.
+                        if writes {
+                            continue;
+                        }
                         over_limit = true;
                         break;
                     }
@@ -444,6 +450,17 @@ impl Connection for MssqlConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        // SQL Server has no read-only session, so refuse what would write.
+        let statement = sql.strip_prefix(SHOWPLAN).unwrap_or(sql);
+        if self.options.read_only
+            && let Some((_, what)) = xenon_driver::sql::assess(statement)
+        {
+            return Err(QueryError {
+                message: format!("This is a read-only connection, so {what} isn't allowed."),
+                position: None,
+            }
+            .into());
+        }
         let started = Instant::now();
         let mut feed = Feed::new(progress);
         let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
@@ -953,6 +970,26 @@ mod live {
 
     #[test]
     #[ignore]
+    fn read_only_refuses_writes() {
+        let conn = MssqlConnection::connect_options(&ConnectOptions {
+            read_only: true,
+            ..fleet().options.clone()
+        })
+        .unwrap();
+        assert!(conn.execute("select 1", 10).is_ok());
+        for write in [
+            "delete from customers where id = 1",
+            "exec sp_rename 'customers', 'gone'",
+            "select * into xenon_ro_copy from customers",
+            "drop table customers",
+        ] {
+            let err = conn.execute(write, 10).unwrap_err().to_string();
+            assert!(err.contains("read-only connection"), "{write}: {err}");
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn conformance() {
         xenon_driver::conformance::run(
             &fleet(),
@@ -971,6 +1008,7 @@ mod live {
                 slow: "waitfor delay '00:00:05'",
                 rollback: "rollback",
                 referential_actions: true,
+                delete_returning: Some("delete from {table} output deleted.id"),
             },
         );
     }

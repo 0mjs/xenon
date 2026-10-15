@@ -10,7 +10,9 @@ A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server, SQLite
   also has a button or menu item.
 - **Safe by default.** Saved connections carry a development / production label and an optional
   read-only mode the database enforces. Risky statements ask first; on production you type the
-  connection's name to go ahead. Passwords live in the macOS Keychain.
+  connection's name to go ahead. Edits save in one transaction and never overwrite someone
+  else's change. Passwords live in the macOS Keychain. See [SAFETY.md](SAFETY.md) for what's
+  guarded, how to set up a production connection, and the gaps that remain.
 - **Postgres, MySQL, MariaDB, SQL Server (and Azure SQL), SQLite and DuckDB**, plus CSV, Parquet and JSON files opened straight into SQL, with TLS (from `disable`
   to `verify-full`), cancel,
   exact numbers, query plans.

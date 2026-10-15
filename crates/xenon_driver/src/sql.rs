@@ -239,8 +239,35 @@ fn assess_statement(statement: &str) -> Option<(Risk, String)> {
         | "comment" | "reindex" | "vacuum" | "cluster" | "refresh" | "replace" | "upsert" => {
             Some((Risk::Write, summary))
         }
+        // Procedures and anonymous blocks can do anything.
+        "exec" | "execute" | "call" | "do" => Some((Risk::Write, summary)),
+        // `select … into new_table` creates a table (Postgres, SQL Server).
+        "select" if has("into") => Some((Risk::Write, "SELECT INTO".into())),
         _ => None,
     }
+}
+
+/// True when `sql` changes anything, as far as [`assess`] can tell.
+pub fn writes(sql: &str) -> bool {
+    assess(sql).is_some()
+}
+
+/// True when `sql` tries to turn a read-only session back into a read-write
+/// one (`set transaction read write`, `begin read write`,
+/// `set default_transaction_read_only = off`…).
+pub fn lifts_read_only(sql: &str) -> bool {
+    split_statements(sql).into_iter().any(|range| {
+        let words = words_outside_literals(&sql[range]);
+        words
+            .windows(2)
+            .any(|pair| pair[0] == "read" && pair[1] == "write")
+            || words.iter().any(|word| {
+                matches!(
+                    word.as_str(),
+                    "transaction_read_only" | "default_transaction_read_only" | "tx_read_only"
+                )
+            })
+    })
 }
 
 /// Lowercased words of a statement, skipping comments, string literals and
@@ -503,6 +530,47 @@ fn same_line(sql: &str, a: usize, b: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn procedures_blocks_and_select_into_are_writes() {
+        for sql in [
+            "exec dbo.purge_old",
+            "EXECUTE sp_rename 'a', 'b'",
+            "call refresh_totals()",
+            "do $$ begin delete from t; end $$",
+            "select * into backup_orders from orders",
+        ] {
+            assert!(writes(sql), "{sql}");
+        }
+        for sql in [
+            "select * from orders",
+            "select 'into' as word",
+            "explain select 1",
+        ] {
+            assert!(!writes(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn spots_attempts_to_lift_read_only() {
+        for sql in [
+            "set transaction read write",
+            "BEGIN READ WRITE",
+            "start transaction read write",
+            "set session characteristics as transaction read write",
+            "set default_transaction_read_only = off",
+            "select 1; SET SESSION transaction_read_only = 0",
+        ] {
+            assert!(lifts_read_only(sql), "{sql}");
+        }
+        for sql in [
+            "select 'read write'",
+            "select * from read_write_log",
+            "begin",
+        ] {
+            assert!(!lifts_read_only(sql), "{sql}");
+        }
+    }
 
     #[test]
     fn reserved_words_are_sorted() {

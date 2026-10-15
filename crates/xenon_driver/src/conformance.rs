@@ -27,13 +27,20 @@ pub struct Dialect {
     pub rollback: &'static str,
     /// Foreign keys take `on delete cascade` (DuckDB's don't).
     pub referential_actions: bool,
+    /// `delete from {table}` that returns the deleted ids, where the engine has
+    /// one (`returning id`, SQL Server's `output deleted.id`); `{table}` is replaced.
+    pub delete_returning: Option<&'static str>,
 }
 
 type Check = fn(&dyn Connection, &Dialect) -> Result<()>;
 
 /// Run every check, then fail with the list of those that didn't pass.
 pub fn run(conn: &dyn Connection, dialect: &Dialect) {
-    let checks: [(&str, Check); 10] = [
+    let checks: [(&str, Check); 11] = [
+        (
+            "a write returning more rows than the limit still happens",
+            capped_write,
+        ),
         ("values round-trip through literals", round_trip),
         ("affected rows are counted", affected_rows),
         ("the row limit stops a query and says so", row_limit),
@@ -179,6 +186,35 @@ fn round_trip(conn: &dyn Connection, d: &Dialect) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn capped_write(conn: &dyn Connection, d: &Dialect) -> Result<()> {
+    let Some(template) = d.delete_returning else {
+        return Ok(());
+    };
+    let table = "xenon_conf_values";
+    exec(
+        conn,
+        &format!("create table {table} (id {} primary key)", d.integer),
+    )?;
+    let values: Vec<String> = (1..=30).map(|n| format!("({n})")).collect();
+    exec(
+        conn,
+        &format!("insert into {table} (id) values {}", values.join(", ")),
+    )?;
+    let deleted = rows(conn, &template.replace("{table}", table), 10)?;
+    ensure!(
+        deleted.rows.len() == 10 && deleted.truncated,
+        "the delete showed {} rows",
+        deleted.rows.len()
+    );
+    let left = rows(conn, &format!("select count(*) from {table}"), 10)?;
+    ensure!(
+        normal(&left.rows[0][0]) == normal(&Value::Integer(0)),
+        "the delete was undone by the row limit: {:?} rows left",
+        left.rows[0][0]
+    );
     Ok(())
 }
 

@@ -309,6 +309,16 @@ impl Connection for MysqlConnection {
             .into());
         }
 
+        if self.read_only && xenon_driver::sql::lifts_read_only(sql) {
+            return Err(QueryError {
+                message:
+                    "This is a read-only connection, so switching it to read-write isn't allowed."
+                        .into(),
+                position: None,
+            }
+            .into());
+        }
+        let writes = xenon_driver::sql::writes(sql);
         let started = Instant::now();
         let mut feed = Feed::new(progress);
         let mut cancelled = false;
@@ -366,8 +376,12 @@ impl Connection for MysqlConnection {
                     if !rows.truncated {
                         // Stop the server instead of reading rows we'd discard.
                         rows.truncated = true;
-                        cancelled_for_limit = true;
-                        self.cancel.stop_now();
+                        // A write must finish (a kill would roll it back), so its
+                        // extra rows are read and dropped instead.
+                        if !writes {
+                            cancelled_for_limit = true;
+                            self.cancel.stop_now();
+                        }
                     }
                     continue;
                 }
@@ -824,6 +838,7 @@ mod live {
         slow: "select benchmark(2000000000, sha2('xenon', 256))",
         rollback: "rollback",
         referential_actions: true,
+        delete_returning: None,
     };
 
     #[test]
@@ -835,7 +850,13 @@ mod live {
     #[test]
     #[ignore]
     fn conformance_mariadb() {
-        xenon_driver::conformance::run(&fleet(53307), &DIALECT);
+        xenon_driver::conformance::run(
+            &fleet(53307),
+            &xenon_driver::conformance::Dialect {
+                delete_returning: Some("delete from {table} returning id"),
+                ..DIALECT
+            },
+        );
     }
 
     fn fleet(port: u16) -> MysqlConnection {

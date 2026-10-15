@@ -69,6 +69,7 @@ pub struct PostgresConnection {
     version: String,
     client: Client,
     cancel: Arc<PgCancel>,
+    read_only: bool,
 }
 
 struct PgCancel {
@@ -165,6 +166,10 @@ impl PostgresConnection {
     }
 
     fn connect(mut config: Config, ssl: SslMode) -> Result<Self> {
+        // Read-only rides in the startup options (set above, or in a URL's `options`).
+        let read_only = config
+            .get_options()
+            .is_some_and(|o| o.contains("default_transaction_read_only=on"));
         if config.get_connect_timeout().is_none() {
             config.connect_timeout(CONNECT_TIMEOUT);
         }
@@ -217,6 +222,7 @@ impl PostgresConnection {
                 .unwrap_or_default();
 
             Ok(Self {
+                read_only,
                 name,
                 id,
                 local,
@@ -266,6 +272,7 @@ impl PostgresConnection {
         let mut current: Option<ResultSet> = None;
         let mut cancelled_for_limit = false;
         let mut limit_stop = None;
+        let writes = xenon_driver::sql::writes(sql);
         let mut cancelled = false;
 
         while let Some(message) = stream.next().await {
@@ -310,8 +317,12 @@ impl PostgresConnection {
                         if !result.truncated {
                             // Stop the server instead of streaming rows we'd discard.
                             result.truncated = true;
-                            cancelled_for_limit = true;
-                            limit_stop = Some(self.cancel.stop());
+                            // A write must finish (a cancel would roll it back), so
+                            // its extra rows are read and dropped instead.
+                            if !writes {
+                                cancelled_for_limit = true;
+                                limit_stop = Some(self.cancel.stop());
+                            }
                         }
                         continue;
                     }
@@ -384,6 +395,15 @@ impl Connection for PostgresConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        if self.read_only && xenon_driver::sql::lifts_read_only(sql) {
+            return Err(QueryError {
+                message:
+                    "This is a read-only connection, so switching it to read-write isn't allowed."
+                        .into(),
+                position: None,
+            }
+            .into());
+        }
         runtime().block_on(self.run(sql, row_limit, progress))
     }
 
@@ -801,6 +821,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("25006"), "{err}");
+        // And it can't be switched back on from the editor.
+        for lift in [
+            "set default_transaction_read_only = off",
+            "begin read write; create table xenon_ro_probe (x int); commit",
+        ] {
+            let err = db.execute(lift, 10).unwrap_err().to_string();
+            assert!(err.contains("read-only connection"), "{lift}: {err}");
+        }
     }
 
     #[test]
@@ -932,6 +960,7 @@ mod tests {
                 slow: "select pg_sleep(5)",
                 rollback: "rollback",
                 referential_actions: true,
+                delete_returning: Some("delete from {table} returning id"),
             },
         );
     }

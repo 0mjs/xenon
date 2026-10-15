@@ -332,6 +332,7 @@ impl SqliteConnection {
         let conn = self.lock()?;
         let started = Instant::now();
         let mut feed = Feed::new(progress);
+        let writes = xenon_driver::sql::writes(sql);
         let mut cancelled = false;
         let mut batch = Batch::new(&conn, sql);
         let mut outcome = None;
@@ -376,6 +377,10 @@ impl SqliteConnection {
                 };
                 if result.rows.len() == row_limit {
                     result.truncated = true;
+                    // A write's rows are all read, so it surely finishes.
+                    if writes {
+                        continue;
+                    }
                     break;
                 }
                 let mut values = Vec::with_capacity(width);
@@ -517,6 +522,7 @@ mod tests {
                        select count(*) from c",
                 rollback: "rollback",
                 referential_actions: true,
+                delete_returning: Some("delete from {table} returning id"),
             },
         );
     }
