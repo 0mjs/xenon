@@ -412,6 +412,8 @@ pub(crate) struct Browse {
     info_error: Option<SharedString>,
     /// Show the table's structure instead of its rows.
     pub(crate) structure: bool,
+    /// Its definition in a read-only editor, and the text it holds.
+    definition: Option<(String, Entity<EditorState>)>,
 }
 
 impl Browse {
@@ -864,6 +866,7 @@ impl Workspace {
                         info: None,
                         info_error: None,
                         structure: false,
+                        definition: None,
                         builder: None,
                     }),
                 )
@@ -2760,6 +2763,54 @@ impl Workspace {
         .detach();
     }
 
+    /// Build (or rebuild) the Structure tab's highlighted definition: an editor
+    /// needs a window, so it's made here rather than while drawing.
+    fn refresh_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = &self.tabs[self.active];
+        let (Some(browse), Some(session)) =
+            (&tab.browse, tab.session.and_then(|id| self.session(id)))
+        else {
+            return;
+        };
+        let Some(info) = browse.info.as_ref().filter(|_| browse.structure) else {
+            return;
+        };
+        let is_view = session
+            .schemas
+            .iter()
+            .find(|s| s.name == browse.schema)
+            .and_then(|s| s.objects.iter().find(|o| o.name == browse.table))
+            .is_some_and(|o| o.kind == ObjectKind::View);
+        let conn = session.conn.clone();
+        let (text, _) = crate::structure::definition(&crate::structure::View {
+            info,
+            table: &browse.table,
+            is_view,
+            ident: &|name| conn.ident(name),
+            open: Rc::new(|_, _, _, _| {}),
+            editor: None,
+        });
+        if browse
+            .definition
+            .as_ref()
+            .is_some_and(|(shown, _)| *shown == text)
+        {
+            return;
+        }
+        let editor = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx)
+                .language("sql")
+                .line_number(false)
+                .searchable(true)
+                .default_value(text.clone());
+            state.set_readonly(true, cx);
+            state
+        });
+        if let Some(browse) = &mut self.tabs[self.active].browse {
+            browse.definition = Some((text, editor));
+        }
+    }
+
     /// Switch the active table tab between its rows and its structure.
     pub(crate) fn toggle_structure(&mut self, cx: &mut Context<Self>) {
         let Some(browse) = &mut self.tabs[self.active].browse else {
@@ -4040,6 +4091,7 @@ impl Render for Workspace {
         };
         let theme = cx.theme().clone();
         self.refresh_json_view(window, cx);
+        self.refresh_definition(window, cx);
 
         let open = self.side_panel_open(window);
         let gap = self.card_gap();
@@ -4996,6 +5048,7 @@ impl Workspace {
                 info,
                 table: &browse.table,
                 is_view,
+                editor: browse.definition.as_ref().map(|(_, e)| e.clone()),
                 ident: &|name| conn.ident(name),
                 open: Rc::new(move |schema, table, window, cx| {
                     this.update(cx, |this, cx| this.open_table(schema, table, window, cx))

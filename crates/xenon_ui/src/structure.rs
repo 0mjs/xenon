@@ -21,6 +21,18 @@ pub struct View<'a> {
     /// Spell an identifier for the connection's engine.
     pub ident: &'a dyn Fn(&str) -> String,
     pub open: OpenTable,
+    /// The definition in a read-only SQL editor, highlighted like the editor.
+    pub editor: Option<gpui::Entity<gpui_component::input::EditorState>>,
+}
+
+/// The table's or view's definition (the engine's own, or one written from its
+/// parts), and whether Xenon wrote it.
+pub fn definition(view: &View<'_>) -> (String, bool) {
+    match &view.info.definition {
+        Some(definition) => (definition.trim().to_string(), false),
+        None if !view.is_view => (create_table(view), true),
+        None => (String::new(), false),
+    }
 }
 
 pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
@@ -226,11 +238,7 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
     }
 
     // Definition: the engine's own, or one written from the parts above.
-    let (definition, written) = match &info.definition {
-        Some(definition) => (definition.trim().to_string(), false),
-        None if !view.is_view => (create_table(&view), true),
-        None => (String::new(), false),
-    };
+    let (definition, written) = definition(&view);
     if !definition.is_empty() {
         let copy = definition.clone();
         body = body.child(
@@ -275,8 +283,23 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                             }),
                         ),
                 )
-                .child(
-                    div()
+                .child(match &view.editor {
+                    // Highlighted, selectable, searchable: a read-only editor.
+                    Some(editor) => div()
+                        .h(px((definition.lines().count().min(40) as f32) * 18. + 20.))
+                        .py(px(6.))
+                        .rounded(px(6.))
+                        .bg(theme.s1)
+                        .border_1()
+                        .border_color(theme.line_2)
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.5))
+                        .child(
+                            gpui_component::input::Editor::new(editor)
+                                .h_full()
+                                .appearance(false),
+                        ),
+                    None => div()
                         .p(px(12.))
                         .rounded(px(6.))
                         .bg(theme.s1)
@@ -290,7 +313,7 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                             let shown = line.replace('\t', "    ").replace(' ', "\u{00a0}");
                             div().min_h(px(17.)).child(SharedString::from(shown))
                         })),
-                ),
+                }),
         );
     }
     body.into_any_element()
