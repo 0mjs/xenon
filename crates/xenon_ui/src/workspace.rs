@@ -118,10 +118,17 @@ pub(crate) struct Session {
     /// The server's TLS certificate is checked (`verify-ca` / `verify-full`),
     /// or it's a file.
     pub tls_verified: bool,
+    /// How it was opened, to open it again if it drops.
+    pub(crate) profile: Profile,
+    /// When it last ran something; one idle for long is checked before use.
+    pub(crate) last_used: std::time::Instant,
+    /// Checking it still answers, or opening it again.
+    pub(crate) reconnecting: bool,
 }
 
 /// Everything needed to open (and maybe remember) a connection.
-struct Profile {
+#[derive(Clone)]
+pub(crate) struct Profile {
     saved_id: Option<i64>,
     /// Remember this connection after it opens.
     save: bool,
@@ -186,7 +193,7 @@ impl Profile {
     }
 
     /// Runs on a background thread.
-    fn connect(&self) -> anyhow::Result<Arc<dyn Connection>> {
+    pub(crate) fn connect(&self) -> anyhow::Result<Arc<dyn Connection>> {
         Ok(match &self.target {
             RequestTarget::Sqlite(path) => {
                 let path = Path::new(path);
@@ -731,7 +738,7 @@ impl Workspace {
         self.sessions.iter().find(|s| s.id == id)
     }
 
-    fn session_mut(&mut self, id: usize) -> Option<&mut Session> {
+    pub(crate) fn session_mut(&mut self, id: usize) -> Option<&mut Session> {
         self.sessions.iter_mut().find(|s| s.id == id)
     }
 
@@ -1094,6 +1101,9 @@ impl Workspace {
                         let id = this.next_session_id;
                         this.sessions.push(Session {
                             id,
+                            profile: profile.clone(),
+                            last_used: std::time::Instant::now(),
+                            reconnecting: false,
                             engine: match &profile.target {
                                 RequestTarget::Sqlite(_)
                                     if conn.server_version().starts_with("duckdb") =>
@@ -1929,6 +1939,26 @@ impl Workspace {
         else {
             return;
         };
+        if self.session(session_id).is_some_and(|s| s.reconnecting) {
+            return;
+        }
+        // Idle a while (the Mac may have slept): check it's still there first.
+        if self.needs_check(session_id) {
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.flash = Some(("Checking the connection…".into(), false));
+            }
+            cx.notify();
+            self.check_then(
+                session_id,
+                tab_id,
+                move |this, cx| this.execute_with_limit(tab_id, sql, origin, row_limit, cx),
+                cx,
+            );
+            return;
+        }
+        if let Some(session) = self.session_mut(session_id) {
+            session.last_used = std::time::Instant::now();
+        }
         let Some(session) = self.session(session_id) else {
             return;
         };
@@ -2063,7 +2093,16 @@ impl Workspace {
                     )),
                     _ => None,
                 };
+                if let Some(session) = this.session_mut(session_id) {
+                    session.last_used = std::time::Instant::now();
+                }
+                let lost = result
+                    .as_ref()
+                    .is_err_and(crate::reconnect::may_be_lost);
                 this.finish_query(tab_id, session_id, result, schemas, cx);
+                if lost {
+                    this.check_after_failure(session_id, tab_id, cx);
+                }
                 if let (Some(note), Some(tab)) =
                     (note, this.tabs.iter_mut().find(|t| t.id == tab_id))
                 {

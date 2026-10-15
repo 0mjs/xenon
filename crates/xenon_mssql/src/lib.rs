@@ -783,6 +783,27 @@ impl Connection for MssqlConnection {
         self.cancel.clone()
     }
 
+    fn alive(&self) -> bool {
+        let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        // A cancel ended the session on purpose; the next query opens another.
+        let Some(client) = guard.as_mut() else {
+            return true;
+        };
+        let answered = runtime().block_on(async {
+            match client.simple_query("select 1").await {
+                Ok(stream) => stream.into_results().await.is_ok(),
+                // The server answered, if only to refuse.
+                Err(tiberius::error::Error::Server(_)) => true,
+                Err(_) => false,
+            }
+        });
+        if !answered {
+            // Gone: the next query opens a new session.
+            *guard = None;
+        }
+        answered
+    }
+
     fn in_transaction(&self) -> Option<bool> {
         let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
         // The session ended (a cancel or the row limit): its transaction went with it.
@@ -1029,6 +1050,29 @@ mod live {
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    #[ignore]
+    fn a_lost_connection_is_noticed() {
+        let _serial = serial();
+        let (db, other) = (fleet(), fleet());
+        assert!(db.alive());
+        let spid = match db.execute("select @@spid", 1).unwrap().outcome {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("expected rows, got {other:?}"),
+        };
+        other
+            .execute(&format!("kill {}", db.literal(&spid)), 1)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while db.alive() {
+            assert!(
+                Instant::now() < deadline,
+                "still alive after its session was killed"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]

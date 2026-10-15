@@ -108,6 +108,9 @@ impl Connection for Tunneled {
     fn in_transaction(&self) -> Option<bool> {
         self.inner.in_transaction()
     }
+    fn alive(&self) -> bool {
+        self.inner.alive()
+    }
     fn begin_read_only(&self) -> Option<&'static str> {
         self.inner.begin_read_only()
     }

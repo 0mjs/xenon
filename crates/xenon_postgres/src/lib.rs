@@ -672,6 +672,17 @@ impl Connection for PostgresConnection {
         Some("start transaction read only")
     }
 
+    fn alive(&self) -> bool {
+        if self.client.is_closed() {
+            return false;
+        }
+        match runtime().block_on(self.client.simple_query("select 1")) {
+            Ok(_) => true,
+            // The server answered, if only to refuse (inside a failed transaction).
+            Err(err) => err.code().is_some(),
+        }
+    }
+
     fn in_transaction(&self) -> Option<bool> {
         // `now()` is when the transaction began; outside one, that's this statement.
         match runtime().block_on(
@@ -1009,6 +1020,29 @@ mod tests {
         match result.outcome {
             QueryOutcome::Rows(rows) => rows,
             other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_a_lost_connection_is_noticed() {
+        let (Some(db), Some(other)) = (live(), live()) else {
+            return;
+        };
+        assert!(db.alive());
+        let pid = rows(db.execute("select pg_backend_pid()", 1).unwrap()).rows[0][0].clone();
+        other
+            .execute(
+                &format!("select pg_terminate_backend({})", db.literal(&pid)),
+                1,
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while db.alive() {
+            assert!(
+                Instant::now() < deadline,
+                "still alive after its session was ended"
+            );
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

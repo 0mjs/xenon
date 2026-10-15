@@ -453,6 +453,14 @@ pub trait Connection: Send + Sync {
         }
     }
 
+    /// Whether the server is still there: true when it answers, even with an
+    /// error (a statement inside a failed transaction is refused, but the
+    /// connection is fine); false when the connection is gone. May block as
+    /// long as the network does, so callers put a time limit on it.
+    fn alive(&self) -> bool {
+        true
+    }
+
     /// Whether a transaction the user began is still open (so its locks are
     /// held until commit or rollback). `None` when the engine can't say.
     fn in_transaction(&self) -> Option<bool> {

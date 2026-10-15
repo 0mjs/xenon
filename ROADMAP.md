@@ -85,7 +85,7 @@ so it can join the test fleet.
 | ✅ Several connections open at once; tabs bound to a connection | 0.2 |
 | ✅ SSH tunnels: password, key, agent, `~/.ssh/config` hosts, jump hosts (`ProxyJump`) | 0.2 |
 | Client certificates (mTLS), custom CA, `verify-full` for every TLS engine | 0.5 |
-| Reconnect after sleep or network loss, keep tabs and unsaved edits | 0.5 |
+| ✅ Reconnect after sleep or network loss, keeping tabs and unsaved edits; never re-runs a query by itself | 0.5 |
 | Connection colours and folders; import connections from a URL list or other clients' exports | 0.5 |
 | Cloud auth: AWS RDS IAM tokens, Azure AD, GCP Cloud SQL IAM | 1.0 |
 | Per-connection settings: row limit, statement timeout, auto-commit vs manual transactions | 1.0 |
@@ -154,10 +154,10 @@ so it can join the test fleet.
 |---|---|
 | ✅ Command palette, light/dark/system themes, keyboard shortcuts, menus | 0.1 |
 | ✅ Appearance: Classic or Floating layout, Solid or Frosted (blurred) window, six accents | 0.4 |
-| Restore session: open connections, tabs, editor contents, scroll positions | 0.5 |
+| ✅ Restore session: open connections, tabs, editor contents and table filters come back at launch. Still to do: scroll positions | 0.5 |
 | Multiple windows; drag a tab out into its own window | 1.0 |
 | Customisable keybindings (JSON file + a UI); Vim mode in the editor | 1.0 |
-| Settings UI (fonts, sizes, row limit, timeouts, theme) | 1.0 |
+| ✅ Settings UI: theme, layout, accent, editor size, row limits, production time limits, history, updates. Still to do: UI font and size | 1.0 |
 | Auto-update (Sparkle on macOS, equivalents elsewhere), release channels | 1.0 |
 | Linux and Windows builds at parity | 1.0 |
 | Accessibility: VoiceOver/Narrator labels, full keyboard reachability, contrast check | 1.0 |

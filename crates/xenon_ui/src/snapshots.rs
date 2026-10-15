@@ -186,6 +186,64 @@ fn fixture(dir: &Path) -> PathBuf {
     path
 }
 
+/// A connection that has dropped: it doesn't answer, and with `broken`, its
+/// queries fail the way a broken line does (not with the server's error).
+struct Dropped {
+    inner: Arc<dyn xenon_driver::Connection>,
+    broken: bool,
+}
+
+impl xenon_driver::Connection for Dropped {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn id(&self) -> String {
+        self.inner.id()
+    }
+    fn server_version(&self) -> String {
+        self.inner.server_version()
+    }
+    fn execute_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(xenon_driver::Progress),
+    ) -> anyhow::Result<xenon_driver::QueryResult> {
+        if self.broken {
+            anyhow::bail!("connection reset by peer");
+        }
+        self.inner.execute_streaming(sql, row_limit, progress)
+    }
+    fn introspect(&self) -> anyhow::Result<Vec<xenon_driver::Schema>> {
+        self.inner.introspect()
+    }
+    fn describe(&self, schema: &str, table: &str) -> anyhow::Result<xenon_driver::TableInfo> {
+        self.inner.describe(schema, table)
+    }
+    fn cancel_handle(&self) -> Arc<dyn xenon_driver::CancelHandle> {
+        self.inner.cancel_handle()
+    }
+    fn alive(&self) -> bool {
+        false
+    }
+}
+
+/// Make the active tab's connection look dropped, after sitting idle for `idle`.
+fn drop_connection(w: &mut Workspace, broken: bool, idle: std::time::Duration) -> usize {
+    let id = w.active_tab().session.expect("connected");
+    let session = w.session_mut(id).unwrap();
+    session.conn = Arc::new(Dropped {
+        inner: session.conn.clone(),
+        broken,
+    });
+    session.last_used = std::time::Instant::now() - idle;
+    id
+}
+
+fn is_dropped(w: &Workspace, session: usize) -> bool {
+    !w.session(session).unwrap().conn.alive()
+}
+
 fn seed_saved(store: &Store, shop: &Path) {
     let pg = |name: &str, host: &str, db: &str, environment| SavedConnection {
         id: 0,
@@ -337,6 +395,69 @@ fn snapshots() {
             w.update = Default::default();
             cx.notify();
         });
+        // The connection dropped while idle (the Mac slept): the next run
+        // reconnects first, then runs.
+        let idle = std::time::Duration::from_secs(120);
+        let mut session = 0;
+        shot.act(|w, window, cx| {
+            session = drop_connection(w, false, idle);
+            w.run(RunScope::All, window, cx);
+        });
+        assert!(
+            shot.settle(10, |w| !w.session(session).unwrap().reconnecting
+                && !w.is_running())
+        );
+        shot.act(|w, _, _| {
+            assert!(!is_dropped(w, session), "still on the dropped connection");
+            let flash = w.active_tab().flash.clone();
+            assert!(
+                flash
+                    .as_ref()
+                    .is_some_and(|(text, _)| text.contains("Reconnected")),
+                "{flash:?}"
+            );
+            assert!(w.error_text().is_none(), "{:?}", w.error_text());
+        });
+        // With a transaction open, it went with the old session: reconnect, run nothing.
+        shot.act(|w, window, cx| {
+            session = drop_connection(w, false, idle);
+            w.session_mut(session).unwrap().in_transaction = true;
+            w.run(RunScope::All, window, cx);
+        });
+        assert!(shot.settle(10, |w| !w.session(session).unwrap().reconnecting));
+        shot.act(|w, _, _| {
+            assert!(!is_dropped(w, session));
+            assert!(!w.session(session).unwrap().in_transaction);
+            assert!(!w.is_running(), "ran after its transaction was lost");
+            let flash = w.active_tab().flash.clone();
+            assert!(
+                flash
+                    .as_ref()
+                    .is_some_and(|(text, error)| *error && text.contains("rolled back")),
+                "{flash:?}"
+            );
+        });
+        // The line breaks mid-query: reconnect, say it may not have run, don't retry.
+        shot.act(|w, window, cx| {
+            session = drop_connection(w, true, std::time::Duration::ZERO);
+            w.run(RunScope::All, window, cx);
+        });
+        assert!(shot.settle(10, |w| {
+            !w.is_running()
+                && !w.session(session).unwrap().reconnecting
+                && w.active_tab().flash.is_some()
+        }));
+        shot.act(|w, _, _| {
+            assert!(!is_dropped(w, session));
+            let flash = w.active_tab().flash.clone();
+            assert!(
+                flash
+                    .as_ref()
+                    .is_some_and(|(text, _)| text.contains("may not have run")),
+                "{flash:?}"
+            );
+        });
+        shot.save(&format!("38-reconnected-{suffix}"));
         // The Classic layout, solid: the original edge-to-edge design.
         shot.act(|w, window, cx| {
             let prefs = crate::settings::Prefs {

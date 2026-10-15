@@ -36,7 +36,7 @@ type Check = fn(&dyn Connection, &Dialect) -> Result<()>;
 
 /// Run every check, then fail with the list of those that didn't pass.
 pub fn run(conn: &dyn Connection, dialect: &Dialect) {
-    let checks: [(&str, Check); 12] = [
+    let checks: [(&str, Check); 13] = [
         (
             "a read-only transaction refuses writes",
             read_only_transaction,
@@ -55,6 +55,10 @@ pub fn run(conn: &dyn Connection, dialect: &Dialect) {
         ("describe finds columns, keys and indexes", describe),
         ("introspect lists tables with their columns", introspect),
         ("cancel stops a running statement", cancel),
+        (
+            "a refused statement doesn't count as a lost connection",
+            alive_after_errors,
+        ),
     ];
     let mut failed = Vec::new();
     for (name, check) in checks {
@@ -525,6 +529,27 @@ fn introspect(conn: &dyn Connection, d: &Dialect) -> Result<()> {
     let columns: Vec<&str> = table.columns.iter().map(|c| c.name.as_str()).collect();
     ensure!(columns == ["id", "name"], "columns: {columns:?}");
     ensure!(table.columns[0].primary_key, "id isn't marked primary");
+    Ok(())
+}
+
+/// Errors the server answers with, even inside a transaction that failed,
+/// leave the connection alive: only a broken one should be reconnected.
+fn alive_after_errors(conn: &dyn Connection, d: &Dialect) -> Result<()> {
+    ensure!(conn.alive(), "a fresh connection isn't alive");
+    ensure!(
+        conn.execute("select * from xenon_no_such_table", 1)
+            .is_err(),
+        "selecting from a missing table worked"
+    );
+    ensure!(conn.alive(), "not alive after a refused statement");
+    conn.execute(conn.begin(), 1).context("begin")?;
+    let _ = conn.execute("select * from xenon_no_such_table", 1);
+    let alive = conn.alive();
+    conn.execute(d.rollback, 1).context("rollback")?;
+    ensure!(
+        alive,
+        "not alive inside a transaction a statement failed in"
+    );
     Ok(())
 }
 

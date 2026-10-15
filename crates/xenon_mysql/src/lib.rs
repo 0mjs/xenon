@@ -632,6 +632,15 @@ impl Connection for MysqlConnection {
         Some("start transaction read only")
     }
 
+    fn alive(&self) -> bool {
+        match self.lock().query_drop("select 1") {
+            Ok(()) => true,
+            // The server answered, if only to refuse.
+            Err(mysql::Error::MySqlError(_)) => true,
+            Err(_) => false,
+        }
+    }
+
     fn in_transaction(&self) -> Option<bool> {
         // MySQL has no reliable way to ask (`information_schema.innodb_trx` is a
         // snapshot refreshed every 100 ms, and needs PROCESS): Xenon follows
@@ -906,6 +915,41 @@ mod live {
         referential_actions: true,
         delete_returning: None,
     };
+
+    /// Ending a session from another connection: `alive` notices.
+    fn lost_connection_is_noticed(port: u16) {
+        let (db, other) = (fleet(port), fleet(port));
+        assert!(db.alive());
+        let id = match db.execute("select connection_id()", 1).unwrap().outcome {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("expected rows, got {other:?}"),
+        };
+        other
+            .execute(&format!("kill {}", db.literal(&id)), 1)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while db.alive() {
+            assert!(
+                Instant::now() < deadline,
+                "still alive after its session was killed"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn lost_connection_mysql() {
+        let _serial = serial();
+        lost_connection_is_noticed(53306);
+    }
+
+    #[test]
+    #[ignore]
+    fn lost_connection_mariadb() {
+        let _serial = serial();
+        lost_connection_is_noticed(53307);
+    }
 
     #[test]
     #[ignore]
