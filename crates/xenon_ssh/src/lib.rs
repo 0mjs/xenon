@@ -437,6 +437,46 @@ mod live {
 
     #[test]
     #[ignore]
+    fn a_new_host_key_is_recorded_and_a_changed_one_refused() {
+        let known =
+            std::env::temp_dir().join(format!("xenon-test-host-keys-{}", std::process::id()));
+        let _ = std::fs::remove_file(&known);
+        let options = SshOptions {
+            key_file: key(),
+            ..bastion()
+        };
+        // First visit: accepted, and the key is written down.
+        drop(Tunnel::open(&options, "postgres", 5432, &known).unwrap());
+        let recorded = std::fs::read_to_string(&known).unwrap();
+        assert!(recorded.contains("[127.0.0.1]:52222"), "{recorded}");
+        // Someone else answers as the bastion: a different key is refused.
+        let impostor =
+            std::env::temp_dir().join(format!("xenon-test-impostor-{}", std::process::id()));
+        let _ = std::fs::remove_file(&impostor);
+        let made = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&impostor)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let public = std::fs::read_to_string(impostor.with_extension("pub")).unwrap();
+        let key_part: Vec<&str> = public.split_whitespace().take(2).collect();
+        std::fs::write(
+            &known,
+            format!("[127.0.0.1]:52222 {}\n", key_part.join(" ")),
+        )
+        .unwrap();
+        let err = Tunnel::open(&options, "postgres", 5432, &known)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("host key"), "{err:#}");
+        for path in [&known, &impostor, &impostor.with_extension("pub")] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn closing_the_tunnel_stops_ssh() {
         let tunnel = Tunnel::open(
             &SshOptions {

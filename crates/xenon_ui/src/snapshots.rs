@@ -78,6 +78,19 @@ impl Shot {
         self.cx.run_until_parked();
     }
 
+    /// Let background work and timers run until `done`, for up to `seconds`.
+    fn settle(&mut self, seconds: u64, done: impl Fn(&Workspace) -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        while std::time::Instant::now() < deadline {
+            self.cx.run_until_parked();
+            if self.cx.read_entity(&self.workspace, |w, _| done(w)) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
     fn save(&mut self, name: &str) {
         self.cx
             .update_window(self.window, |_, window, _| window.refresh())
@@ -483,6 +496,71 @@ fn snapshots() {
         });
         shot.save(&format!("29-script-rolled-back-{suffix}"));
         shot.act(|w, _, _| w.sessions[0].environment = xenon_store::Environment::None);
+
+        // One query at a time per connection: a second tab on it is turned away.
+        // Seconds of work for SQLite: long enough to still be running when checked.
+        const SLOW: &str = "with recursive c(x) as (select 1 union all select x + 1 from c \
+                            where x < 300000000) select count(*) from c";
+        const BRIEF: &str = "with recursive c(x) as (select 1 union all select x + 1 from c \
+                             where x < 20000000) select count(*) from c";
+        shot.act(|w, window, cx| {
+            let first = w.active_tab().id;
+            w.execute(first, BRIEF.into(), None, cx);
+            w.new_tab(&crate::NewTab, window, cx);
+            let editor = w.active_tab().editor.clone();
+            editor.update(cx, |editor, cx| editor.set_value("select 1", window, cx));
+            w.run(crate::workspace::RunScope::All, window, cx);
+            assert!(!w.is_running(), "a second query ran on a busy connection");
+            let note = w.flash_text().unwrap_or_default();
+            assert!(note.contains("already running"), "{note}");
+            w.close_tab(&crate::CloseTab, window, cx);
+            w.cancel_running(first);
+        });
+        assert!(
+            shot.settle(10, |w| !w.any_running()),
+            "the slow query didn't stop"
+        );
+
+        // The production time limit stops a long query and says why.
+        shot.act(|w, _, cx| {
+            w.sessions[0].environment = xenon_store::Environment::Production;
+            w.prefs.query_limit = 1;
+            let tab = w.active_tab().id;
+            w.execute(tab, SLOW.into(), None, cx);
+        });
+        assert!(
+            shot.settle(15, |w| !w.any_running()),
+            "the time limit didn't stop the query"
+        );
+        shot.act(|w, _, _| {
+            let error = w.error_text().unwrap_or_default();
+            assert!(error.contains("time limit"), "{error}");
+            w.prefs.query_limit = 60;
+            w.sessions[0].environment = xenon_store::Environment::None;
+        });
+
+        // A pasted URL for a saved production database keeps its guards.
+        shot.act(|w, _, _| {
+            let billing = crate::servers::parse_url(
+                xenon_store::ServerEngine::Postgres,
+                "postgres://app:secret@db.billing.internal/billing",
+            )
+            .unwrap();
+            let saved = w.saved_for(xenon_store::ServerEngine::Postgres, &billing);
+            assert_eq!(
+                saved.map(|s| s.environment),
+                Some(xenon_store::Environment::Production)
+            );
+            let other = crate::servers::parse_url(
+                xenon_store::ServerEngine::Postgres,
+                "postgres://app:secret@db.billing.internal/elsewhere",
+            )
+            .unwrap();
+            assert!(
+                w.saved_for(xenon_store::ServerEngine::Postgres, &other)
+                    .is_none()
+            );
+        });
         shot.act(|w, window, cx| {
             let editor = w.active_tab().editor.clone();
             editor.update(cx, |editor, cx| {

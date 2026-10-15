@@ -28,7 +28,10 @@ jobs:
       - name: Start the test fleet
         run: |
           python3 dev/seed/generate.py --size small
-          docker compose -f dev/fleet/compose.yml up -d --wait postgres mysql mariadb mssql
+          # A throwaway key for the SSH bastion (as dev/fleet/up.sh makes).
+          mkdir -p dev/fleet/ssh
+          ssh-keygen -q -t ed25519 -N '' -C xenon-fleet -f dev/fleet/ssh/id_ed25519
+          docker compose -f dev/fleet/compose.yml up -d --wait postgres mysql mariadb mssql bastion
           # SQL Server has no init-script folder: load its seed by hand.
           docker compose -f dev/fleet/compose.yml exec -T mssql \
             /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Xenon-fleet-1 -C -b \
@@ -40,6 +43,7 @@ jobs:
         run: >
           cargo test
           -p xenon_driver -p xenon_sqlite -p xenon_duckdb -p xenon_postgres -p xenon_mysql -p xenon_mssql -p xenon_edit
+          -p xenon_ssh
           --no-fail-fast -- --include-ignored
 
       - name: Server logs
@@ -65,3 +69,5 @@ jobs:
       # Headless screens that also check the UI's guards (production prompts,
       # Fetch all, scripts rolled back, quit with a transaction open).
       - run: cargo test -p xenon_ui snapshots -- --ignored
+      # Saved passwords live in the Keychain.
+      - run: cargo test -p xenon_store keychain -- --ignored

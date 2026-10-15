@@ -420,6 +420,25 @@ struct Live {
     preview: std::sync::Mutex<Option<xenon_driver::ResultSet>>,
     rows: std::sync::atomic::AtomicUsize,
     done: std::sync::atomic::AtomicBool,
+    /// The production time limit stopped it.
+    timed_out: std::sync::atomic::AtomicBool,
+}
+
+/// Cancel a query that runs past `limit`, from its own thread, so the limit
+/// holds whatever the window is doing. Ends when the query does.
+fn watchdog(live: Arc<Live>, cancel: Arc<dyn CancelHandle>, limit: std::time::Duration) {
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + limit;
+        while !live.done.load(std::sync::atomic::Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                live.timed_out
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                cancel.cancel();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
 }
 
 /// The edit bar's cell and its text field.
@@ -863,7 +882,7 @@ impl Workspace {
         self.focus_editor(window, cx);
     }
 
-    fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab_at(self.active, window, cx);
     }
 
@@ -943,7 +962,7 @@ impl Workspace {
     }
 
     /// The saved connection to the same server, database and user, if any.
-    fn saved_for(
+    pub(crate) fn saved_for(
         &self,
         engine: ServerEngine,
         options: &ConnectOptions,
@@ -1623,6 +1642,36 @@ impl Workspace {
         self.guard(tab_id, sql, origin, None, window, cx);
     }
 
+    /// The active tab's note (beside the results), for tests.
+    #[cfg(test)]
+    pub(crate) fn flash_text(&self) -> Option<String> {
+        self.active_tab()
+            .flash
+            .as_ref()
+            .map(|(text, _)| text.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(self.active_tab().query, Query::Running { .. })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn any_running(&self) -> bool {
+        self.tabs
+            .iter()
+            .any(|t| matches!(t.query, Query::Running { .. }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_running(&self, tab_id: usize) {
+        if let Some(Query::Running { cancel, .. }) =
+            self.tabs.iter().find(|t| t.id == tab_id).map(|t| &t.query)
+        {
+            cancel.cancel();
+        }
+    }
+
     /// The active tab's error, for tests.
     #[cfg(test)]
     pub(crate) fn error_text(&self) -> Option<String> {
@@ -1788,6 +1837,10 @@ impl Workspace {
         };
         let live = Arc::new(Live::default());
         let feed = live.clone();
+        let timed = live.clone();
+        if let Some(limit) = limit.filter(|_| keeps_session) {
+            watchdog(live.clone(), limiter.clone(), limit);
+        }
         let last_sql = sql.clone();
         let work = cx.background_spawn(async move {
             let started = std::time::Instant::now();
@@ -1867,6 +1920,13 @@ impl Workspace {
         let task = cx.spawn(async move |this, cx| {
             let (result, schemas, in_transaction, atomic) = work.await;
             this.update(cx, |this, cx| {
+                if let (Some(limit), true) = (
+                    limit,
+                    timed.timed_out.load(std::sync::atomic::Ordering::SeqCst),
+                ) && let Some(tab) = this.tabs.iter_mut().find(|t| t.id == tab_id)
+                {
+                    tab.timed_out = Some(limit);
+                }
                 if let (Some(session), Some(open)) = (this.session_mut(session_id), in_transaction)
                 {
                     session.in_transaction = open;
@@ -1915,14 +1975,13 @@ impl Workspace {
                             tab.previewing = true;
                         }
                         tab.fetched = live.rows.load(std::sync::atomic::Ordering::Relaxed);
+                        // (Where the limit can stop the query, a watchdog thread does.)
                         if let Some(limit) = limit
-                            && tab.timed_out.is_none()
+                            && !keeps_session
+                            && tab.flash.is_none()
                             && began.elapsed() >= limit
                         {
-                            tab.timed_out = Some(limit);
-                            if keeps_session {
-                                limiter.cancel();
-                            } else {
+                            {
                                 tab.flash = Some((
                                     "Over the production time limit, but stopping it would end the \
                                      session and roll back the open transaction: cancel it yourself \

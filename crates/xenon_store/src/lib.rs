@@ -668,6 +668,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn passwords_have_nowhere_to_go_in_the_data_file() {
+        // Secrets go to the Keychain (`secrets`); no table here can hold one.
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.lock();
+        let columns: Vec<String> = conn
+            .prepare(
+                "select m.name || '.' || c.name from sqlite_schema m \
+                 join pragma_table_info(m.name) c where m.type = 'table'",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(!columns.is_empty());
+        for column in columns {
+            let lower = column.to_lowercase();
+            assert!(
+                !["pass", "secret", "token", "credential"]
+                    .iter()
+                    .any(|word| lower.contains(word)),
+                "{column} could hold a secret"
+            );
+        }
+    }
+
+    #[test]
     fn saved_queries_insert_update_filter_delete() {
         let store = Store::open_in_memory().unwrap();
         let mut query = SavedQuery {
