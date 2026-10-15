@@ -38,7 +38,7 @@ use crate::palette::{self, Palette, PaletteEvent};
 use crate::results::{self, Grid, Selection};
 use crate::servers;
 use crate::settings::{Prefs, SettingsDialog, SettingsEvent, ThemeChoice};
-use crate::theme::{self, ActiveTheme, Layout, MONO_FONT, Mode, Theme, UI_FONT};
+use crate::theme::{self, ActiveTheme, Layout, Mode, Theme};
 use crate::updates::UpdateState;
 use crate::widgets::{
     self as widgets, ButtonKind, Engine, RADIUS_CONTROL, centered_hint, connection_tags,
@@ -52,7 +52,7 @@ use crate::{
     MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection, NewTab, NextTab, OpenFile, OpenPalette,
     OpenSettings, PrevTab, Quit, RunAll, RunQuery, SaveEdits, SaveQueryAs, SelectAllCells,
     ShowConnections, ShowExplorer, ShowHistory, ShowSaved, ToggleExplorer, ToggleInspector,
-    ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme,
+    ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomIn, ZoomOut, ZoomReset,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -694,6 +694,12 @@ impl Workspace {
         let prefs = Prefs::load(store.as_deref());
         theme::set_accent(prefs.accent, cx);
         theme::set_layout(prefs.layout, cx);
+        theme::set_type(
+            prefs.ui_font,
+            prefs.code_font,
+            prefs.zoom,
+            prefs.editor_font,
+        );
         theme::apply(prefs.theme.mode(window), cx);
         window.set_background_appearance(window_material(prefs.frosted));
 
@@ -3893,6 +3899,24 @@ impl Workspace {
         self.set_prefs(prefs, window, cx);
     }
 
+    /// Step the text size up or down (`0` resets it).
+    fn zoom(&mut self, step: i32, window: &mut Window, cx: &mut Context<Self>) {
+        let at = theme::ZOOMS
+            .iter()
+            .position(|z| (*z - self.prefs.zoom).abs() < 0.001)
+            .unwrap_or(2) as i32;
+        let next = if step == 0 {
+            2
+        } else {
+            (at + step).clamp(0, theme::ZOOMS.len() as i32 - 1)
+        };
+        let prefs = Prefs {
+            zoom: theme::ZOOMS[next as usize],
+            ..self.prefs
+        };
+        self.set_prefs(prefs, window, cx);
+    }
+
     /// Apply and save new preferences.
     pub(crate) fn set_prefs(&mut self, prefs: Prefs, window: &mut Window, cx: &mut Context<Self>) {
         let old = std::mem::replace(&mut self.prefs, prefs);
@@ -3904,6 +3928,17 @@ impl Workspace {
         }
         if prefs.theme != old.theme || prefs.accent != old.accent || prefs.layout != old.layout {
             theme::apply(prefs.theme.mode(window), cx);
+        }
+        let typeface = |p: &Prefs| (p.ui_font, p.code_font, p.zoom, p.editor_font);
+        if typeface(&prefs) != typeface(&old) {
+            theme::set_type(
+                prefs.ui_font,
+                prefs.code_font,
+                prefs.zoom,
+                prefs.editor_font,
+            );
+            theme::apply(prefs.theme.mode(window), cx);
+            window.refresh();
         }
         if prefs.frosted != old.frosted {
             window.set_background_appearance(window_material(prefs.frosted));
@@ -4196,6 +4231,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::open_settings))
             .on_action(cx.listener(Self::format_sql))
+            .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom(1, window, cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, window, cx| this.zoom(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &ZoomReset, window, cx| this.zoom(0, window, cx)))
             .on_action(
                 cx.listener(|this, _: &ImportConnections, window, cx| this.open_import(window, cx)),
             )
@@ -4250,9 +4288,9 @@ impl Render for Workspace {
             } else {
                 theme.bg
             })
-            .font_family(UI_FONT)
+            .font_family(crate::theme::ui_font())
             .text_color(theme.text)
-            .text_size(px(12.))
+            .text_size(crate::theme::text(12.))
             .relative()
             .child(self.render_titlebar(&theme, cx))
             .child(body)
@@ -4525,7 +4563,7 @@ impl Workspace {
                     .border_1()
                     .border_color(theme.line)
                     .text_color(theme.t3)
-                    .text_size(px(12.))
+                    .text_size(crate::theme::text(12.))
                     .child(
                         svg()
                             .path(assets::icon("search"))
@@ -4711,8 +4749,8 @@ impl Workspace {
                     .flex_1()
                     .min_h(px(0.))
                     .pt(px(6.))
-                    .font_family(MONO_FONT)
-                    .text_size(px(self.prefs.editor_font))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(self.prefs.editor_font))
                     .child(Editor::new(&tab.editor).h_full().appearance(false)),
             );
 
@@ -4829,7 +4867,7 @@ impl Workspace {
             .pr(px(8.))
             .border_b_1()
             .border_color(theme.line_2)
-            .font_family(UI_FONT)
+            .font_family(crate::theme::ui_font())
             .children(context)
             .child(div().flex_1());
         if running {
@@ -4982,8 +5020,8 @@ impl Workspace {
                 theme,
                 Some(
                     div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(10.5))
                         .text_color(if self.field_focus.browse {
                             theme.acc
                         } else {
@@ -5000,8 +5038,8 @@ impl Workspace {
         .when_some(sorted, |el, sorted| {
             el.child(
                 div()
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.5))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(10.5))
                     .text_color(theme.t2)
                     .child(sorted),
             )
@@ -5025,7 +5063,7 @@ impl Workspace {
             return match &browse.info_error {
                 Some(error) => div()
                     .p(px(16.))
-                    .text_size(px(12.))
+                    .text_size(crate::theme::text(12.))
                     .text_color(theme.err)
                     .child(error.clone())
                     .into_any_element(),
@@ -5107,8 +5145,8 @@ impl Workspace {
                         .child(format!("Result {}", ix + 1))
                         .child(
                             div()
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.5))
+                                .font_family(crate::theme::mono_font())
+                                .text_size(crate::theme::text(10.5))
                                 .text_color(theme.t3)
                                 .child(format!(
                                     "{} {}",
@@ -5147,8 +5185,8 @@ impl Workspace {
             div()
                 .max_w(px(180.))
                 .truncate()
-                .font_family(MONO_FONT)
-                .text_size(px(11.))
+                .font_family(crate::theme::mono_font())
+                .text_size(crate::theme::text(11.))
                 .text_color(theme.acc)
                 .child(text)
         };
@@ -5215,7 +5253,7 @@ impl Workspace {
                             .child(label(column))
                             .child(
                                 div()
-                                    .text_size(px(11.))
+                                    .text_size(crate::theme::text(11.))
                                     .text_color(theme.t3)
                                     .child(if json { "JSON" } else { "Text" }),
                             )
@@ -5228,8 +5266,8 @@ impl Workspace {
                         div().h(px(200.)).mx(px(8.)).mb(px(8.)).child(
                             Editor::new(area)
                                 .h_full()
-                                .font_family(MONO_FONT)
-                                .text_size(px(12.)),
+                                .font_family(crate::theme::mono_font())
+                                .text_size(crate::theme::text(12.)),
                         ),
                     )
             }
@@ -5318,8 +5356,8 @@ impl Workspace {
                         .when_some(date, |el, kind| {
                             el.child(
                                 div()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(10.5))
+                                    .font_family(crate::theme::mono_font())
+                                    .text_size(crate::theme::text(10.5))
                                     .text_color(theme.t3)
                                     .child(kind.hint()),
                             )
@@ -5370,9 +5408,17 @@ impl Workspace {
     /// how to start editing, or why this table can't be edited.
     fn render_edit_status(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let tab = self.active_tab();
-        let small =
-            |button: gpui::Stateful<gpui::Div>| button.h(px(24.)).px(px(9.)).text_size(px(11.5));
-        let mut status = div().flex().items_center().gap(px(6.)).text_size(px(11.5));
+        let small = |button: gpui::Stateful<gpui::Div>| {
+            button
+                .h(px(24.))
+                .px(px(9.))
+                .text_size(crate::theme::text(11.5))
+        };
+        let mut status = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(crate::theme::text(11.5));
         if let Some((message, error)) = &tab.flash {
             status = status.child(
                 div()
@@ -5540,7 +5586,7 @@ impl Workspace {
             .border_b_1()
             .border_color(theme.line)
             .bg(theme.s1)
-            .text_size(px(11.5))
+            .text_size(crate::theme::text(11.5))
             .child(
                 div()
                     .flex()
@@ -5553,15 +5599,15 @@ impl Workspace {
             )
             .children(facts.into_iter().map(|fact| {
                 div()
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(11.))
                     .text_color(theme.t3)
                     .child(fact)
             }))
             .when(matches!(tab.query, Query::Running { .. }), |el| {
                 el.child(
                     widgets::with_keys(theme, &[("⌘.", true), ("to cancel", false)])
-                        .text_size(px(11.))
+                        .text_size(crate::theme::text(11.))
                         .text_color(theme.t3),
                 )
             })
@@ -5594,7 +5640,7 @@ impl Workspace {
             .occlude()
             .w(px(200.))
             .p(px(4.))
-            .text_size(px(12.5))
+            .text_size(crate::theme::text(12.5))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.export_menu = false;
                 cx.notify();
@@ -5604,7 +5650,7 @@ impl Workspace {
                     .px(px(8.))
                     .pt(px(4.))
                     .pb(px(6.))
-                    .text_size(px(11.))
+                    .text_size(crate::theme::text(11.))
                     .text_color(theme.t3)
                     .child("Export results as"),
             )
@@ -5623,8 +5669,8 @@ impl Workspace {
                     .child(label)
                     .child(
                         div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.))
+                            .font_family(crate::theme::mono_font())
+                            .text_size(crate::theme::text(11.))
                             .text_color(theme.t3)
                             .child(format!(".{}", format.extension())),
                     )
@@ -5638,7 +5684,7 @@ impl Workspace {
                         .py(px(6.))
                         .border_t_1()
                         .border_color(theme.line)
-                        .text_size(px(11.))
+                        .text_size(crate::theme::text(11.))
                         .text_color(theme.t3)
                         .child("Only the rows loaded are exported. Fetch all first to export every row."),
                 )
@@ -5655,7 +5701,7 @@ impl Workspace {
                     .px(px(8.))
                     .rounded(px(4.))
                     .cursor_pointer()
-                    .text_size(px(11.5))
+                    .text_size(crate::theme::text(11.5))
                     .text_color(theme.t2)
                     .hover(|el| el.bg(theme.s2).text_color(theme.text))
                     .when(self.export_menu, |el| {
@@ -5850,8 +5896,8 @@ impl Workspace {
                             .gap(px(10.))
                             .child(
                                 div()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(11.5))
+                                    .font_family(crate::theme::mono_font())
+                                    .text_size(crate::theme::text(11.5))
                                     .line_height(px(18.))
                                     .text_color(theme.text)
                                     .child(message.clone()),
@@ -5866,7 +5912,7 @@ impl Workspace {
                                         .child(div().text_color(theme.t2).child("Did you mean"))
                                         .child(
                                             div()
-                                                .font_family(MONO_FONT)
+                                                .font_family(crate::theme::mono_font())
                                                 .text_color(theme.text)
                                                 .child(suggestion),
                                         )
@@ -5919,7 +5965,7 @@ impl Workspace {
                 .gap(px(6.))
                 .child(
                     div()
-                        .text_size(px(14.))
+                        .text_size(crate::theme::text(14.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("Xenon"),
                 )
@@ -6022,14 +6068,14 @@ impl Workspace {
                         .gap(px(3.))
                         .border_b_1()
                         .border_color(theme.line_2)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(11.5))
                         .child(
                             div()
                                 .flex()
                                 .items_center()
-                                .font_family(UI_FONT)
-                                .text_size(px(11.))
+                                .font_family(crate::theme::ui_font())
+                                .text_size(crate::theme::text(11.))
                                 .text_color(theme.t3)
                                 .child(SharedString::from(column.name.clone()))
                                 .child(div().flex_1())
@@ -6097,8 +6143,8 @@ impl Workspace {
             .when(self.classic(), |el| {
                 el.border_t_1().border_color(theme.line)
             })
-            .font_family(MONO_FONT)
-            .text_size(px(10.5));
+            .font_family(crate::theme::mono_font())
+            .text_size(crate::theme::text(10.5));
 
         bar = match self.active_session() {
             Some(session) => bar

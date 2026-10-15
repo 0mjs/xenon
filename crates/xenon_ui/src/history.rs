@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui::{AnyElement, Context, IntoElement, SharedString, Window, div, prelude::*, px};
 use xenon_store::HistoryEntry;
 
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{empty_hint, group_digits, search_field};
 use crate::workspace::{RunScope, Workspace};
 
@@ -137,8 +137,8 @@ impl Workspace {
             )
             .child(
                 div()
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(11.))
                     .text_color(theme.text)
                     .truncate()
                     .child(preview),
@@ -147,8 +147,8 @@ impl Workspace {
                 div()
                     .flex()
                     .gap(px(10.))
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(10.))
                     .text_color(theme.t3)
                     .child(ago(now - entry.ran_at))
                     .child(format!("{} ms", entry.duration_ms))

@@ -5,7 +5,7 @@
 use gpui::{AnyElement, Context, Window, div, prelude::*, px};
 use xenon_driver::{QueryOutcome, Value};
 
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{self, ButtonKind, group_digits};
 use crate::workspace::Workspace;
 
@@ -156,8 +156,8 @@ impl Workspace {
                 .child(arrow("page-back", "‹", browse.page > 0, false))
                 .child(
                     div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(10.5))
                         .text_color(theme.t2)
                         .child(format!("{range}{total}")),
                 )

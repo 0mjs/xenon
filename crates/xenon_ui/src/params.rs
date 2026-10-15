@@ -9,7 +9,7 @@ use gpui_component::input::{InputEvent, InputState};
 use xenon_driver::Value;
 use xenon_driver::sql::{Param, ParamStyle, bind, parameters};
 
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{self, ButtonKind, Engine};
 use crate::workspace::{RunScope, Workspace};
 
@@ -234,15 +234,20 @@ impl Workspace {
                                 .gap(px(2.))
                                 .child(
                                     div()
-                                        .text_size(px(14.))
+                                        .text_size(crate::theme::text(14.))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme.text)
                                         .child("Parameters"),
                                 )
-                                .child(div().text_size(px(11.5)).text_color(theme.t3).child(
-                                    "Numbers and NULL go in as they are; anything else is \
+                                .child(
+                                    div()
+                                        .text_size(crate::theme::text(11.5))
+                                        .text_color(theme.t3)
+                                        .child(
+                                            "Numbers and NULL go in as they are; anything else is \
                                      quoted. Quote a number ('42') to send it as text.",
-                                )),
+                                        ),
+                                ),
                         )
                         .children(prompt.fields.iter().map(|(key, input)| {
                             div()
@@ -254,8 +259,8 @@ impl Workspace {
                                         .w(px(110.))
                                         .flex_none()
                                         .truncate()
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(11.5))
+                                        .font_family(crate::theme::mono_font())
+                                        .text_size(crate::theme::text(11.5))
                                         .text_color(theme.t2)
                                         .child(key.clone()),
                                 )

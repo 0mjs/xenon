@@ -19,7 +19,7 @@ use xenon_driver::{Column, ResultSet, Value};
 
 use crate::assets;
 use crate::edits::{Edits, RowRef};
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 
 pub const ROW_HEIGHT: f32 = 25.;
 const HEADER_HEIGHT: f32 = 32.;
@@ -612,7 +612,7 @@ fn header_cell(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(11.))
+                        .text_size(crate::theme::text(11.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(SharedString::from(column.name.clone())),
                 )
@@ -622,8 +622,8 @@ fn header_cell(
                         .gap(px(4.))
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .font_family(MONO_FONT)
-                        .text_size(px(9.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(9.5))
                         .text_color(theme.t3)
                         .child(SharedString::from(
                             column.type_name.clone().unwrap_or_default().to_lowercase(),
@@ -637,7 +637,12 @@ fn header_cell(
                         }),
                 ),
         )
-        .child(div().text_size(px(8.)).text_color(theme.acc).child(arrow))
+        .child(
+            div()
+                .text_size(crate::theme::text(8.))
+                .text_color(theme.acc)
+                .child(arrow),
+        )
         .child(
             div()
                 .id(("resize", data))
@@ -771,8 +776,8 @@ fn render_row(
         .relative()
         .flex()
         .flex_row()
-        .font_family(MONO_FONT)
-        .text_size(px(11.5))
+        .font_family(crate::theme::mono_font())
+        .text_size(crate::theme::text(11.5))
         .border_b_1()
         .border_color(theme.line_2)
         .when_some(background, |el, bg| el.bg(bg))

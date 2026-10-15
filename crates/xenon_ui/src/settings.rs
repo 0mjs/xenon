@@ -8,7 +8,7 @@ use gpui::{
 use gpui_component::input::Escape;
 use xenon_store::Store;
 
-use crate::theme::{Accent, ActiveTheme, Layout, MONO_FONT, Mode, Theme};
+use crate::theme::{Accent, ActiveTheme, CodeFont, Layout, Mode, Theme, UiFont, ZOOMS};
 use crate::widgets::{self, ButtonKind, RADIUS_CONTROL};
 
 /// Light, dark, or whatever macOS is set to.
@@ -86,6 +86,10 @@ pub(crate) struct Prefs {
     pub theme: ThemeChoice,
     pub accent: Accent,
     pub layout: Layout,
+    pub ui_font: UiFont,
+    pub code_font: CodeFont,
+    /// Text size, as a scale (⌘+, ⌘−): one of [`ZOOMS`].
+    pub zoom: f32,
     /// The desktop shows, blurred, through the window's frame.
     pub frosted: bool,
     pub row_limit: usize,
@@ -112,6 +116,9 @@ impl Default for Prefs {
             theme: ThemeChoice::System,
             accent: Accent::default(),
             layout: Layout::default(),
+            ui_font: UiFont::default(),
+            code_font: CodeFont::default(),
+            zoom: 1.,
             frosted: true,
             row_limit: 100_000,
             browse_limit: 1_000,
@@ -139,6 +146,15 @@ impl Prefs {
         }
         if let Some(value) = get("layout") {
             prefs.layout = Layout::parse(&value);
+        }
+        if let Some(value) = get("ui_font") {
+            prefs.ui_font = UiFont::parse(&value);
+        }
+        if let Some(value) = get("code_font") {
+            prefs.code_font = CodeFont::parse(&value);
+        }
+        if let Some(value) = get("zoom").and_then(|v| v.parse::<f32>().ok()) {
+            prefs.zoom = value.clamp(ZOOMS[0], ZOOMS[ZOOMS.len() - 1]);
         }
         if let Some(value) = get("frosted") {
             prefs.frosted = value != "false";
@@ -179,6 +195,9 @@ impl Prefs {
             ("theme", self.theme.as_str().to_string()),
             (Accent::SETTING, self.accent.as_str().to_string()),
             ("layout", self.layout.as_str().to_string()),
+            ("ui_font", self.ui_font.as_str().to_string()),
+            ("code_font", self.code_font.as_str().to_string()),
+            ("zoom", self.zoom.to_string()),
             ("frosted", self.frosted.to_string()),
             ("row_limit", self.row_limit.to_string()),
             ("browse_limit", self.browse_limit.to_string()),
@@ -272,7 +291,7 @@ impl SettingsDialog {
                     )
                     .child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(crate::theme::text(12.))
                             .text_color(if on { theme.text } else { theme.t2 })
                             .when(on, |el| el.font_weight(FontWeight::MEDIUM))
                             .child(accent.label()),
@@ -304,7 +323,7 @@ fn row(
                 .when_some(hint, |el, hint| {
                     el.child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(crate::theme::text(11.5))
                             .line_height(px(16.))
                             .text_color(theme.t3)
                             .child(hint),
@@ -321,8 +340,8 @@ fn section(theme: &Theme, title: &'static str, rows: Vec<gpui::AnyElement>) -> i
         .child(
             div()
                 .pb(px(4.))
-                .font_family(MONO_FONT)
-                .text_size(px(10.))
+                .font_family(crate::theme::mono_font())
+                .text_size(crate::theme::text(10.))
                 .text_color(theme.t3)
                 .child(title.to_uppercase()),
         )
@@ -396,6 +415,55 @@ impl Render for SettingsDialog {
                 .into_any_element(),
                 row(
                     &theme,
+                    "Interface font",
+                    None,
+                    segmented_of(
+                        cx,
+                        "ui-font",
+                        UiFont::ALL
+                            .into_iter()
+                            .map(|f| (f.label(), f == prefs.ui_font))
+                            .collect(),
+                        Box::new(|p, ix| p.ui_font = UiFont::ALL[ix]),
+                    )
+                    .w(px(360.)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Code font",
+                    Some("The editor, results and anything set in a fixed-width face."),
+                    segmented_of(
+                        cx,
+                        "code-font",
+                        CodeFont::ALL
+                            .into_iter()
+                            .map(|f| (f.label(), f == prefs.code_font))
+                            .collect(),
+                        Box::new(|p, ix| p.code_font = CodeFont::ALL[ix]),
+                    )
+                    .w(px(360.)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
+                    "Text size",
+                    Some("Everything, the editor too: ⌘+ and ⌘− step it, ⌘0 resets."),
+                    segmented_of(
+                        cx,
+                        "zoom",
+                        ZOOMS
+                            .iter()
+                            .zip(["85%", "92%", "100%", "108%", "116%", "125%", "135%"])
+                            .map(|(z, label)| (label, (*z - prefs.zoom).abs() < 0.001))
+                            .collect(),
+                        Box::new(|p, ix| p.zoom = ZOOMS[ix]),
+                    )
+                    .w(px(360.)),
+                )
+                .into_any_element(),
+                row(
+                    &theme,
                     "Window",
                     Some("Frosted: the desktop shows, blurred, through the window's frame."),
                     segmented_of(
@@ -420,7 +488,7 @@ impl Render for SettingsDialog {
                             .child(div().text_color(theme.text).child("Accent"))
                             .child(
                                 div()
-                                    .text_size(px(11.5))
+                                    .text_size(crate::theme::text(11.5))
                                     .text_color(theme.t3)
                                     .child("Focus, selection and the main button."),
                             ),
@@ -662,13 +730,13 @@ impl Render for SettingsDialog {
                     .pb(px(16.))
                     .child(
                         div()
-                            .text_size(px(16.))
+                            .text_size(crate::theme::text(16.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Settings"),
                     )
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(crate::theme::text(11.5))
                             .text_color(theme.t3)
                             .child("Changes apply and are saved as you make them."),
                     ),
@@ -684,8 +752,8 @@ impl Render for SettingsDialog {
                     .border_color(theme.line_2)
                     .child(
                         div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.))
+                            .font_family(crate::theme::mono_font())
+                            .text_size(crate::theme::text(11.))
                             .text_color(theme.t3)
                             .child(concat!("Xenon ", env!("CARGO_PKG_VERSION"))),
                     )

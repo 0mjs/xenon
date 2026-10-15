@@ -7,7 +7,7 @@ use crate::assets;
 use crate::detect::tilde;
 use crate::discover::{Found, FoundTarget};
 use crate::servers;
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{
     ButtonKind, Engine, RADIUS_CARD, RADIUS_CONTROL, button, connection_tags, engine_badge,
     env_tag, field_sized,
@@ -40,13 +40,13 @@ impl Workspace {
                             .gap(px(6.))
                             .child(
                                 div()
-                                    .text_size(px(24.))
+                                    .text_size(crate::theme::text(24.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child("Connect"),
                             )
                             .child(
                                 div()
-                                    .text_size(px(13.))
+                                    .text_size(crate::theme::text(13.))
                                     .text_color(theme.t2)
                                     .child("Paste a connection, open a file, or pick one below."),
                             ),
@@ -98,7 +98,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .text_size(px(12.))
+                    .text_size(crate::theme::text(12.))
                     .text_color(theme.t2)
                     .child(div().size(px(7.)).rounded_full().bg(theme.acc))
                     .child(format!("Connecting to {name}…"))
@@ -145,7 +145,7 @@ impl Workspace {
                         )
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(crate::theme::text(12.))
                                 .line_height(px(18.))
                                 .text_color(theme.t2)
                                 .child(notice),
@@ -207,7 +207,7 @@ impl Workspace {
                 el.child(
                     div()
                         .pl(px(2.))
-                        .text_size(px(11.5))
+                        .text_size(crate::theme::text(11.5))
                         .text_color(if *is_error { theme.err } else { theme.t3 })
                         .child(note.clone()),
                 )
@@ -245,7 +245,7 @@ impl Workspace {
                         .gap(px(1.))
                         .child(
                             div()
-                                .text_size(px(13.))
+                                .text_size(crate::theme::text(13.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(if available { theme.text } else { theme.t3 })
                                 .child(name),
@@ -254,7 +254,7 @@ impl Workspace {
                             // One line, cut with "…" when a tile is narrow.
                             div()
                                 .truncate()
-                                .text_size(px(11.))
+                                .text_size(crate::theme::text(11.))
                                 .text_color(theme.t3)
                                 .child(if available { kind } else { "Coming soon" }),
                         ),
@@ -348,7 +348,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(7.))
-                            .text_size(px(11.5))
+                            .text_size(crate::theme::text(11.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.t2)
                             .child(div().size(px(6.)).rounded_full().bg(color))
@@ -453,7 +453,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(13.))
+                                    .text_size(crate::theme::text(13.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(saved.name.clone()),
                             )
@@ -472,8 +472,8 @@ impl Workspace {
                     .child(
                         div()
                             .truncate()
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.5))
+                            .font_family(crate::theme::mono_font())
+                            .text_size(crate::theme::text(10.5))
                             .text_color(theme.t3)
                             .child(detail),
                     ),
@@ -514,7 +514,7 @@ impl Workspace {
                 .items_center()
                 .gap(px(6.))
                 .rounded(px(RADIUS_CONTROL))
-                .text_size(px(11.5))
+                .text_size(crate::theme::text(11.5))
                 .text_color(theme.t2)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.s3).text_color(theme.text))
@@ -556,7 +556,7 @@ impl Workspace {
                 .rounded(px(RADIUS_CARD))
                 .border_1()
                 .border_color(theme.line_2)
-                .text_size(px(12.))
+                .text_size(crate::theme::text(12.))
                 .line_height(px(18.))
                 .text_color(theme.t3)
                 .child(if self.discovering {
@@ -615,15 +615,15 @@ impl Workspace {
                             .child(
                                 div()
                                     .truncate()
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(12.))
+                                    .font_family(crate::theme::mono_font())
+                                    .text_size(crate::theme::text(12.))
                                     .text_color(if available { theme.text } else { theme.t2 })
                                     .child(found.detail()),
                             )
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(11.))
+                                    .text_size(crate::theme::text(11.))
                                     .text_color(theme.t3)
                                     .child(found.source.clone()),
                             ),
@@ -634,7 +634,7 @@ impl Workspace {
                             .into_any_element(),
                         None => div()
                             .flex_none()
-                            .text_size(px(11.5))
+                            .text_size(crate::theme::text(11.5))
                             .text_color(theme.t3)
                             .child(action)
                             .into_any_element(),
@@ -663,8 +663,8 @@ fn section(
                 .justify_between()
                 .child(
                     div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(10.5))
                         .text_color(theme.t3)
                         .child(title.to_uppercase()),
                 )

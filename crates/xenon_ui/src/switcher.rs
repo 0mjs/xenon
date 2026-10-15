@@ -39,7 +39,7 @@ impl Workspace {
                 .px(px(8.))
                 .pt(px(6.))
                 .pb(px(2.))
-                .text_size(px(10.))
+                .text_size(crate::theme::text(10.))
                 .text_color(theme.t3)
                 .child(text.to_uppercase())
         };
@@ -97,7 +97,7 @@ impl Workspace {
                         .overflow_y_scroll()
                         .h_auto()
                         .p(px(4.))
-                        .text_size(px(12.))
+                        .text_size(crate::theme::text(12.))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.switcher = false;
                             cx.notify();

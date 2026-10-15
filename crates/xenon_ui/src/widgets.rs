@@ -5,15 +5,15 @@ use std::time::Duration;
 use gpui::{AnyElement, FontWeight, IntoElement, Rgba, div, prelude::*, px};
 use gpui_component::Sizable as _;
 
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 
 pub fn panel_label(theme: &Theme, text: &str) -> AnyElement {
     div()
         .px(px(12.))
         .pt(px(10.))
         .pb(px(6.))
-        .font_family(MONO_FONT)
-        .text_size(px(10.))
+        .font_family(crate::theme::mono_font())
+        .text_size(crate::theme::text(10.))
         .text_color(theme.t3)
         .child(text.to_uppercase())
         .into_any_element()
@@ -76,7 +76,7 @@ fn keycaps(keys: &str, color: Rgba, background: Rgba, border: Rgba) -> gpui::Div
                 .border_1()
                 .border_color(border)
                 .font_family(KEY_FONT)
-                .text_size(px(11.))
+                .text_size(crate::theme::text(11.))
                 .line_height(px(14.))
                 .text_color(color)
                 .child(key)
@@ -262,7 +262,7 @@ pub fn is_focused(
 /// A label above a dialog field.
 pub fn field_label(theme: &Theme, label: &'static str) -> gpui::Div {
     div()
-        .text_size(px(11.5))
+        .text_size(crate::theme::text(11.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.t2)
         .child(label)
@@ -300,7 +300,7 @@ pub fn button(
         .justify_center()
         .gap(px(8.))
         .rounded(px(RADIUS_CONTROL))
-        .text_size(px(12.))
+        .text_size(crate::theme::text(12.))
         .font_weight(FontWeight::MEDIUM)
         .when(enabled, |el| el.cursor_pointer())
         .when(!enabled, |el| el.opacity(0.45))
@@ -367,7 +367,7 @@ pub fn segmented(
                         .items_center()
                         .justify_center()
                         .rounded(px(RADIUS_CONTROL - 1.))
-                        .text_size(px(12.))
+                        .text_size(crate::theme::text(12.))
                         .cursor_pointer()
                         .when(active, |el| {
                             el.bg(theme.raised)
@@ -536,8 +536,8 @@ pub fn env_tag(label: &'static str, color: Rgba) -> impl IntoElement {
         .border_1()
         .border_color(Rgba { a: 0.35, ..color })
         .text_color(color)
-        .font_family(MONO_FONT)
-        .text_size(px(9.))
+        .font_family(crate::theme::mono_font())
+        .text_size(crate::theme::text(9.))
         .font_weight(FontWeight::NORMAL)
         .child(label)
 }

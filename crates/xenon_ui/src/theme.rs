@@ -2,8 +2,167 @@
 
 use gpui::{App, Global, Rgba, WindowAppearance, rgb, rgba};
 
-pub const UI_FONT: &str = "Archivo";
-pub const MONO_FONT: &str = "IBM Plex Mono";
+/// The interface font, as chosen in Settings (bundled, open-source fonts, or
+/// the system's).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UiFont {
+    System,
+    #[default]
+    Archivo,
+    Inter,
+    Geist,
+    IbmPlexSans,
+}
+
+impl UiFont {
+    pub const ALL: [UiFont; 5] = [
+        UiFont::System,
+        UiFont::Archivo,
+        UiFont::Inter,
+        UiFont::Geist,
+        UiFont::IbmPlexSans,
+    ];
+
+    pub fn family(self) -> &'static str {
+        match self {
+            UiFont::System => ".SystemUIFont",
+            UiFont::Archivo => "Archivo",
+            UiFont::Inter => "Inter",
+            UiFont::Geist => "Geist",
+            UiFont::IbmPlexSans => "IBM Plex Sans",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            UiFont::System => "System",
+            UiFont::IbmPlexSans => "Plex Sans",
+            other => other.family(),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UiFont::System => "system",
+            UiFont::Archivo => "archivo",
+            UiFont::Inter => "inter",
+            UiFont::Geist => "geist",
+            UiFont::IbmPlexSans => "ibm-plex-sans",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|f| f.as_str() == value)
+            .unwrap_or_default()
+    }
+}
+
+/// The font for SQL, results and anything else set in a monospace face.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodeFont {
+    #[default]
+    IbmPlexMono,
+    JetBrainsMono,
+    FiraCode,
+    GeistMono,
+    Menlo,
+}
+
+impl CodeFont {
+    pub const ALL: [CodeFont; 5] = [
+        CodeFont::IbmPlexMono,
+        CodeFont::JetBrainsMono,
+        CodeFont::FiraCode,
+        CodeFont::GeistMono,
+        CodeFont::Menlo,
+    ];
+
+    pub fn family(self) -> &'static str {
+        match self {
+            CodeFont::IbmPlexMono => "IBM Plex Mono",
+            CodeFont::JetBrainsMono => "JetBrains Mono",
+            CodeFont::FiraCode => "Fira Code",
+            CodeFont::GeistMono => "Geist Mono",
+            CodeFont::Menlo => "Menlo",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CodeFont::IbmPlexMono => "Plex Mono",
+            CodeFont::JetBrainsMono => "JetBrains",
+            other => other.family(),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CodeFont::IbmPlexMono => "ibm-plex-mono",
+            CodeFont::JetBrainsMono => "jetbrains-mono",
+            CodeFont::FiraCode => "fira-code",
+            CodeFont::GeistMono => "geist-mono",
+            CodeFont::Menlo => "menlo",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|f| f.as_str() == value)
+            .unwrap_or_default()
+    }
+}
+
+/// Fonts and text size, read everywhere text is drawn.
+#[derive(Clone, Copy, Debug)]
+struct Type {
+    ui: UiFont,
+    code: CodeFont,
+    zoom: f32,
+    /// The editor's text size before zooming.
+    editor: f32,
+}
+
+static TYPE: std::sync::RwLock<Type> = std::sync::RwLock::new(Type {
+    ui: UiFont::Archivo,
+    code: CodeFont::IbmPlexMono,
+    zoom: 1.,
+    editor: 12.5,
+});
+
+fn current() -> Type {
+    *TYPE.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Text size steps (⌘+, ⌘−), from small to large.
+pub const ZOOMS: [f32; 7] = [0.85, 0.92, 1., 1.08, 1.16, 1.25, 1.35];
+
+/// Set the fonts and sizes; [`apply`] then hands them to the editor.
+pub fn set_type(ui: UiFont, code: CodeFont, zoom: f32, editor: f32) {
+    *TYPE.write().unwrap_or_else(|e| e.into_inner()) = Type {
+        ui,
+        code,
+        zoom,
+        editor,
+    };
+}
+
+/// The interface font's family.
+pub fn ui_font() -> &'static str {
+    current().ui.family()
+}
+
+/// The code font's family.
+pub fn mono_font() -> &'static str {
+    current().code.family()
+}
+
+/// `size` (a design size in pixels) at the chosen text size.
+pub fn text(size: f32) -> gpui::Pixels {
+    gpui::px((size * current().zoom * 2.).round() / 2.)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -425,7 +584,13 @@ pub fn apply(mode: Mode, cx: &mut App) {
     gpui_component::Theme::change(component_mode, None, cx);
     // The window's root paints this behind everything; clear it so the frosted
     // window shows through around the cards.
-    gpui_component::Theme::global_mut(cx).tokens.background = gpui::transparent_black().into();
+    let component = gpui_component::Theme::global_mut(cx);
+    component.tokens.background = gpui::transparent_black().into();
+    // The editor takes its font and size from here, not from what surrounds it.
+    let chosen = current();
+    component.mono_font_family = chosen.code.family().into();
+    component.mono_font_size = text(chosen.editor);
+    component.font_family = chosen.ui.family().into();
 }
 
 pub trait ActiveTheme {

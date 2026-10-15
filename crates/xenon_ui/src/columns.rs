@@ -132,7 +132,7 @@ impl Workspace {
                         .w(px(200.))
                         .h_auto()
                         .p(px(4.))
-                        .text_size(px(12.))
+                        .text_size(crate::theme::text(12.))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.column_menu = None;
                             cx.notify();

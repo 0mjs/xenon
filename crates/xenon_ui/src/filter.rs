@@ -228,7 +228,7 @@ use gpui::{
 };
 use gpui_component::input::InputState;
 
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{self, ButtonKind};
 use crate::workspace::Workspace;
 
@@ -433,15 +433,20 @@ impl Workspace {
                 .border_color(theme.line)
                 .cursor_pointer()
                 .hover(|el| el.border_color(theme.acc))
-                .text_size(px(12.))
+                .text_size(crate::theme::text(12.))
                 .text_color(theme.text)
                 .child(
                     div()
                         .truncate()
-                        .when(mono, |el| el.font_family(MONO_FONT))
+                        .when(mono, |el| el.font_family(crate::theme::mono_font()))
                         .child(text),
                 )
-                .child(div().text_color(theme.t3).text_size(px(8.)).child("▼"))
+                .child(
+                    div()
+                        .text_color(theme.t3)
+                        .text_size(crate::theme::text(8.))
+                        .child("▼"),
+                )
         };
         let list = |row: usize, menu: Menu, items: Vec<String>, mono: bool| {
             deferred(
@@ -465,9 +470,9 @@ impl Workspace {
                                 .items_center()
                                 .rounded(px(4.))
                                 .cursor_pointer()
-                                .text_size(px(12.))
+                                .text_size(crate::theme::text(12.))
                                 .text_color(theme.text)
-                                .when(mono, |el| el.font_family(MONO_FONT))
+                                .when(mono, |el| el.font_family(crate::theme::mono_font()))
                                 .hover(|el| el.bg(theme.s2))
                                 .child(div().truncate().child(label))
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -505,8 +510,8 @@ impl Workspace {
                     .child(
                         div()
                             .w(px(44.))
-                            .text_size(px(11.))
-                            .font_family(MONO_FONT)
+                            .text_size(crate::theme::text(11.))
+                            .font_family(crate::theme::mono_font())
                             .text_color(theme.t3)
                             .child(if ix == 0 {
                                 "WHERE"
@@ -632,8 +637,8 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .truncate()
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.))
+                                .font_family(crate::theme::mono_font())
+                                .text_size(crate::theme::text(11.))
                                 .text_color(theme.t3)
                                 .child(preview),
                         )

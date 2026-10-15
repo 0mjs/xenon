@@ -10,7 +10,7 @@ use xenon_driver::{ConnectOptions, SslMode};
 use xenon_store::{Environment, SavedConnection, ServerEngine, Target};
 
 use crate::servers;
-use crate::theme::{ActiveTheme, MONO_FONT, Theme};
+use crate::theme::{ActiveTheme, Theme};
 use crate::widgets::{self, ButtonKind, Engine, RADIUS_CONTROL};
 
 /// What to show in an empty Database field.
@@ -595,13 +595,13 @@ impl Render for ConnectDialog {
                     .gap(px(2.))
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(crate::theme::text(14.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title),
                     )
                     .child(
                         div()
-                            .text_size(px(11.5))
+                            .text_size(crate::theme::text(11.5))
                             .text_color(theme.t3)
                             .child(subtitle),
                     ),
@@ -627,8 +627,8 @@ impl Render for ConnectDialog {
                             .py(px(8.))
                             .rounded(px(RADIUS_CONTROL))
                             .bg(theme.s3)
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.5))
+                            .font_family(crate::theme::mono_font())
+                            .text_size(crate::theme::text(11.5))
                             .text_color(theme.t2)
                             .child(crate::detect::tilde(path)),
                     ),
@@ -644,7 +644,7 @@ impl Render for ConnectDialog {
                             .items_center()
                             .gap(px(10.))
                             .text_color(theme.t3)
-                            .text_size(px(11.))
+                            .text_size(crate::theme::text(11.))
                             .child(div().flex_1().h(px(1.)).bg(theme.line_2))
                             .child("or")
                             .child(div().flex_1().h(px(1.)).bg(theme.line_2)),
@@ -696,7 +696,7 @@ impl Render for ConnectDialog {
                     .child(
                         div()
                             .mt(px(-4.))
-                            .text_size(px(11.5))
+                            .text_size(crate::theme::text(11.5))
                             .text_color(theme.t3)
                             .child(if sql_server {
                                 "Optional, a PEM file: a private CA to trust. (SQL Server doesn't \
@@ -714,7 +714,7 @@ impl Render for ConnectDialog {
                         el.child(
                             div()
                                 .mt(px(-4.))
-                                .text_size(px(11.5))
+                                .text_size(crate::theme::text(11.5))
                                 .text_color(theme.warn)
                                 .child(
                                     "Production should verify the server (verify-full). Without it, \
@@ -740,7 +740,7 @@ impl Render for ConnectDialog {
                         .child("Connect through an SSH tunnel")
                         .child(
                             div()
-                                .text_size(px(11.5))
+                                .text_size(crate::theme::text(11.5))
                                 .text_color(theme.t3)
                                 .child("for databases behind a bastion"),
                         ),
@@ -781,7 +781,7 @@ impl Render for ConnectDialog {
                         ))
                         .child(
                             div()
-                                .text_size(px(11.5))
+                                .text_size(crate::theme::text(11.5))
                                 .line_height(px(17.))
                                 .text_color(theme.t3)
                                 .child(
@@ -986,7 +986,7 @@ fn note(
             div()
                 .flex_1()
                 .min_w(px(0.))
-                .text_size(px(11.5))
+                .text_size(crate::theme::text(11.5))
                 .line_height(px(17.))
                 .text_color(theme.text)
                 .child(text),

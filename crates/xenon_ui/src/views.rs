@@ -11,7 +11,7 @@ use gpui_component::input::{Editor, EditorState};
 use xenon_driver::export::{self, Format};
 
 use crate::results::Grid;
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets;
 use crate::workspace::Workspace;
 
@@ -152,8 +152,8 @@ impl Workspace {
                         .child(
                             div()
                                 .h(px(18.))
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.5))
+                                .font_family(crate::theme::mono_font())
+                                .text_size(crate::theme::text(10.5))
                                 .text_color(theme.t3)
                                 .child(format!("ROW {}", ix + 1)),
                         )
@@ -176,8 +176,8 @@ impl Workspace {
                                         .flex_1()
                                         .min_w(px(0.))
                                         .truncate()
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(11.5))
+                                        .font_family(crate::theme::mono_font())
+                                        .text_size(crate::theme::text(11.5))
                                         .text_color(if value.is_null() {
                                             theme.t3
                                         } else {
@@ -207,7 +207,7 @@ impl Workspace {
                     div()
                         .px(px(14.))
                         .py(px(6.))
-                        .text_size(px(11.))
+                        .text_size(crate::theme::text(11.))
                         .text_color(theme.t3)
                         .border_b_1()
                         .border_color(theme.line_2)
@@ -222,8 +222,8 @@ impl Workspace {
                     .flex_1()
                     .min_h(px(0.))
                     .pt(px(6.))
-                    .font_family(MONO_FONT)
-                    .text_size(px(12.))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(12.))
                     .child(Editor::new(&json.editor).h_full().appearance(false)),
             )
             .into_any_element()

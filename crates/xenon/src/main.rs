@@ -9,7 +9,7 @@ use xenon_ui::{
     Explain, FormatSql, ImportConnections, Launch, NewConnection, NewTab, NextTab, OpenFile,
     OpenPalette, OpenSettings, PrevTab, Quit, RunAll, RunQuery, ShowConnections, ShowExplorer,
     ShowHistory, ToggleComment, ToggleExplorer, ToggleInspector, UseDarkTheme, UseLightTheme,
-    UseSystemTheme, Workspace,
+    UseSystemTheme, Workspace, ZoomIn, ZoomOut, ZoomReset,
 };
 
 fn main() {
@@ -105,6 +105,10 @@ fn set_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Toggle Side Panel", ToggleExplorer),
             MenuItem::action("Toggle Inspector", ToggleInspector),
+            MenuItem::separator(),
+            MenuItem::action("Bigger Text", ZoomIn),
+            MenuItem::action("Smaller Text", ZoomOut),
+            MenuItem::action("Actual Size", ZoomReset),
             MenuItem::separator(),
             MenuItem::action("Next Tab", NextTab),
             MenuItem::action("Previous Tab", PrevTab),

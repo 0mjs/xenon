@@ -10,7 +10,7 @@ use xenon_store::{Environment, SavedConnection, Target, secrets};
 
 use crate::detect::{Detected, detect};
 use crate::servers;
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{self, ButtonKind};
 use crate::workspace::Workspace;
 
@@ -214,15 +214,20 @@ impl Workspace {
                                 .gap(px(2.))
                                 .child(
                                     div()
-                                        .text_size(px(14.))
+                                        .text_size(crate::theme::text(14.))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child("Import connections"),
                                 )
-                                .child(div().text_size(px(11.5)).text_color(theme.t3).child(
-                                    "One per line: postgres://, mysql://, mariadb:// or \
+                                .child(
+                                    div()
+                                        .text_size(crate::theme::text(11.5))
+                                        .text_color(theme.t3)
+                                        .child(
+                                            "One per line: postgres://, mysql://, mariadb:// or \
                                      sqlserver:// URLs, DATABASE_URL= lines, or database file \
                                      paths. Passwords in them go to the Keychain.",
-                                )),
+                                        ),
+                                ),
                         )
                         .child(
                             div()
@@ -232,13 +237,13 @@ impl Workspace {
                                 .border_color(theme.line)
                                 .bg(theme.field)
                                 .p(px(6.))
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
+                                .font_family(crate::theme::mono_font())
+                                .text_size(crate::theme::text(11.5))
                                 .child(Editor::new(&import.editor).h_full().appearance(false)),
                         )
                         .children(import.note.as_ref().map(|(text, error)| {
                             div()
-                                .text_size(px(11.5))
+                                .text_size(crate::theme::text(11.5))
                                 .text_color(if *error { theme.err } else { theme.t2 })
                                 .child(text.clone())
                         }))

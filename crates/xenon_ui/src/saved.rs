@@ -12,7 +12,7 @@ use xenon_store::{OpenTab, SavedQuery};
 use crate::assets;
 use crate::confirm::ConfirmDialog;
 use crate::history::{ago, now_ms};
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{self, ButtonKind, empty_hint, search_field};
 use crate::workspace::{Pending, RunScope, Workspace};
 
@@ -311,23 +311,23 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .truncate()
-                                .text_size(px(12.))
+                                .text_size(crate::theme::text(12.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
                                 .child(crate::folders::split(&query.name).1.to_string()),
                         )
                         .child(
                             div()
-                                .font_family(MONO_FONT)
-                                .text_size(px(10.))
+                                .font_family(crate::theme::mono_font())
+                                .text_size(crate::theme::text(10.))
                                 .text_color(theme.t3)
                                 .child(ago(now - query.updated_at)),
                         ),
                 )
                 .child(
                     div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(10.5))
                         .text_color(theme.t3)
                         .truncate()
                         .child(preview),
@@ -425,7 +425,7 @@ impl Workspace {
                         .gap(px(12.))
                         .child(
                             div()
-                                .text_size(px(14.))
+                                .text_size(crate::theme::text(14.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text)
                                 .child(if naming.copy {

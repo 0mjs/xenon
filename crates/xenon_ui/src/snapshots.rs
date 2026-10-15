@@ -403,6 +403,26 @@ fn snapshots() {
             assert_eq!(numbers.max, "155.38");
         });
         shot.save(&format!("42-totals-{suffix}"));
+        // Other fonts, bigger text.
+        shot.act(|w, window, cx| {
+            let prefs = crate::settings::Prefs {
+                ui_font: crate::theme::UiFont::Inter,
+                code_font: crate::theme::CodeFont::JetBrainsMono,
+                zoom: 1.25,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx);
+        });
+        shot.save(&format!("50-type-{suffix}"));
+        shot.act(|w, window, cx| {
+            let prefs = crate::settings::Prefs {
+                ui_font: Default::default(),
+                code_font: Default::default(),
+                zoom: 1.,
+                ..w.prefs
+            };
+            w.set_prefs(prefs, window, cx);
+        });
         // The rows as records, then as JSON.
         shot.act(|w, _, cx| w.set_view(crate::views::ResultView::Records, cx));
         shot.save(&format!("43-records-{suffix}"));

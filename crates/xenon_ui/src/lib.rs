@@ -51,6 +51,9 @@ actions!(
         CheckForUpdates,
         ImportConnections,
         FormatSql,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
         ToggleComment,
         EditCell,
         DeleteRows,
@@ -131,6 +134,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-n", NewConnection, None),
         KeyBinding::new("cmd-shift-n", ShowConnections, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-=", ZoomIn, None),
+        KeyBinding::new("cmd-+", ZoomIn, None),
+        KeyBinding::new("cmd--", ZoomOut, None),
+        KeyBinding::new("cmd-0", ZoomReset, None),
         KeyBinding::new("cmd-s", SaveEdits, None),
         // Autocomplete opens as you type; ⌃Space opens it on demand.
         KeyBinding::new(

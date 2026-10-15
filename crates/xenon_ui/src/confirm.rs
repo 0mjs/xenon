@@ -7,7 +7,7 @@ use gpui::{
 };
 use gpui_component::input::{Escape, InputEvent, InputState};
 
-use crate::theme::{ActiveTheme, MONO_FONT};
+use crate::theme::ActiveTheme;
 use crate::widgets::{self, ButtonKind, RADIUS_CONTROL};
 
 pub enum ConfirmEvent {
@@ -137,7 +137,7 @@ impl Render for ConfirmDialog {
                     .pt(px(1.))
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(crate::theme::text(14.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(self.title.clone()),
                     )
@@ -156,8 +156,8 @@ impl Render for ConfirmDialog {
             .bg(theme.field)
             .border_1()
             .border_color(theme.line)
-            .font_family(MONO_FONT)
-            .text_size(px(11.5))
+            .font_family(crate::theme::mono_font())
+            .text_size(crate::theme::text(11.5))
             .line_height(px(17.))
             .text_color(theme.text)
             .child(self.preview.clone());
@@ -180,12 +180,12 @@ impl Render for ConfirmDialog {
                             div()
                                 .flex()
                                 .gap(px(4.))
-                                .text_size(px(11.5))
+                                .text_size(crate::theme::text(11.5))
                                 .text_color(theme.t2)
                                 .child("Type")
                                 .child(
                                     div()
-                                        .font_family(MONO_FONT)
+                                        .font_family(crate::theme::mono_font())
                                         .text_color(theme.text)
                                         .child(text),
                                 )
@@ -208,7 +208,7 @@ impl Render for ConfirmDialog {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .text_size(px(11.))
+                    .text_size(crate::theme::text(11.))
                     .text_color(theme.t3)
                     .child(widgets::kbd(&theme, "esc"))
                     .child("to cancel"),

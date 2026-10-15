@@ -6,7 +6,7 @@ use xenon_store::{SavedConnection, Target};
 
 use crate::assets;
 use crate::palette::fuzzy_score;
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{
     Engine, connection_tags, empty_hint, engine_logo, env_tag, panel_label, search_field, tree_row,
 };
@@ -413,8 +413,8 @@ impl Workspace {
                     .when(column.primary_key, |el| el.child(env_tag("PK", theme.acc)))
                     .child(
                         div()
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.))
+                            .font_family(crate::theme::mono_font())
+                            .text_size(crate::theme::text(10.))
                             .text_color(theme.t3)
                             .child(column.type_name.to_lowercase()),
                     )
@@ -427,8 +427,8 @@ impl Workspace {
 
 fn count(theme: &Theme, n: usize) -> impl IntoElement {
     div()
-        .font_family(MONO_FONT)
-        .text_size(px(10.5))
+        .font_family(crate::theme::mono_font())
+        .text_size(crate::theme::text(10.5))
         .text_color(theme.t3)
         .child(n.to_string())
 }

@@ -185,13 +185,18 @@ impl Render for Palette {
                                     list_theme.t3
                                 }),
                         )
-                        .child(div().flex_none().text_size(px(13.)).child(label))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(crate::theme::text(13.))
+                                .child(label),
+                        )
                         .when_some(detail, |el, detail| {
                             el.child(
                                 div()
                                     .min_w(px(0.))
                                     .truncate()
-                                    .text_size(px(11.5))
+                                    .text_size(crate::theme::text(11.5))
                                     .text_color(list_theme.t3)
                                     .child(detail),
                             )
@@ -201,7 +206,7 @@ impl Render for Palette {
                             el.child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.))
+                                    .text_size(crate::theme::text(11.))
                                     .text_color(list_theme.t3)
                                     .child(match kind {
                                         "TABLE" => "Table",
@@ -278,7 +283,7 @@ impl Render for Palette {
                     .gap(px(16.))
                     .border_t_1()
                     .border_color(theme.line_2)
-                    .text_size(px(11.))
+                    .text_size(crate::theme::text(11.))
                     .text_color(theme.t3)
                     .child(hint("↑↓", "to move"))
                     .child(hint("↵", "to open"))

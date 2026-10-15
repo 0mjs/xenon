@@ -8,7 +8,7 @@ use gpui::{
 };
 use xenon_driver::{ForeignKey, TableInfo};
 
-use crate::theme::{MONO_FONT, Theme};
+use crate::theme::Theme;
 use crate::widgets::{self, ButtonKind};
 
 /// Schema, table.
@@ -46,7 +46,7 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
         .gap(px(22.))
         .px(px(16.))
         .py(px(14.))
-        .text_size(px(12.));
+        .text_size(crate::theme::text(12.));
 
     // Columns.
     let link = |key: &ForeignKey| {
@@ -79,8 +79,8 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
             )
             .child(
                 cell(150.)
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.5))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(11.5))
                     .text_color(theme.t2)
                     .child(column.type_name.to_lowercase()),
             )
@@ -96,8 +96,8 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
             )
             .child(
                 cell(180.)
-                    .font_family(MONO_FONT)
-                    .text_size(px(11.5))
+                    .font_family(crate::theme::mono_font())
+                    .text_size(crate::theme::text(11.5))
                     .text_color(theme.t2)
                     .child(column.default.clone().unwrap_or_default()),
             )
@@ -120,7 +120,7 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
     if let Some(rows) = info.estimated_rows {
         body = body.child(
             div()
-                .text_size(px(11.5))
+                .text_size(crate::theme::text(11.5))
                 .text_color(theme.t3)
                 .child(format!(
                     "About {} rows (from the server's statistics)",
@@ -150,15 +150,15 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
             row(theme, ix)
                 .child(
                     cell(260.)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(11.5))
                         .text_color(theme.text)
                         .child(index.name.clone()),
                 )
                 .child(
                     cell(300.)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(11.5))
                         .text_color(theme.t2)
                         .child(index.columns.join(", ")),
                 )
@@ -188,8 +188,8 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
             row(theme, ix)
                 .child(
                     cell(260.)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(11.5))
                         .text_color(theme.t2)
                         .child(key.columns.join(", ")),
                 )
@@ -220,8 +220,8 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                 )))
                 .child(
                     cell(300.)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(11.5))
                         .text_color(theme.t2)
                         .child(format!("→ {}", key.ref_columns.join(", "))),
                 )
@@ -262,7 +262,7 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                         .when(written, |el| {
                             el.child(
                                 div()
-                                    .text_size(px(11.))
+                                    .text_size(crate::theme::text(11.))
                                     .text_color(theme.t3)
                                     .child("written by Xenon from the parts above"),
                             )
@@ -292,8 +292,8 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                         .bg(theme.s1)
                         .border_1()
                         .border_color(theme.line_2)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(11.5))
                         .child(
                             gpui_component::input::Editor::new(editor)
                                 .h_full()
@@ -305,8 +305,8 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                         .bg(theme.s1)
                         .border_1()
                         .border_color(theme.line_2)
-                        .font_family(MONO_FONT)
-                        .text_size(px(11.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(11.5))
                         .text_color(theme.t2)
                         .children(definition.lines().map(|line| {
                             // Keep indentation; GPUI collapses leading spaces otherwise.
@@ -392,7 +392,7 @@ fn create_table(view: &View<'_>) -> String {
 
 fn heading(theme: &Theme, text: &'static str) -> impl IntoElement {
     div()
-        .text_size(px(11.))
+        .text_size(crate::theme::text(11.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.t2)
         .child(text)
@@ -417,8 +417,8 @@ fn section(
                 .child(heading(theme, title))
                 .child(
                     div()
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
+                        .font_family(crate::theme::mono_font())
+                        .text_size(crate::theme::text(10.5))
                         .text_color(theme.t3)
                         .child(count.to_string()),
                 ),
@@ -446,7 +446,7 @@ fn header(theme: &Theme) -> gpui::Div {
         .bg(theme.s1)
         .border_b_1()
         .border_color(theme.line_2)
-        .text_size(px(11.))
+        .text_size(crate::theme::text(11.))
         .text_color(theme.t3)
 }
 
@@ -470,8 +470,8 @@ fn badge(theme: &Theme, text: &'static str, accent: bool) -> impl IntoElement {
         .rounded(px(3.))
         .border_1()
         .border_color(if accent { theme.acc } else { theme.line })
-        .font_family(MONO_FONT)
-        .text_size(px(9.5))
+        .font_family(crate::theme::mono_font())
+        .text_size(crate::theme::text(9.5))
         .text_color(if accent { theme.acc } else { theme.t2 })
         .child(text)
 }
@@ -484,7 +484,7 @@ fn actions(theme: &Theme, key: &ForeignKey) -> impl IntoElement {
     div()
         .flex_1()
         .truncate()
-        .text_size(px(11.))
+        .text_size(crate::theme::text(11.))
         .text_color(theme.t3)
         .child(words.join(" · "))
 }
@@ -503,8 +503,8 @@ fn table_link(
         .gap(px(4.))
         .flex_none()
         .cursor_pointer()
-        .font_family(MONO_FONT)
-        .text_size(px(11.5))
+        .font_family(crate::theme::mono_font())
+        .text_size(crate::theme::text(11.5))
         .text_color(theme.acc)
         .hover(|el| el.underline())
         .child(
