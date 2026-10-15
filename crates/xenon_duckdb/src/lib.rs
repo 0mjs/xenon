@@ -538,6 +538,13 @@ impl Connection for DuckDbConnection {
         self.cancel.clone()
     }
 
+    fn unchanged(&self, column: &str, type_name: &str, loaded: &Value) -> Option<String> {
+        if !loaded.is_null() && type_name.eq_ignore_ascii_case("json") {
+            return Some(format!("{column}::varchar = {}", self.literal(loaded)));
+        }
+        xenon_driver::default_unchanged(self, column, loaded)
+    }
+
     fn is_local(&self) -> bool {
         true
     }

@@ -92,23 +92,6 @@ pub struct Statement {
     pub exactly_one: bool,
 }
 
-/// Whether a column's loaded value can be checked with `=` before saving:
-/// not JSON (Postgres's `json` has no `=`), XML, spatial or SQL Server's legacy
-/// `text`/`ntext`/`image`.
-fn comparable(conn: &dyn Connection, column: &xenon_driver::Column) -> bool {
-    let kind = column
-        .type_name
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let legacy = conn.uses_top() && matches!(kind.as_str(), "text" | "ntext" | "image");
-    !(legacy
-        || kind.contains("json")
-        || kind.contains("xml")
-        || kind.contains("geometry")
-        || kind.contains("geography"))
-}
-
 /// The statements that save `edits`: deletes, then updates, then inserts.
 pub fn statements(
     conn: &dyn Connection,
@@ -139,12 +122,12 @@ pub fn statements(
     // and the save stops instead of overwriting or deleting their change.
     let unchanged = |row: usize, columns: &mut dyn Iterator<Item = usize>| -> String {
         columns
-            .filter(|col| !target.key.contains(col) && comparable(conn, &data.columns[*col]))
-            .map(|col| match &data.rows[row][col] {
-                Value::Null => format!(" and {} is null", column(col)),
-                Value::Real(_) => String::new(),
-                old => format!(" and {} = {}", column(col), conn.literal(old)),
+            .filter(|col| !target.key.contains(col))
+            .filter_map(|col| {
+                let kind = data.columns[col].type_name.as_deref().unwrap_or("");
+                conn.unchanged(&column(col), kind, &data.rows[row][col])
             })
+            .map(|condition| format!(" and {condition}"))
             .collect()
     };
 
@@ -445,7 +428,7 @@ mod tests {
             sql,
             [
                 // Only if the row is as it was loaded.
-                "delete from orders where id = 1 and status = 'paid' and note is null",
+                "delete from orders where id = 1 and status = 'paid' and abs(total - 10.5) <= 0.0001 and note is null",
                 // Saved only if the edited cells still hold what was loaded.
                 "update orders set status = 'o''clock', note = NULL \
                  where id = 2 and status = 'pending' and note = 'it''s'",
@@ -503,6 +486,27 @@ mod tests {
         let err = save(&conn, &statements(&conn, &target(), &data, &edits)).unwrap_err();
         assert!(err.to_string().starts_with("Nothing was saved"), "{err}");
         assert_eq!(fetch(&conn).rows.len(), data.rows.len());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_changed_number_is_noticed_too() {
+        let (conn, path) = shop();
+        let data = fetch(&conn);
+        let mut edits = Edits::default();
+        edits.deleted.insert(0);
+        // Floating-point columns are checked as well (within a millionth).
+        conn.execute("update orders set total = 10.75 where id = 1", 0)
+            .unwrap();
+        let err = save(&conn, &statements(&conn, &target(), &data, &edits)).unwrap_err();
+        assert!(err.to_string().starts_with("Nothing was saved"), "{err}");
+        // Unchanged, it matches.
+        conn.execute("update orders set total = 10.5 where id = 1", 0)
+            .unwrap();
+        assert_eq!(
+            save(&conn, &statements(&conn, &target(), &data, &edits)).unwrap(),
+            1
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -757,12 +761,71 @@ mod live {
         }
     }
 
+    /// JSON, XML, legacy text and floating-point columns are checked too: a
+    /// change made elsewhere since loading stops a delete; undone, it goes ahead.
+    fn special_types(engine: ServerEngine, port: u16) {
+        let conn = fleet(engine, port);
+        let conn = conn.as_ref();
+        let table = format!("xenon_special_{}", engine.as_str());
+        let _ = conn.execute(&format!("drop table {table}"), 0);
+        let (columns, doc) = match engine {
+            ServerEngine::Postgres => ("doc json, x xml, f double precision", "doc"),
+            ServerEngine::Mysql => ("doc json, x text, f float", "doc"),
+            ServerEngine::SqlServer => ("doc ntext, x xml, f float", "doc"),
+        };
+        conn.execute(
+            &format!("create table {table} (id int primary key, {columns})"),
+            0,
+        )
+        .unwrap();
+        conn.execute(
+            &format!("insert into {table} values (1, '{{\"a\": 1}}', '<a>1</a>', 0.1)"),
+            0,
+        )
+        .unwrap();
+        let data = rows(conn, &format!("select * from {table} order by id"));
+        let target = TableRef {
+            schema: None,
+            table: table.clone(),
+            key: vec![0],
+        };
+        let mut edits = Edits::default();
+        edits.deleted.insert(0);
+        for (change, undo) in [
+            (
+                format!("update {table} set {doc} = '{{\"a\": 2}}' where id = 1"),
+                format!("update {table} set {doc} = '{{\"a\": 1}}' where id = 1"),
+            ),
+            (
+                format!("update {table} set x = '<a>2</a>' where id = 1"),
+                format!("update {table} set x = '<a>1</a>' where id = 1"),
+            ),
+            (
+                format!("update {table} set f = 0.25 where id = 1"),
+                format!("update {table} set f = 0.1 where id = 1"),
+            ),
+        ] {
+            conn.execute(&change, 0).unwrap();
+            let err = save(conn, &statements(conn, &target, &data, &edits))
+                .expect_err(&format!("{engine:?} missed: {change}"));
+            assert!(err.to_string().starts_with("Nothing was saved"), "{err}");
+            conn.execute(&undo, 0).unwrap();
+        }
+        assert_eq!(
+            save(conn, &statements(conn, &target, &data, &edits)).unwrap(),
+            1,
+            "{engine:?}: the unchanged row should delete"
+        );
+        conn.execute(&format!("drop table {table}"), 0).unwrap();
+    }
+
     #[test]
     #[ignore]
     fn postgres() {
         let _serial = serial();
         check(ServerEngine::Postgres, 55432);
         time_limit(ServerEngine::Postgres, 55432);
+        special_types(ServerEngine::Postgres, 55432);
     }
 
     #[test]
@@ -771,6 +834,7 @@ mod live {
         let _serial = serial();
         check(ServerEngine::Mysql, 53306);
         time_limit(ServerEngine::Mysql, 53306);
+        special_types(ServerEngine::Mysql, 53306);
     }
 
     #[test]
@@ -779,6 +843,7 @@ mod live {
         let _serial = serial();
         check(ServerEngine::Mysql, 53307);
         time_limit(ServerEngine::Mysql, 53307);
+        special_types(ServerEngine::Mysql, 53307);
     }
 
     #[test]
@@ -787,5 +852,6 @@ mod live {
         let _serial = serial();
         check(ServerEngine::SqlServer, 51433);
         time_limit(ServerEngine::SqlServer, 51433);
+        special_types(ServerEngine::SqlServer, 51433);
     }
 }

@@ -787,6 +787,23 @@ impl Connection for MssqlConnection {
         self.cancel.clone()
     }
 
+    fn unchanged(&self, column: &str, type_name: &str, loaded: &Value) -> Option<String> {
+        let kind = type_name.to_ascii_lowercase();
+        if loaded.is_null() {
+            return Some(format!("{column} is null"));
+        }
+        let literal = self.literal(loaded);
+        match kind.as_str() {
+            // The legacy types and xml have no `=`: compare their text or bytes.
+            "text" | "ntext" | "xml" => {
+                Some(format!("cast({column} as nvarchar(max)) = {literal}"))
+            }
+            "image" => Some(format!("cast({column} as varbinary(max)) = {literal}")),
+            "geometry" | "geography" => None,
+            _ => xenon_driver::default_unchanged(self, column, loaded),
+        }
+    }
+
     fn alive(&self) -> bool {
         let mut guard = self.client.lock().unwrap_or_else(|e| e.into_inner());
         // A cancel ended the session on purpose; the next query opens another.

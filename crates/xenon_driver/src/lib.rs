@@ -376,6 +376,31 @@ pub struct SshOptions {
     pub password: String,
 }
 
+/// [`Connection::unchanged`] for a column `=` compares exactly (and floats
+/// within one part in a million), for drivers to fall back on.
+pub fn default_unchanged<C: Connection + ?Sized>(
+    conn: &C,
+    column: &str,
+    loaded: &Value,
+) -> Option<String> {
+    Some(match loaded {
+        Value::Null => format!("{column} is null"),
+        Value::Real(n) if !n.is_finite() => return None,
+        // Within a millionth of its size, rounded to a power of ten so the SQL
+        // reads plainly: `abs(total - 10.5) <= 0.00001`.
+        Value::Real(n) => {
+            let scale = if *n == 0. {
+                -12
+            } else {
+                n.abs().log10().ceil() as i32 - 6
+            };
+            let margin = 10f64.powi(scale);
+            format!("abs({column} - {}) <= {margin}", conn.literal(loaded))
+        }
+        value => format!("{column} = {}", conn.literal(value)),
+    })
+}
+
 pub trait CancelHandle: Send + Sync {
     /// Ask the running query to stop. Harmless when nothing is running.
     fn cancel(&self);
@@ -453,6 +478,17 @@ pub trait Connection: Send + Sync {
             Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
             Value::Blob(bytes) => format!("X'{}'", hex(bytes)),
         }
+    }
+
+    /// A condition that holds only while `column` (already quoted) still has
+    /// `loaded`, the value read when the rows were fetched: saving an edit or
+    /// delete with it changes nothing if someone else changed the row since.
+    /// `None` when the engine can't compare a column of `type_name` exactly.
+    /// Floating-point numbers match within one part in a million (MySQL's
+    /// `float` keeps fewer digits than are shown).
+    fn unchanged(&self, column: &str, type_name: &str, loaded: &Value) -> Option<String> {
+        let _ = type_name;
+        default_unchanged(self, column, loaded)
     }
 
     /// Whether the server is still there: true when it answers, even with an

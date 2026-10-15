@@ -108,6 +108,14 @@ impl Connection for Tunneled {
     fn in_transaction(&self) -> Option<bool> {
         self.inner.in_transaction()
     }
+    fn unchanged(
+        &self,
+        column: &str,
+        type_name: &str,
+        loaded: &xenon_driver::Value,
+    ) -> Option<String> {
+        self.inner.unchanged(column, type_name, loaded)
+    }
     fn alive(&self) -> bool {
         self.inner.alive()
     }

@@ -674,6 +674,20 @@ impl Connection for PostgresConnection {
         Some("start transaction read only")
     }
 
+    fn unchanged(&self, column: &str, type_name: &str, loaded: &Value) -> Option<String> {
+        let kind = type_name.to_ascii_lowercase();
+        if loaded.is_null() {
+            return Some(format!("{column} is null"));
+        }
+        let literal = self.literal(loaded);
+        Some(match kind.as_str() {
+            // `json` has no `=`: compare as `jsonb` (by meaning, not spacing).
+            "json" => format!("{column}::jsonb = {literal}::jsonb"),
+            "xml" | "geometry" | "geography" => format!("{column}::text = {literal}"),
+            _ => return xenon_driver::default_unchanged(self, column, loaded),
+        })
+    }
+
     fn alive(&self) -> bool {
         if self.client.is_closed() {
             return false;

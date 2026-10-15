@@ -634,6 +634,21 @@ impl Connection for MysqlConnection {
         Some("start transaction read only")
     }
 
+    fn unchanged(&self, column: &str, type_name: &str, loaded: &Value) -> Option<String> {
+        let kind = type_name.to_ascii_lowercase();
+        if loaded.is_null() {
+            return Some(format!("{column} is null"));
+        }
+        match kind.as_str() {
+            // By meaning, not spacing or key order.
+            "json" => Some(format!("{column} = cast({} as json)", self.literal(loaded))),
+            // Spatial values come back in a form that doesn't compare reliably.
+            "geometry" | "point" | "linestring" | "polygon" | "multipoint" | "multilinestring"
+            | "multipolygon" | "geometrycollection" | "geomcollection" => None,
+            _ => xenon_driver::default_unchanged(self, column, loaded),
+        }
+    }
+
     fn alive(&self) -> bool {
         match self.lock().query_drop("select 1") {
             Ok(()) => true,
