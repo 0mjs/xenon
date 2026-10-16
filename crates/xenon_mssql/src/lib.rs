@@ -864,6 +864,12 @@ impl Connection for MssqlConnection {
             }
             "image" => Some(format!("cast({column} as varbinary(max)) = {literal}")),
             "geometry" | "geography" => None,
+            // The default collation ignores case, and `=` always ignores trailing
+            // spaces: compare the characters exactly, and the length.
+            "varchar" | "nvarchar" => Some(format!(
+                "cast({column} as nvarchar(max)) collate Latin1_General_100_BIN2 = {literal} \
+                 and len(cast({column} as nvarchar(max)) + N'.') = len({literal} + N'.')"
+            )),
             _ => xenon_driver::default_unchanged(self, column, loaded),
         }
     }
@@ -1170,6 +1176,50 @@ mod live {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// A change of case or trailing spaces elsewhere is noticed, despite the
+    /// default case-insensitive collation and `=` ignoring trailing spaces.
+    #[test]
+    #[ignore]
+    fn conflict_checks_see_case_and_spacing() {
+        let _serial = serial();
+        let db = fleet();
+        db.execute(
+            "drop table if exists xenon_case; create table xenon_case (id int primary key, v nvarchar(20)); \
+             insert into xenon_case values (1, N'old')",
+            1,
+        )
+        .unwrap();
+        for (changed, loaded) in [("OLD", "old"), ("old  ", "old")] {
+            db.execute(&format!("update xenon_case set v = N'{changed}'"), 1)
+                .unwrap();
+            let check = db
+                .unchanged("v", "nvarchar", &Value::Text(loaded.into()))
+                .unwrap();
+            let found = rows(
+                &db,
+                &format!("select count(*) from xenon_case where {check}"),
+            );
+            assert_eq!(
+                found.rows[0][0],
+                Value::Integer(0),
+                "{changed:?} looked unchanged"
+            );
+            let same = db
+                .unchanged("v", "nvarchar", &Value::Text(changed.into()))
+                .unwrap();
+            let found = rows(
+                &db,
+                &format!("select count(*) from xenon_case where {same}"),
+            );
+            assert_eq!(
+                found.rows[0][0],
+                Value::Integer(1),
+                "{changed:?} didn't match itself"
+            );
+        }
+        db.execute("drop table xenon_case", 1).unwrap();
     }
 
     /// The default (`prefer`) encrypts the whole session, not just the login.

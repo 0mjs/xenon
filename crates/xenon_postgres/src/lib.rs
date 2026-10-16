@@ -719,6 +719,11 @@ impl Connection for PostgresConnection {
             // `json` has no `=`: compare as `jsonb` (by meaning, not spacing).
             "json" => format!("{column}::jsonb = {literal}::jsonb"),
             "xml" | "geometry" | "geography" => format!("{column}::text = {literal}"),
+            // `citext`, or a nondeterministic collation, ignores case or accents:
+            // compare the characters exactly.
+            "text" | "varchar" | "citext" | "name" => {
+                format!("{column}::text collate \"C\" = {literal} collate \"C\"")
+            }
             _ => return xenon_driver::default_unchanged(self, column, loaded),
         })
     }

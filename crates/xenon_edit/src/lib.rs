@@ -198,6 +198,19 @@ pub fn script(conn: &dyn Connection, statements: &[Statement]) -> String {
     lines.join("\n")
 }
 
+/// A save whose commit may or may not have happened (the connection dropped
+/// during it): saving the same edits again could apply them twice.
+#[derive(Debug)]
+pub struct CommitUnknown;
+
+impl std::fmt::Display for CommitUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the commit's outcome is unknown")
+    }
+}
+
+impl std::error::Error for CommitUnknown {}
+
 /// Run `statements` in one transaction. Updates and deletes must each touch
 /// exactly one row; if any doesn't (someone else changed or deleted it), or
 /// anything fails, nothing is saved. Blocking: call off the main thread.
@@ -225,10 +238,23 @@ pub fn save(conn: &dyn Connection, statements: &[Statement]) -> Result<usize> {
         Ok(rows)
     };
     match run() {
-        Ok(rows) => {
-            conn.execute("commit", 0)?;
-            Ok(rows)
-        }
+        Ok(rows) => match conn.execute("commit", 0) {
+            Ok(_) => Ok(rows),
+            // Still open (SQLite locked by a reader, say): roll it back, so the
+            // next commit anyone runs doesn't keep what the user was told failed.
+            Err(err) if conn.in_transaction() != Some(false) && conn.alive() => {
+                let _ = conn.execute("rollback", 0);
+                Err(anyhow!(
+                    "Nothing was saved: the database refused to commit, so the changes were rolled back. ({err:#})"
+                ))
+            }
+            // The connection went while committing: the server may or may not
+            // have kept it.
+            Err(err) => Err(anyhow::Error::new(CommitUnknown).context(format!(
+                "The connection dropped while saving, so Xenon can't tell whether the changes were \
+                 kept. Reload the table to see what's there before saving again. ({err:#})"
+            ))),
+        },
         Err(err) => {
             // The original error matters more than a failed rollback.
             let _ = conn.execute("rollback", 0);
@@ -467,6 +493,123 @@ mod tests {
         );
     }
 
+    /// Someone else changing only case or trailing spaces is still a change,
+    /// whatever the column's collation.
+    #[test]
+    fn a_case_or_spacing_change_elsewhere_stops_the_save() {
+        let conn = SqliteConnection::open_in_memory().unwrap();
+        conn.execute(
+            "create table t (id integer primary key, a text collate nocase, b text collate rtrim);
+             insert into t values (1, 'old', 'x')",
+            0,
+        )
+        .unwrap();
+        let QueryOutcome::Rows(data) = conn.execute("select * from t", 10).unwrap().outcome else {
+            panic!("no rows")
+        };
+        let target = TableRef {
+            schema: None,
+            table: "t".into(),
+            key: vec![0],
+        };
+        for change in [
+            "update t set a = 'OLD'",
+            "update t set a = 'old', b = 'x  '",
+        ] {
+            conn.execute(change, 0).unwrap();
+            let mut edits = Edits::default();
+            edits.set(RowRef::Existing(0), 1, Value::Text("mine".into()), None);
+            edits.set(RowRef::Existing(0), 2, Value::Text("mine".into()), None);
+            assert!(
+                save(&conn, &statements(&conn, &target, &data, &edits)).is_err(),
+                "{change}"
+            );
+            let mut delete = Edits::default();
+            delete.deleted.insert(0);
+            assert!(save(&conn, &statements(&conn, &target, &data, &delete)).is_err());
+        }
+    }
+
+    /// A commit the database refuses (SQLite locked by a reader) leaves nothing
+    /// open: the save is rolled back, says so, and can be tried again.
+    #[test]
+    fn a_refused_commit_rolls_the_save_back() {
+        let (_, path) = shop();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("pragma journal_mode = delete")
+            .unwrap();
+        let conn = SqliteConnection::open(&path, false).unwrap();
+        let data = fetch(&conn);
+        let reader = rusqlite::Connection::open(&path).unwrap();
+        reader.execute_batch("begin").unwrap();
+        let mut stmt = reader.prepare("select * from orders").unwrap();
+        let mut held = stmt.query([]).unwrap();
+        let _ = held.next().unwrap();
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(0), 1, Value::Text("saved".into()), None);
+        let todo = statements(&conn, &target(), &data, &edits);
+        let err = save(&conn, &todo).unwrap_err().to_string();
+        assert!(err.starts_with("Nothing was saved"), "{err}");
+        assert_eq!(conn.in_transaction(), Some(false));
+        drop(held);
+        drop(stmt);
+        reader.execute_batch("commit").unwrap();
+        assert_eq!(save(&conn, &todo).unwrap(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The connection drops during the commit: whether it was kept is unknown,
+    /// and the error says so in a way the app can tell apart (so it doesn't
+    /// invite saving the same rows twice).
+    #[test]
+    fn a_commit_lost_with_the_connection_is_reported_as_unknown() {
+        struct Drops(SqliteConnection);
+        impl Connection for Drops {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn server_version(&self) -> String {
+                self.0.server_version()
+            }
+            fn execute_streaming(
+                &self,
+                sql: &str,
+                row_limit: usize,
+                progress: &mut dyn FnMut(xenon_driver::Progress),
+            ) -> Result<xenon_driver::QueryResult> {
+                if sql == "commit" {
+                    return Err(anyhow!("connection reset by peer"));
+                }
+                self.0.execute_streaming(sql, row_limit, progress)
+            }
+            fn introspect(&self) -> Result<Vec<xenon_driver::Schema>> {
+                self.0.introspect()
+            }
+            fn describe(&self, schema: &str, table: &str) -> Result<xenon_driver::TableInfo> {
+                self.0.describe(schema, table)
+            }
+            fn cancel_handle(&self) -> std::sync::Arc<dyn xenon_driver::CancelHandle> {
+                self.0.cancel_handle()
+            }
+            fn alive(&self) -> bool {
+                false
+            }
+            fn in_transaction(&self) -> Option<bool> {
+                None
+            }
+        }
+        let (conn, path) = shop();
+        let data = fetch(&conn);
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(0), 1, Value::Text("saved".into()), None);
+        let todo = statements(&conn, &target(), &data, &edits);
+        let err = save(&Drops(conn), &todo).unwrap_err();
+        assert!(err.downcast_ref::<CommitUnknown>().is_some(), "{err:#}");
+        assert!(format!("{err:#}").contains("can't tell"), "{err:#}");
+        let _ = std::fs::remove_file(path);
+    }
+
     /// A key that isn't valid UTF-8 isn't read as U+FFFD, which another row's
     /// key may really be: the save matches no row and is refused.
     #[test]
@@ -524,10 +667,10 @@ mod tests {
             sql,
             [
                 // Named in full; only if the row is as it was loaded.
-                "delete from main.orders where id = 1 and status = 'paid' and abs(total - 10.5) <= 0.0001 and note is null",
+                "delete from main.orders where id = 1 and status = 'paid' collate binary and abs(total - 10.5) <= 0.0001 and note is null",
                 // Saved only if the edited cells still hold what was loaded.
                 "update main.orders set status = 'o''clock', note = NULL \
-                 where id = 2 and status = 'pending' and note = 'it''s'",
+                 where id = 2 and status = 'pending' collate binary and note = 'it''s' collate binary",
                 "insert into main.orders (status) values ('pending')",
             ]
         );

@@ -322,6 +322,18 @@ impl Connection for SqliteConnection {
         Some("main".into())
     }
 
+    /// Text is compared byte for byte: a column's `nocase` or `rtrim`
+    /// collation would hide someone else's change of case or spacing.
+    fn unchanged(&self, column: &str, _type_name: &str, loaded: &Value) -> Option<String> {
+        match loaded {
+            Value::Text(_) => Some(format!(
+                "{column} = {} collate binary",
+                self.literal(loaded)
+            )),
+            _ => xenon_driver::default_unchanged(self, column, loaded),
+        }
+    }
+
     fn explain(&self, sql: &str) -> String {
         format!("explain query plan {sql}")
     }

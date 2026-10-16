@@ -468,6 +468,10 @@ pub(crate) struct Tab {
     /// A short note in the results bar (saved, or why something can't happen), and whether it's an error.
     pub(crate) flash: Option<(SharedString, bool)>,
     pub(crate) saving: bool,
+    /// The last save's commit may or may not have happened (the connection
+    /// dropped): saving again could apply the edits twice, so not until the
+    /// table is reloaded.
+    pub(crate) save_unsure: bool,
     /// Rows read so far by the running query.
     fetched: usize,
     /// The grid shows the running query's first rows.
@@ -922,6 +926,7 @@ impl Workspace {
             editing: None,
             flash: None,
             saving: false,
+            save_unsure: false,
             fetched: 0,
             previewing: false,
             sets: Vec::new(),
@@ -3007,6 +3012,7 @@ impl Workspace {
             return;
         }
         editor.update(cx, |editor, cx| editor.set_value(sql.clone(), window, cx));
+        self.tabs[self.active].save_unsure = false;
         if let Some(browse) = &mut self.tabs[self.active].browse {
             browse.applied = filter;
             browse.loaded_with = Some(sql);
@@ -3482,6 +3488,14 @@ impl Workspace {
         if self.active_tab().edits.is_empty() || self.active_tab().saving {
             return;
         }
+        if self.active_tab().save_unsure {
+            self.flash(
+                "The last save may or may not have been kept: reload the table to see what's there before saving again.",
+                true,
+                cx,
+            );
+            return;
+        }
         if let Some(why) = self.busy(self.active_tab().id) {
             self.flash(why, true, cx);
             return;
@@ -3609,7 +3623,10 @@ impl Workspace {
                         }
                         this.tabs[index].flash = Some((message.into(), false));
                     }
-                    Err(err) => tab.flash = Some((format!("{err:#}").into(), true)),
+                    Err(err) => {
+                        tab.save_unsure = err.downcast_ref::<xenon_edit::CommitUnknown>().is_some();
+                        tab.flash = Some((format!("{err:#}").into(), true));
+                    }
                 }
                 this.reload_history(cx);
                 cx.notify();

@@ -782,6 +782,15 @@ impl Connection for MysqlConnection {
                 },
                 _ => xenon_driver::default_unchanged(self, column, loaded),
             },
+            // The default collations ignore case and accents, and PAD SPACE
+            // trailing spaces: compare the characters exactly, and the length.
+            "char" | "varchar" | "text" | "enum" | "set" => {
+                let literal = self.literal(loaded);
+                Some(format!(
+                    "convert({column} using utf8mb4) collate utf8mb4_bin = convert({literal} using utf8mb4) collate utf8mb4_bin \
+                     and char_length({column}) = char_length({literal})"
+                ))
+            }
             _ => xenon_driver::default_unchanged(self, column, loaded),
         }
     }
@@ -1337,6 +1346,45 @@ mod live {
         ] {
             assert!(conn.execute(script, 10).is_err(), "{script}");
         }
+
+        // A change of case or trailing spaces elsewhere is noticed, despite the
+        // default `_ci` / PAD SPACE collation.
+        conn.execute(
+            "drop table if exists xenon_case; create table xenon_case (id int primary key, v varchar(20)); \
+             insert into xenon_case values (1, 'old')",
+            1,
+        )
+        .unwrap();
+        for (changed, loaded) in [("OLD", "old"), ("old  ", "old")] {
+            conn.execute(&format!("update xenon_case set v = '{changed}'"), 1)
+                .unwrap();
+            let check = conn
+                .unchanged("v", "varchar", &Value::Text(loaded.into()))
+                .unwrap();
+            let found = match conn
+                .execute(&format!("select count(*) from xenon_case where {check}"), 1)
+                .unwrap()
+                .outcome
+            {
+                QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(found, Value::Integer(0), "{changed:?} looked unchanged");
+            let same = conn
+                .unchanged("v", "varchar", &Value::Text(changed.into()))
+                .unwrap();
+            let found = match conn
+                .execute(&format!("select count(*) from xenon_case where {same}"), 1)
+                .unwrap()
+                .outcome
+            {
+                QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(found, Value::Integer(1), "{changed:?} didn't match itself");
+            conn.execute("update xenon_case set v = 'old'", 1).unwrap();
+        }
+        conn.execute("drop table xenon_case", 1).unwrap();
 
         // An open transaction is known: after `begin`, ended by a schema change
         // (MySQL commits it), and with autocommit off.
