@@ -247,7 +247,7 @@ fn is_dropped(w: &Workspace, session: usize) -> bool {
     !w.session(session).unwrap().conn.alive()
 }
 
-fn seed_saved(store: &Store, shop: &Path) {
+pub(crate) fn seed_saved(store: &Store, shop: &Path) {
     let pg = |name: &str, host: &str, db: &str, environment| SavedConnection {
         id: 0,
         name: name.into(),

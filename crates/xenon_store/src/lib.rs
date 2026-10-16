@@ -176,14 +176,38 @@ pub struct SavedConnection {
     pub color: String,
 }
 
+/// What sets this data folder's Keychain items apart from another's (a reset
+/// or replaced folder starts its ids at 1 again, and must not pick up an old
+/// folder's passwords). Empty for a folder from before it existed, whose items
+/// keep their old names.
+static KEYCHAIN_NAMESPACE: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
 impl SavedConnection {
     pub fn secret_key(id: i64) -> String {
-        format!("connection-{id}")
+        let namespace = KEYCHAIN_NAMESPACE.read().unwrap_or_else(|e| e.into_inner());
+        if namespace.is_empty() {
+            format!("connection-{id}")
+        } else {
+            format!("connection-{namespace}-{id}")
+        }
     }
 
     pub fn ssh_secret_key(id: i64) -> String {
-        format!("connection-{id}-ssh")
+        format!("{}-ssh", Self::secret_key(id))
     }
+}
+
+/// A random-enough tag for a new data folder's Keychain items.
+fn new_namespace() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    hasher.write_u32(std::process::id());
+    format!("{:016x}", hasher.finish())
 }
 
 /// A query the user named and kept.
@@ -214,6 +238,8 @@ pub struct OpenTab {
 
 pub struct Store {
     conn: Mutex<rusqlite::Connection>,
+    /// See [`KEYCHAIN_NAMESPACE`].
+    namespace: String,
 }
 
 impl Store {
@@ -311,9 +337,45 @@ impl Store {
                 ))?;
             }
         }
+        // This folder's Keychain names: a new folder gets its own tag; one that
+        // already has connections keeps the old names its items were saved under.
+        let namespace: Option<String> = conn
+            .query_row(
+                "select value from settings where key = 'keychain_namespace'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let namespace = match namespace {
+            Some(namespace) => namespace,
+            None => {
+                let existing: i64 =
+                    conn.query_row("select count(*) from connections", [], |row| row.get(0))?;
+                let namespace = if existing > 0 {
+                    String::new()
+                } else {
+                    new_namespace()
+                };
+                conn.execute(
+                    "insert into settings (key, value) values ('keychain_namespace', ?1)",
+                    [&namespace],
+                )?;
+                namespace
+            }
+        };
+        *KEYCHAIN_NAMESPACE
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = namespace.clone();
         Ok(Self {
             conn: Mutex::new(conn),
+            namespace,
         })
+    }
+
+    /// What this data folder's Keychain item names carry (empty for a folder
+    /// from before they did).
+    pub fn keychain_namespace(&self) -> &str {
+        &self.namespace
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
@@ -470,15 +532,30 @@ impl Store {
         }
         let environment = saved.environment.as_str();
         if id == 0 {
+            // Never an id used before, even by a connection since forgotten: its
+            // Keychain items are named by it, and a delete there may have failed.
+            let highest: i64 = conn.query_row(
+                "select max(coalesce((select max(id) from connections), 0),
+                            coalesce((select cast(value as integer) from settings
+                                      where key = 'connections_high_water'), 0))",
+                [],
+                |row| row.get(0),
+            )?;
+            let id = highest + 1;
             conn.execute(
                 "insert into connections
-                     (name, kind, host, port, database, user, ssl, path, environment, read_only, last_used,
+                     (id, name, kind, host, port, database, user, ssl, path, environment, read_only, last_used,
                       ssh_host, ssh_port, ssh_user, ssh_key, color, ssl_ca, ssl_cert, ssl_key)
-                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                 values (?20, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![saved.name, kind, host, port, database, user, ssl, path, environment, saved.read_only, next_stamp(&conn)?,
-                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color, tls.ca, tls.cert, tls.key],
+                        ssh.host, ssh_port, ssh.user, ssh.key_file, saved.color, tls.ca, tls.cert, tls.key, id],
             )?;
-            Ok(conn.last_insert_rowid())
+            conn.execute(
+                "insert into settings (key, value) values ('connections_high_water', ?1)
+                 on conflict (key) do update set value = excluded.value",
+                [id.to_string()],
+            )?;
+            Ok(id)
         } else {
             conn.execute(
                 "update connections set name = ?1, kind = ?2, host = ?3, port = ?4, database = ?5,
@@ -697,6 +774,32 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keychain_names_are_never_reused() {
+        // Two fresh data folders don't share Keychain names.
+        let (a, b) = (
+            Store::open_in_memory().unwrap(),
+            Store::open_in_memory().unwrap(),
+        );
+        assert!(!a.keychain_namespace().is_empty());
+        assert_ne!(a.keychain_namespace(), b.keychain_namespace());
+        // A forgotten connection's id isn't given to the next one.
+        let saved = |name: &str| SavedConnection {
+            id: 0,
+            name: name.into(),
+            target: Target::Sqlite {
+                path: format!("/tmp/{name}.db"),
+            },
+            environment: Environment::None,
+            read_only: false,
+            color: String::new(),
+        };
+        let first = a.save_connection(&saved("one")).unwrap();
+        a.delete_connection(first).unwrap();
+        let second = a.save_connection(&saved("two")).unwrap();
+        assert_ne!(first, second);
+    }
 
     #[test]
     fn passwords_have_nowhere_to_go_in_the_data_file() {

@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use mysql::consts::{ColumnFlags, ColumnType};
 use mysql::prelude::Queryable as _;
 use mysql::{Conn, Opts, OptsBuilder, SslOpts};
@@ -53,7 +53,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         ),
         _ => (host_port.trim_matches(['[', ']']).to_string(), None),
     };
-    let mut ssl = SslMode::Prefer;
+    let mut ssl: Option<SslMode> = None;
     let mut tls = TlsFiles::default();
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
@@ -69,14 +69,24 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
             key.to_ascii_lowercase().as_str(),
             "ssl-mode" | "sslmode" | "ssl_mode"
         ) {
-            ssl = match value.to_ascii_lowercase().as_str() {
+            // Spelled any way MySQL's clients and libpq's do; anything else is
+            // refused rather than quietly read as `prefer`.
+            let mode = match decode(value)
+                .to_ascii_lowercase()
+                .replace('_', "-")
+                .as_str()
+            {
                 "disabled" | "disable" | "false" => SslMode::Disable,
                 "preferred" | "prefer" => SslMode::Prefer,
                 "required" | "require" | "true" => SslMode::Require,
-                "verify_ca" | "verify-ca" => SslMode::VerifyCa,
-                "verify_identity" | "verify-full" | "verify-identity" => SslMode::VerifyFull,
-                _ => ssl,
+                "verify-ca" => SslMode::VerifyCa,
+                "verify-identity" | "verify-full" => SslMode::VerifyFull,
+                other => bail!(
+                    "Unknown ssl-mode \"{other}\": use disabled, preferred, required, verify_ca or verify_identity."
+                ),
             };
+            // Given twice, the stricter holds.
+            ssl = Some(ssl.map_or(mode, |earlier| earlier.max(mode)));
         }
     }
     Ok(ConnectOptions {
@@ -85,7 +95,7 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         database: decode(database),
         user,
         password,
-        ssl,
+        ssl: ssl.unwrap_or_default(),
         read_only: false,
         ssh: None,
         address: None,
@@ -324,8 +334,20 @@ impl MysqlConnection {
         let opts: Opts = builder.clone().ssl_opts(tls(options.ssl)).into();
         let (conn, opts) = match Conn::new(opts.clone()) {
             Ok(conn) => (conn, opts),
-            // `prefer`: fall back to plain TCP when the server won't do TLS.
-            Err(_) if options.ssl == SslMode::Prefer => {
+            // `prefer`: fall back to plain TCP when the server won't do TLS, and
+            // only on this Mac. Anywhere else, whatever answers could be posing
+            // as the server and get the password sent without TLS: there, say so.
+            Err(mysql::Error::DriverError(mysql::DriverError::TlsNotSupported))
+                if options.ssl == SslMode::Prefer =>
+            {
+                // Through an SSH tunnel, SSH encrypts it.
+                if !matches!(host, "localhost" | "127.0.0.1" | "::1") && options.address.is_none() {
+                    return Err(anyhow!(
+                        "{host} doesn't offer TLS, so Xenon didn't send the password: anything \
+                         on the network could read it. To connect without TLS anyway, set \
+                         ssl-mode=disabled."
+                    ));
+                }
                 let plain: Opts = builder.ssl_opts(None::<SslOpts>).into();
                 (Conn::new(plain.clone()).map_err(describe_error)?, plain)
             }
@@ -1006,6 +1028,30 @@ fn near_position(message: &str, sql: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssl_modes_are_read_strictly() {
+        let mode = |url: &str| parse_url(url).map(|o| o.ssl);
+        for (url, want) in [
+            ("mysql://a@h/db?ssl-mode=verify_full", SslMode::VerifyFull),
+            (
+                "mysql://a@h/db?sslmode=VERIFY_IDENTITY",
+                SslMode::VerifyFull,
+            ),
+            (
+                "mysql://a@h/db?ssl-mode=VERIFY%5FIDENTITY",
+                SslMode::VerifyFull,
+            ),
+            (
+                "mysql://a@h/db?ssl-mode=VERIFY_IDENTITY&ssl-mode=DISABLED",
+                SslMode::VerifyFull,
+            ),
+            ("mysql://a@h/db", SslMode::Prefer),
+        ] {
+            assert_eq!(mode(url).unwrap(), want, "{url}");
+        }
+        assert!(mode("mysql://a@h/db?ssl-mode=verify_fulll").is_err());
+    }
 
     #[test]
     fn certificate_files_come_from_urls() {

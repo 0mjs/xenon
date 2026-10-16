@@ -149,15 +149,15 @@ pub(crate) struct Session {
 /// Everything needed to open (and maybe remember) a connection.
 #[derive(Clone)]
 pub(crate) struct Profile {
-    saved_id: Option<i64>,
+    pub(crate) saved_id: Option<i64>,
     /// Remember this connection after it opens.
     save: bool,
     name: String,
-    environment: Environment,
+    pub(crate) environment: Environment,
     read_only: bool,
     /// Its colour (see `widgets::CONNECTION_COLORS`), or empty.
     pub(crate) color: String,
-    target: RequestTarget,
+    pub(crate) target: RequestTarget,
     /// Set from Settings for production connections when connecting.
     lock_timeout: Option<std::time::Duration>,
 }
@@ -1138,28 +1138,39 @@ impl Workspace {
     ) {
         match servers::parse_url(engine, &url) {
             Ok(options) => {
-                // A URL for a saved database is that database: it keeps its
-                // production label and read-only flag, however it was reached.
-                let saved = self.saved_for(engine, &options).cloned();
-                let profile = Profile {
-                    saved_id: saved.as_ref().map(|s| s.id),
-                    save: false,
-                    name: saved.as_ref().map_or_else(
-                        || servers::default_name(engine, &options),
-                        |s| s.name.clone(),
-                    ),
-                    environment: saved.as_ref().map_or(Environment::None, |s| s.environment),
-                    read_only: saved.as_ref().is_some_and(|s| s.read_only),
-                    color: saved.as_ref().map(|s| s.color.clone()).unwrap_or_default(),
-                    target: RequestTarget::Server(engine, options),
-                    lock_timeout: None,
-                };
+                let profile = self.profile_for_url(engine, options);
                 self.open_profile(profile, window, cx)
             }
             Err(err) => {
                 self.notice = Some(format!("{err:#}").into());
                 cx.notify();
             }
+        }
+    }
+
+    /// What a URL opens. A URL for a saved database is that database, opened as
+    /// saved: its production label and read-only flag, and also its TLS,
+    /// certificates and tunnel, so the saved password only ever goes the saved
+    /// way. Only a password written in the URL is taken from it.
+    pub(crate) fn profile_for_url(&self, engine: ServerEngine, options: ConnectOptions) -> Profile {
+        if let Some(saved) = self.saved_for(engine, &options) {
+            let mut profile = Profile::from_saved(saved);
+            if let RequestTarget::Server(_, target) = &mut profile.target
+                && !options.password.is_empty()
+            {
+                target.password = options.password;
+            }
+            return profile;
+        }
+        Profile {
+            saved_id: None,
+            save: false,
+            name: servers::default_name(engine, &options),
+            environment: Environment::None,
+            read_only: false,
+            color: String::new(),
+            target: RequestTarget::Server(engine, options),
+            lock_timeout: None,
         }
     }
 
@@ -1418,6 +1429,12 @@ impl Workspace {
         let FoundTarget::Server(engine, options) = &found.target else {
             return;
         };
+        // Found again, but already saved (with a production label, say): open
+        // the saved connection, guards and all.
+        if let Some(saved) = self.saved_for(*engine, options).cloned() {
+            self.connect_to_saved(&saved, window, cx);
+            return;
+        }
         if found.ready() {
             self.open_profile(
                 Profile {

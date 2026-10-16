@@ -360,6 +360,27 @@ impl ConnectDialog {
         self.ssl = ssl;
     }
 
+    /// The server is on another machine (by the URL or the host field), and
+    /// not reached through an SSH tunnel.
+    pub(crate) fn remote(&self, cx: &App) -> bool {
+        if self.ssh {
+            return false;
+        }
+        let url = self.url.read(cx).value().trim().to_string();
+        let host = if url.is_empty() {
+            self.host.read(cx).value().trim().to_string()
+        } else {
+            servers::parse_url(self.engine, &url)
+                .map(|options| options.host)
+                .unwrap_or_default()
+        };
+        !(host.is_empty()
+            || host.starts_with('/')
+            || host.eq_ignore_ascii_case("localhost")
+            || host.starts_with("127.")
+            || host == "::1")
+    }
+
     pub(crate) fn request(&mut self, cx: &mut Context<Self>) -> Option<Request> {
         let value =
             |input: &Entity<InputState>, cx: &App| input.read(cx).value().trim().to_string();
@@ -738,7 +759,7 @@ impl Render for ConnectDialog {
                     )
                 })
                 .when(
-                    self.environment == Environment::Production
+                    (self.environment == Environment::Production || self.remote(cx))
                         && !matches!(self.ssl, SslMode::VerifyFull | SslMode::VerifyCa),
                     |el| {
                         el.child(
@@ -746,10 +767,14 @@ impl Render for ConnectDialog {
                                 .mt(px(-4.))
                                 .text_size(crate::theme::text(11.5))
                                 .text_color(theme.warn)
-                                .child(
+                                .child(if self.environment == Environment::Production {
                                     "Production should verify the server (verify-full). Without it, \
-                                     anything between you and the server could read or change what's sent.",
-                                ),
+                                     anything between you and the server could pose as it, get the \
+                                     password, and read or change what's sent."
+                                } else {
+                                    "Without verify-full, anything between you and this server could \
+                                     pose as it and get the password."
+                                }),
                         )
                     },
                 )

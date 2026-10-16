@@ -173,6 +173,18 @@ fn hardening_a_pasted_url_keeps_the_forms_tls() {
             panic!("no server request")
         };
         assert_eq!(options.ssl, xenon_driver::SslMode::VerifyFull);
+        // C2: a remote server without verify-full is warned about; a local one isn't.
+        let remote = dialog.update(cx, |dialog, cx| {
+            let remote = dialog.remote(cx);
+            dialog.fill_for_test(
+                "postgres://app@localhost/app",
+                xenon_driver::SslMode::Prefer,
+                window,
+                cx,
+            );
+            (remote, dialog.remote(cx))
+        });
+        assert_eq!(remote, (true, false));
     });
 }
 
@@ -246,5 +258,40 @@ fn hardening_unsaved_changes_are_never_dropped_silently() {
         w.confirm = None;
         assert!(!w.may_quit(window, cx), "quitting didn't ask");
         w.confirm = None;
+    });
+}
+
+/// C7/W6/C10: a URL (pasted, launched or found on this Mac) for a saved
+/// production database opens as that saved connection: its TLS and tunnel,
+/// not the URL's, so its password never goes another way.
+#[test]
+#[ignore]
+fn hardening_a_url_for_a_saved_database_opens_it_as_saved() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, data, shop) = setup("c7");
+    crate::snapshots::seed_saved(&Store::open(&data.join("xenon.db")).unwrap(), &shop);
+    let mut shot = Shot::new(Mode::Dark, None, &root);
+    shot.act(|w, _, _| {
+        let engine = xenon_store::ServerEngine::Postgres;
+        let options = crate::servers::parse_url(
+            engine,
+            "postgres://app@db.billing.internal/billing?sslmode=disable",
+        )
+        .unwrap();
+        let profile = w.profile_for_url(engine, options);
+        assert!(
+            profile.saved_id.is_some(),
+            "not matched to the saved connection"
+        );
+        assert_eq!(profile.environment, Environment::Production);
+        let crate::connect::RequestTarget::Server(_, target) = profile.target else {
+            panic!("not a server")
+        };
+        assert_ne!(
+            target.ssl,
+            xenon_driver::SslMode::Disable,
+            "the URL's TLS won"
+        );
+        assert!(target.ssh.is_some(), "the saved tunnel was dropped");
     });
 }

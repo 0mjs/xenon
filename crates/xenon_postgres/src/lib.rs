@@ -33,6 +33,20 @@ fn wire_mode(ssl: SslMode) -> tokio_postgres::config::SslMode {
     }
 }
 
+/// `prefer` falls back to no TLS only on this Mac or through an SSH tunnel.
+/// Anywhere else, whatever answers could refuse TLS and ask for the password in
+/// plain text, so there it takes TLS (still unverified, as `prefer` is).
+fn effective_ssl(options: &ConnectOptions) -> SslMode {
+    let local = matches!(
+        options.host.as_str(),
+        "" | "localhost" | "127.0.0.1" | "::1"
+    ) || options.host.starts_with('/');
+    match options.ssl {
+        SslMode::Prefer if !local && options.address.is_none() => SslMode::Require,
+        mode => mode,
+    }
+}
+
 /// Split a `postgres://` URL or libpq `key=value` string into fields, so it
 /// can be saved (with the password kept apart, in the Keychain).
 pub fn parse_url(url: &str) -> Result<ConnectOptions> {
@@ -158,7 +172,7 @@ impl PostgresConnection {
             } else {
                 options.user.clone()
             })
-            .ssl_mode(wire_mode(options.ssl));
+            .ssl_mode(wire_mode(effective_ssl(options)));
         // `postgres` exists on every server; a database named after the user
         // (libpq's default) often doesn't.
         config.dbname(if options.database.is_empty() {
@@ -995,6 +1009,23 @@ fn default_literal(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefer_takes_tls_to_remote_servers() {
+        let options = |host: &str| ConnectOptions {
+            host: host.into(),
+            ssl: SslMode::Prefer,
+            ..Default::default()
+        };
+        assert_eq!(effective_ssl(&options("db.example.com")), SslMode::Require);
+        assert_eq!(effective_ssl(&options("localhost")), SslMode::Prefer);
+        assert_eq!(effective_ssl(&options("")), SslMode::Prefer);
+        let tunneled = ConnectOptions {
+            address: Some("127.0.0.1:6000".parse().unwrap()),
+            ..options("db.internal")
+        };
+        assert_eq!(effective_ssl(&tunneled), SslMode::Prefer);
+    }
 
     #[test]
     fn extract_sslmode_rewrites_verify_modes() {
