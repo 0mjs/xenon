@@ -128,7 +128,15 @@ impl ConnectDialog {
                 String::new(),
                 None,
                 *engine,
-                ConnectOptions::default(),
+                ConnectOptions {
+                    // As SQL Server's own tools: encrypt and check the certificate.
+                    ssl: if *engine == ServerEngine::SqlServer {
+                        SslMode::VerifyFull
+                    } else {
+                        SslMode::Prefer
+                    },
+                    ..ConnectOptions::default()
+                },
                 Environment::None,
                 false,
             ),
@@ -319,6 +327,17 @@ impl ConnectDialog {
 
     /// Switch the form to another engine: its URL format and defaults.
     fn set_engine(&mut self, engine: ServerEngine, window: &mut Window, cx: &mut Context<Self>) {
+        // SQL Server's own tools encrypt and check the certificate by default;
+        // so does a new SQL Server connection here (Require to trust any).
+        match (engine, self.ssl) {
+            (ServerEngine::SqlServer, SslMode::Prefer) => self.ssl = SslMode::VerifyFull,
+            (other, SslMode::VerifyFull)
+                if other != ServerEngine::SqlServer && self.engine == ServerEngine::SqlServer =>
+            {
+                self.ssl = SslMode::Prefer
+            }
+            _ => {}
+        }
         self.engine = engine;
         self.url.update(cx, |input, cx| {
             input.set_placeholder(servers::url_example(engine), window, cx)

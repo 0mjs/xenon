@@ -23,11 +23,11 @@ A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server, SQLite
 - **Yours to arrange:** light or dark, six accents, ten code themes, five interface and five code
   fonts, any text size.
 
-Version 0.5.1, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
+Version 0.5.2, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
 
 ## Install
 
-Download `Xenon-0.5.1.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
+Download `Xenon-0.5.2.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
 drag Xenon to Applications. It's signed with Carbon Software's Developer ID and notarized by
 Apple.
 

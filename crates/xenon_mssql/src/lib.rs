@@ -114,7 +114,10 @@ pub fn parse_url(text: &str) -> Result<ConnectOptions> {
         Some("true" | "yes" | "mandatory" | "strict") if trust => SslMode::Require,
         Some("true" | "yes" | "mandatory" | "strict") => SslMode::VerifyFull,
         _ if trust => SslMode::Require,
-        _ => SslMode::Prefer,
+        // As Microsoft's own drivers and tools do now: with no `Encrypt=`,
+        // encrypt and check the certificate (`TrustServerCertificate=true` to
+        // skip the check).
+        _ => SslMode::VerifyFull,
     };
     Ok(options)
 }
@@ -1112,6 +1115,17 @@ fn unwrap_parens(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_encrypt_setting_means_encrypt_and_verify() {
+        let ado = parse_url("Server=db.example.com;Database=shop;User ID=me;Password=x").unwrap();
+        assert_eq!(ado.ssl, SslMode::VerifyFull);
+        let trusting =
+            parse_url("Server=db.example.com;Database=shop;TrustServerCertificate=true").unwrap();
+        assert_eq!(trusting.ssl, SslMode::Require);
+        let optional = parse_url("Server=db.example.com;Encrypt=Optional").unwrap();
+        assert_eq!(optional.ssl, SslMode::Prefer);
+    }
 
     #[test]
     fn connection_strings() {
