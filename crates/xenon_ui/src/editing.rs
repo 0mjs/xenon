@@ -31,8 +31,15 @@ pub(crate) fn format(sql: &str, mysql: bool) -> Option<String> {
 }
 
 /// Comment out the lines `selection` touches with `-- `, or uncomment them if
-/// they all are. Returns the lines' range and their new text.
-pub(crate) fn toggle_comment(text: &str, selection: Range<usize>) -> (Range<usize>, String) {
+/// they all are. Returns the lines' range and their new text. A line that
+/// starts inside a string or a block comment is left as it is: a `-- ` there
+/// would change the text, not comment anything out. MySQL only reads `--` as a
+/// comment when a space follows it.
+pub(crate) fn toggle_comment(
+    text: &str,
+    selection: Range<usize>,
+    mysql: bool,
+) -> (Range<usize>, String) {
     let start = text[..selection.start].rfind('\n').map_or(0, |i| i + 1);
     // A selection ending at the start of a line doesn't take that line.
     let mut end = selection.end;
@@ -41,15 +48,38 @@ pub(crate) fn toggle_comment(text: &str, selection: Range<usize>) -> (Range<usiz
     }
     let end = text[end..].find('\n').map_or(text.len(), |i| end + i);
     let lines: Vec<&str> = text[start..end].split('\n').collect();
-    let code = |line: &&&str| !line.trim().is_empty();
+    // Where each line starts, and whether that's in code.
+    let mut at = start;
+    let in_code: Vec<bool> = lines
+        .iter()
+        .map(|line| {
+            let here = xenon_driver::sql::in_code(text, at, mysql);
+            at += line.len() + 1;
+            here
+        })
+        .collect();
+    let is_comment = |l: &str| {
+        let l = l.trim_start();
+        if mysql {
+            l.starts_with("-- ") || l == "--" || l.starts_with("--\t")
+        } else {
+            l.starts_with("--")
+        }
+    };
+    let code = |(ix, line): &(usize, &&str)| in_code[*ix] && !line.trim().is_empty();
     let commented = lines
         .iter()
+        .enumerate()
         .filter(code)
-        .all(|l| l.trim_start().starts_with("--"));
+        .all(|(_, l)| is_comment(l));
     let new: Vec<String> = if commented {
         lines
             .iter()
-            .map(|line| {
+            .enumerate()
+            .map(|(ix, line)| {
+                if !in_code[ix] {
+                    return line.to_string();
+                }
                 let indent = line.len() - line.trim_start().len();
                 let rest = &line[indent..];
                 let rest = rest
@@ -63,14 +93,16 @@ pub(crate) fn toggle_comment(text: &str, selection: Range<usize>) -> (Range<usiz
         // At the shallowest indent, so the block stays lined up.
         let indent = lines
             .iter()
+            .enumerate()
             .filter(code)
-            .map(|l| l.len() - l.trim_start().len())
+            .map(|(_, l)| l.len() - l.trim_start().len())
             .min()
             .unwrap_or(0);
         lines
             .iter()
-            .map(|line| {
-                if line.trim().is_empty() {
+            .enumerate()
+            .map(|(ix, line)| {
+                if line.trim().is_empty() || !in_code[ix] {
                     line.to_string()
                 } else {
                     format!("{}-- {}", &line[..indent], &line[indent..])
@@ -136,7 +168,10 @@ impl Workspace {
         if text.get(selection.clone()).is_none() {
             return;
         }
-        let (lines, new) = toggle_comment(&text, selection);
+        let mysql = self
+            .active_session()
+            .is_some_and(|s| matches!(s.engine, Engine::MySql | Engine::MariaDb));
+        let (lines, new) = toggle_comment(&text, selection, mysql);
         let start = lines.start;
         editor.update(cx, |editor, cx| {
             editor.set_selected_range(lines, cx);
@@ -151,6 +186,17 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toggle_comment_leaves_strings_alone() {
+        // The second line is inside a string: a `-- ` there would change it.
+        let text = "select 'a\nb' as x,\n  1";
+        let (_, new) = toggle_comment(text, 0..text.len(), false);
+        assert_eq!(new, "-- select 'a\nb' as x,\n--   1");
+        // MySQL: `--1` isn't a comment, so the line counts as code.
+        let (_, new) = toggle_comment("--1", 0..3, true);
+        assert_eq!(new, "-- --1");
+    }
 
     #[test]
     fn formatting_lays_out_and_keeps_everything_else() {
@@ -187,18 +233,18 @@ mod tests {
     fn comments_toggle_on_whole_lines() {
         let text = "select a,\n  b\nfrom t;";
         // Cursor on the second line: just that line.
-        let (range, new) = toggle_comment(text, 12..12);
+        let (range, new) = toggle_comment(text, 12..12, false);
         assert_eq!(&text[range.clone()], "  b");
         assert_eq!(new, "  -- b");
         // Several lines: lined up at the shallowest indent, and back again.
-        let (range, new) = toggle_comment(text, 0..text.len());
+        let (range, new) = toggle_comment(text, 0..text.len(), false);
         assert_eq!(new, "-- select a,\n--   b\n-- from t;");
         let mut commented = text.to_string();
         commented.replace_range(range, &new);
-        let (_, back) = toggle_comment(&commented, 0..commented.len());
+        let (_, back) = toggle_comment(&commented, 0..commented.len(), false);
         assert_eq!(back, text);
         // A selection ending at the start of a line leaves that line be.
-        let (range, _) = toggle_comment(text, 0..10);
+        let (range, _) = toggle_comment(text, 0..10, false);
         assert_eq!(&text[range], "select a,");
     }
 }

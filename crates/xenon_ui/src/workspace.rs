@@ -82,6 +82,8 @@ pub(crate) struct ErrorHint {
     pub message: SharedString,
     /// The table or column most likely meant, for a misspelt one.
     pub suggestion: Option<SharedString>,
+    /// The misspelt name the suggestion replaces, as it stands at `at`.
+    pub replaces: Option<String>,
 }
 
 /// Results kept from one script; later ones are left out.
@@ -2737,10 +2739,20 @@ impl Workspace {
                 if let Some(at) = &at {
                     self.pending_error_jump = Some((tab_id, at.clone()));
                 }
+                // Offer the fix only where the misspelt name really is (Postgres
+                // points at `o` in `o.emial`, say).
+                let name = unknown.as_ref().map(|u| u.name.clone());
+                let text = tab.editor.read(cx).value().to_string();
+                let points_at_name = matches!(
+                    (&at, &name),
+                    (Some(at), Some(name))
+                        if text.get(at.clone()).is_some_and(|t| t.eq_ignore_ascii_case(name))
+                );
                 tab.error_hint = Some(ErrorHint {
                     at,
                     message: message.into(),
-                    suggestion: suggestion.map(Into::into),
+                    suggestion: suggestion.filter(|_| points_at_name).map(Into::into),
+                    replaces: name.filter(|_| points_at_name),
                 });
             }
         }
@@ -2870,6 +2882,18 @@ impl Workspace {
         };
         hint.at = None;
         let editor = tab.editor.clone();
+        // Typed since the error: the range may hold something else now.
+        let still = hint.replaces.as_ref().is_some_and(|name| {
+            editor
+                .read(cx)
+                .value()
+                .get(at.clone())
+                .is_some_and(|t| t.eq_ignore_ascii_case(name))
+        });
+        if !still {
+            self.flash("The query has changed since: fix it by hand.", true, cx);
+            return;
+        }
         editor.update(cx, |editor, cx| {
             if let Some(diagnostics) = editor.diagnostics_mut() {
                 diagnostics.clear();

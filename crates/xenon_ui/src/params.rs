@@ -38,6 +38,7 @@ pub(crate) fn style(engine: Engine) -> ParamStyle {
         },
         Engine::Sqlite => ParamStyle {
             question: true,
+            brackets: true,
             ..Default::default()
         },
         Engine::DuckDb => ParamStyle {
@@ -46,7 +47,11 @@ pub(crate) fn style(engine: Engine) -> ParamStyle {
             ..Default::default()
         },
         // `@name` on SQL Server is a variable, not a placeholder.
-        Engine::SqlServer | Engine::Unknown => ParamStyle::default(),
+        Engine::SqlServer => ParamStyle {
+            brackets: true,
+            ..Default::default()
+        },
+        Engine::Unknown => ParamStyle::default(),
     }
 }
 

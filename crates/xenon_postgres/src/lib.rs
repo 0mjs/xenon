@@ -808,7 +808,9 @@ impl Connection for PostgresConnection {
 
     fn literal(&self, value: &Value) -> String {
         match value {
-            Value::Blob(bytes) => format!("'\\x{}'::bytea", xenon_driver::hex(bytes)),
+            // Not `'\\x…'`: with `standard_conforming_strings` off, the backslash
+            // would be read as an escape.
+            Value::Blob(bytes) => format!("decode('{}', 'hex')", xenon_driver::hex(bytes)),
             Value::Real(n) if !n.is_finite() => format!(
                 "'{}'",
                 if n.is_nan() {
@@ -1022,7 +1024,7 @@ fn default_literal(value: &Value) -> String {
             format!("E'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
         }
         Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
-        Value::Blob(bytes) => format!("'\\x{}'::bytea", xenon_driver::hex(bytes)),
+        Value::Blob(bytes) => format!("decode('{}', 'hex')", xenon_driver::hex(bytes)),
     }
 }
 

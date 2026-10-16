@@ -186,16 +186,28 @@ where
     R: IntoIterator<Item = C>,
     C: IntoIterator<Item = &'v Value>,
 {
+    // Two columns of the same name (a join's two `id`s) would be one key twice,
+    // which most readers take as the last only: the later ones are `id_2`, `id_3`.
+    let mut keys: Vec<String> = Vec::with_capacity(columns.len());
+    for column in columns {
+        let mut key = column.name.clone();
+        let mut n = 1;
+        while keys.contains(&key) {
+            n += 1;
+            key = format!("{}_{n}", column.name);
+        }
+        keys.push(key);
+    }
     out.write_all(b"[")?;
     let mut any = false;
     for row in rows {
         out.write_all(if any { b",\n  {" } else { b"\n  {" })?;
         any = true;
-        for (j, (column, value)) in columns.iter().zip(row).enumerate() {
+        for (j, (key, value)) in keys.iter().zip(row).enumerate() {
             if j > 0 {
                 out.write_all(b", ")?;
             }
-            out.write_all(json_string(&column.name).as_bytes())?;
+            out.write_all(json_string(key).as_bytes())?;
             out.write_all(b": ")?;
             out.write_all(json_value(value).as_bytes())?;
         }
@@ -209,9 +221,14 @@ where
     R: IntoIterator<Item = C>,
     C: IntoIterator<Item = &'v Value>,
 {
-    // Pipes would end the cell and line breaks the row.
+    // Pipes would end the cell and line breaks the row; a backslash before a
+    // pipe would undo its escape, and `<`, `>`, `&` would be read as HTML.
     let cell = |text: &str| {
-        text.replace('|', "\\|")
+        text.replace('\\', "\\\\")
+            .replace('|', "\\|")
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
             .replace("\r\n", "<br>")
             .replace('\n', "<br>")
     };
@@ -327,6 +344,20 @@ mod tests {
 
     fn refs(rows: &[Vec<Value>]) -> Vec<Vec<&Value>> {
         rows.iter().map(|row| row.iter().collect()).collect()
+    }
+
+    #[test]
+    fn json_keys_and_markdown_cells_are_unambiguous() {
+        let id = Column {
+            name: "id".into(),
+            type_name: None,
+        };
+        let (one, two) = (Value::Integer(1), Value::Integer(2));
+        let json = render(Format::Json, &[&id, &id], &[vec![&one, &two]]);
+        assert!(json.contains("\"id\": 1, \"id_2\": 2"), "{json}");
+        let tricky = Value::Text("a\\|b <i>&".into());
+        let md = render(Format::Markdown, &[&id], &[vec![&tricky]]);
+        assert!(md.contains("a\\\\\\|b &lt;i&gt;&amp;"), "{md}");
     }
 
     #[test]

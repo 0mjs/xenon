@@ -58,16 +58,8 @@ impl ConfirmDialog {
             focus_handle.focus(window, cx);
         }
 
-        let lines: Vec<&str> = sql.lines().collect();
-        let mut preview = lines
-            .iter()
-            .take(12)
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n");
-        if lines.len() > 12 {
-            preview.push_str(&format!("\n… and {} more lines", lines.len() - 12));
-        }
+        // All of it, scrolling: what's asked about is exactly what runs.
+        let preview = sql.to_string();
         Self {
             focus_handle,
             title: title.into(),
@@ -150,6 +142,9 @@ impl Render for ConfirmDialog {
             );
 
         let preview = div()
+            .id("confirm-sql")
+            .max_h(px(260.))
+            .overflow_y_scroll()
             .px(px(12.))
             .py(px(10.))
             .rounded(px(RADIUS_CONTROL))

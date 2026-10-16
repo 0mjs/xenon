@@ -980,6 +980,7 @@ impl SortDirection {
 /// Words that can't be a bare identifier in at least one engine Xenon supports.
 /// Sorted, for binary search.
 const RESERVED: &[&str] = &[
+    "accessible",
     "all",
     "analyse",
     "analyze",
@@ -988,135 +989,313 @@ const RESERVED: &[&str] = &[
     "array",
     "as",
     "asc",
+    "asensitive",
     "asymmetric",
     "authorization",
+    "backup",
+    "before",
     "between",
     "binary",
     "both",
+    "browse",
+    "bulk",
     "by",
     "call",
+    "cascade",
     "case",
     "cast",
     "change",
     "check",
+    "checkpoint",
+    "clustered",
+    "coalesce",
     "collate",
     "column",
     "columns",
+    "commit",
+    "condition",
     "constraint",
+    "contains",
+    "containstable",
+    "continue",
+    "convert",
     "create",
     "cross",
+    "cume_dist",
+    "current_catalog",
     "current_date",
     "current_role",
+    "current_schema",
     "current_time",
     "current_timestamp",
     "current_user",
+    "cursor",
     "database",
     "databases",
+    "day",
+    "dbcc",
+    "dec",
+    "declare",
     "default",
     "deferrable",
+    "delayed",
     "delete",
+    "dense_rank",
+    "deny",
     "desc",
     "describe",
+    "deterministic",
     "distinct",
+    "distinctrow",
     "div",
     "do",
     "drop",
+    "dual",
+    "dump",
+    "each",
     "else",
+    "elseif",
+    "empty",
+    "enclosed",
     "end",
+    "escaped",
     "except",
     "exists",
+    "exit",
     "explain",
     "false",
     "fetch",
+    "file",
+    "first_value",
+    "float4",
+    "float8",
     "for",
+    "force",
     "foreign",
+    "freetext",
+    "freetexttable",
     "freeze",
     "from",
     "full",
+    "fulltext",
+    "function",
+    "generated",
+    "get",
     "grant",
     "group",
+    "groups",
     "having",
+    "high_priority",
+    "holdlock",
+    "hour",
+    "identity",
+    "identitycol",
+    "if",
+    "ignore",
     "ilike",
     "in",
     "index",
+    "infile",
     "initially",
     "inner",
+    "inout",
+    "insensitive",
     "insert",
+    "int1",
+    "int2",
+    "int3",
+    "int4",
+    "int8",
+    "integer",
     "intersect",
     "interval",
     "into",
     "is",
     "isnull",
+    "iterate",
     "join",
+    "json_table",
     "key",
+    "key_block",
     "keys",
     "kill",
+    "lag",
+    "last_value",
     "lateral",
+    "lead",
     "leading",
+    "leave",
     "left",
     "like",
     "limit",
+    "linear",
+    "lineno",
+    "lines",
+    "load",
     "localtime",
     "localtimestamp",
     "lock",
+    "long",
+    "longblob",
+    "longtext",
+    "loop",
+    "low_priority",
+    "master_bind",
     "match",
+    "maxvalue",
+    "mediumblob",
+    "mediumint",
+    "mediumtext",
+    "merge",
+    "middleint",
+    "minute",
     "mod",
+    "modifies",
+    "month",
+    "national",
     "natural",
+    "no_write_to_binlog",
+    "nocheck",
+    "nonclustered",
     "not",
     "notnull",
+    "nth_value",
+    "ntile",
     "null",
+    "nullif",
     "offset",
+    "offsets",
     "on",
     "only",
+    "opendatasource",
+    "openquery",
+    "openrowset",
+    "optimize",
+    "option",
+    "optionally",
+    "options",
     "or",
     "order",
+    "out",
     "outer",
+    "outfile",
     "over",
     "overlaps",
     "partition",
+    "percent",
+    "percent_rank",
+    "pivot",
     "placing",
+    "plan",
     "primary",
+    "proc",
+    "procedure",
+    "purge",
     "range",
+    "rank",
     "read",
+    "read_write",
+    "reads",
+    "reconfigure",
+    "recursive",
     "references",
     "regexp",
+    "release",
     "rename",
+    "repeat",
     "replace",
+    "require",
+    "resignal",
+    "restore",
+    "restrict",
+    "return",
     "returning",
+    "revert",
+    "revoke",
     "right",
     "rlike",
+    "rollback",
     "row",
+    "row_number",
+    "rowcount",
+    "rowguidcol",
     "rows",
+    "save",
+    "savepoint",
     "schema",
+    "second",
     "select",
     "session_user",
     "set",
+    "setuser",
     "show",
+    "shutdown",
+    "signal",
     "similar",
     "some",
+    "spatial",
+    "specific",
+    "sql",
+    "sqlexception",
+    "sqlstate",
+    "sqlwarning",
+    "ssl",
+    "starting",
+    "statistics",
+    "stored",
+    "straight_join",
     "symmetric",
+    "system_user",
     "table",
+    "tables",
     "tablesample",
+    "terminated",
+    "textsize",
     "then",
+    "tinyblob",
+    "tinyint",
+    "tinytext",
     "to",
+    "top",
     "trailing",
+    "tran",
+    "transaction",
     "trigger",
     "true",
+    "try_convert",
+    "tsequal",
+    "undo",
     "union",
     "unique",
+    "unlock",
+    "unpivot",
+    "unsigned",
     "update",
     "usage",
+    "use",
     "user",
     "using",
+    "utc_date",
+    "utc_time",
+    "utc_timestamp",
     "values",
+    "varbinary",
+    "varcharacter",
     "variadic",
+    "varying",
     "verbose",
+    "view",
+    "virtual",
     "when",
     "where",
+    "while",
     "window",
     "with",
     "write",
     "xor",
+    "year",
+    "year_month",
+    "zerofill",
 ];
 
 /// True when `ident` can be written without quotes and still mean itself in
@@ -1207,6 +1386,8 @@ pub struct ParamStyle {
     pub question: bool,
     /// Read quotes and comments as MySQL does.
     pub mysql: bool,
+    /// `[names]` are quoted names (SQLite, SQL Server): `[a:b]` has no `:b`.
+    pub brackets: bool,
 }
 
 /// A placeholder in a query, filled in before it runs.
@@ -1221,7 +1402,14 @@ pub struct Param {
 /// The placeholders in `sql`, in order, skipping strings, quoted names,
 /// comments, dollar-quoted bodies, `::casts`, `:=` and slices like `a[1:n]`.
 pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
-    let lexing = if style.mysql { MYSQL } else { STANDARD };
+    let lexing = if style.mysql {
+        MYSQL
+    } else {
+        Lexing {
+            brackets: style.brackets,
+            ..STANDARD
+        }
+    };
     let bytes = sql.as_bytes();
     let mut params = Vec::new();
     let mut questions = 0;
@@ -1239,6 +1427,7 @@ pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
         let after_word = i > 0 && (ident(bytes[i - 1]) || bytes[i - 1] >= 0x80);
         match bytes[i] {
             b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i, backslash_escapes(sql, i, lexing)),
+            b'[' if lexing.brackets => i = skip_bracketed(bytes, i),
             b'$' if style.dollar
                 && !after_word
                 && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) =>
@@ -1308,6 +1497,37 @@ pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> Stri
     out
 }
 
+/// Whether byte `offset` of `sql` is in code, not inside a string, a quoted
+/// name, a comment or a dollar-quoted body (as standard SQL reads it, or MySQL).
+pub fn in_code(sql: &str, offset: usize, mysql: bool) -> bool {
+    let lexing = if mysql { MYSQL } else { STANDARD };
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && i < offset {
+        let end = if let Some(code) = executable_comment_start(bytes, i, lexing) {
+            i = code;
+            continue;
+        } else if let Some(end) = comment_end(bytes, i, lexing) {
+            end
+        } else {
+            match bytes[i] {
+                b'\'' | b'"' | b'`' => skip_quoted(bytes, i, backslash_escapes(sql, i, lexing)),
+                b'$' if lexing.dollar_quotes => skip_dollar_quoted(sql, i),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+        };
+        // A line comment ends just after its newline: the next line is code.
+        if offset < end && !(bytes[end - 1] == b'\n' && offset == end) {
+            return false;
+        }
+        i = end.max(i + 1);
+    }
+    true
+}
+
 /// Whether `a` and `b` are the same SQL, differing only in whitespace between
 /// tokens: strings, quoted names, dollar-quoted bodies and comments must match
 /// exactly. A formatter's output is used only when this holds, so it can't, say,
@@ -1355,7 +1575,29 @@ fn tokens(sql: &str, lexing: Lexing) -> Vec<&str> {
             // Brackets, commas, dots, semicolons: one each.
             _ => i + 1,
         };
-        out.push(&sql[i..end]);
+        // A string right after its prefix (`E'…'`, `N'…'`, `X'41'`, `U&'…'`,
+        // `_utf8mb4'…'`) is one token with it: spaced apart, it means something
+        // else.
+        let mut start = i;
+        if matches!(bytes[i], b'\'' | b'"') {
+            let offset = |token: &str| token.as_ptr() as usize - sql.as_ptr() as usize;
+            let word = |t: &str| t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            while let Some(last) = out.last().copied() {
+                let joined = offset(last) + last.len() == start;
+                let before = out.len().checked_sub(2).map(|ix| out[ix]);
+                let prefix = word(last)
+                    || (last == "&"
+                        && before.is_some_and(|u| {
+                            u.eq_ignore_ascii_case("u") && offset(u) + u.len() == offset(last)
+                        }));
+                if !(joined && prefix) {
+                    break;
+                }
+                start = offset(last);
+                out.pop();
+            }
+        }
+        out.push(&sql[start..end]);
         i = end;
     }
     out
@@ -1393,6 +1635,23 @@ mod tests {
             browse_page(quote, "orders", "", None, 100, 0, true),
             "select top (100) * from orders;"
         );
+    }
+
+    #[test]
+    fn a_string_prefix_stays_with_its_string() {
+        assert!(!same_code(
+            "select U&'\\0041'",
+            "select U & '\\0041'",
+            false
+        ));
+        assert!(!same_code("select X'41'", "select X '41'", true));
+        assert!(!same_code("select E'a'", "select E 'a'", false));
+        // Ordinary layout still counts as the same.
+        assert!(same_code(
+            "select a='x' from t",
+            "select a = 'x'\nfrom t",
+            false
+        ));
     }
 
     #[test]
@@ -1622,6 +1881,20 @@ mod tests {
         for sql in ["commit", "rollback", "end", "select 1", "commit; rollback"] {
             assert!(!opens_unguarded_transaction(sql), "{sql}");
         }
+    }
+
+    #[test]
+    fn bracketed_names_hold_no_placeholders() {
+        let style = ParamStyle {
+            question: true,
+            brackets: true,
+            ..Default::default()
+        };
+        let found = parameters("select [a:b], [c?] from t where x = :x", style);
+        assert_eq!(
+            found.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
+            [":x"]
+        );
     }
 
     #[test]
