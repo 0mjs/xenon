@@ -50,9 +50,10 @@ use crate::{
     CopyMarkdown, CopySelection, CopySql, DeleteRows, DiscardEdits, EditCell, Explain,
     ExportResults, ExtendDown, ExtendLeft, ExtendRight, ExtendUp, FocusEditor, ImportConnections,
     MoveDown, MoveLeft, MoveRight, MoveUp, NewConnection, NewTab, NextTab, OpenFile, OpenPalette,
-    OpenSettings, PrevTab, Quit, RunAll, RunQuery, SaveEdits, SaveQueryAs, SelectAllCells,
-    ShowConnections, ShowExplorer, ShowHistory, ShowSaved, ToggleExplorer, ToggleInspector,
-    ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomIn, ZoomOut, ZoomReset,
+    OpenSettings, PrevTab, Quit, RunAll, RunQuery, SaveEdits, SaveQuery, SaveQueryAs,
+    SelectAllCells, ShowConnections, ShowExplorer, ShowHistory, ShowSaved, ToggleExplorer,
+    ToggleInspector, ToggleStructure, UseDarkTheme, UseLightTheme, UseSystemTheme, ZoomIn, ZoomOut,
+    ZoomReset,
 };
 
 const TITLEBAR_HEIGHT: f32 = 34.;
@@ -485,6 +486,9 @@ pub(crate) struct Tab {
     pub(crate) sets: Vec<Option<Grid>>,
     /// Which of `sets` is in `grid`.
     pub(crate) shown_set: usize,
+    /// How many result sets the script returned, kept or not (only the first
+    /// and the last are kept past `MAX_RESULT_SETS`).
+    pub(crate) sets_total: usize,
     /// The columns' arrangement (hidden, pinned, moved), kept across runs.
     pub(crate) columns: Option<results::ColumnLayout>,
     /// Rows as a grid, as records, or as JSON.
@@ -659,6 +663,8 @@ pub struct Workspace {
     pub(crate) parameters: Option<crate::params::Prompt>,
     /// Last session's tabs, by saved connection, waiting for it to connect.
     pub(crate) restoring: HashMap<i64, Vec<xenon_store::OpenTab>>,
+    /// Launched with a file or URL: last session's tabs are left as saved.
+    pub(crate) keep_saved_tabs: bool,
     /// The tabs last written to the store.
     pub(crate) persisted_tabs: Vec<xenon_store::OpenTab>,
 }
@@ -798,6 +804,7 @@ impl Workspace {
             parameters: None,
             import: None,
             restoring: HashMap::new(),
+            keep_saved_tabs: false,
             persisted_tabs: Vec::new(),
         };
         this.reload_saved();
@@ -809,6 +816,9 @@ impl Workspace {
         });
 
         this.reload_saved_queries(cx);
+        // Launched to open something: last session's tabs weren't brought back,
+        // so this run's don't replace them.
+        this.keep_saved_tabs = launch.is_some();
         match launch {
             Some(Launch::Sqlite(path)) => this.open_path(path, window, cx),
             Some(Launch::Url(engine, url)) => this.connect_url(engine, url, window, cx),
@@ -935,6 +945,7 @@ impl Workspace {
             previewing: false,
             sets: Vec::new(),
             shown_set: 0,
+            sets_total: 0,
             view: Default::default(),
             json: None,
             json_compact: false,
@@ -1235,6 +1246,10 @@ impl Workspace {
             .map(|s| s.id)
         {
             self.connect_dialog = None;
+            // Already open: nothing more of it to restore.
+            if let Some(saved) = profile.saved_id {
+                self.restoring.remove(&saved);
+            }
             if profile.save {
                 self.update_open(id, profile, cx);
             }
@@ -1274,6 +1289,9 @@ impl Workspace {
                             })
                             .map(|s| s.id)
                         {
+                            if let Some(saved) = restoring {
+                                this.restoring.remove(&saved);
+                            }
                             this.attach(id, true, window, cx);
                             return;
                         }
@@ -1312,6 +1330,9 @@ impl Workspace {
                                 session.profile = profile;
                             }
                             let id = this.sessions[index].id;
+                            if let Some(saved) = restoring {
+                                this.restoring.remove(&saved);
+                            }
                             this.attach(id, true, window, cx);
                             return;
                         }
@@ -2202,6 +2223,18 @@ impl Workspace {
         if self.confirm.is_some() {
             return Some("Answer the open prompt first.");
         }
+        // Being checked (after the Mac slept) or reconnected: say so, rather
+        // than quietly do nothing.
+        let checking = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.session)
+            .and_then(|id| self.session(id))
+            .is_some_and(|s| s.reconnecting);
+        if checking {
+            return Some("Checking the connection: try again in a moment.");
+        }
         self.connection_busy(tab_id).then_some(
             "A query or a save is already running on this connection: wait for it, or cancel it (⌘.).",
         )
@@ -2658,6 +2691,12 @@ impl Workspace {
         match result {
             Ok(mut result) => {
                 // A script with several results: each set of rows gets a tab.
+                tab.sets_total = result
+                    .earlier
+                    .iter()
+                    .filter(|o| matches!(o, QueryOutcome::Rows(_)))
+                    .count()
+                    + usize::from(matches!(result.outcome, QueryOutcome::Rows(_)));
                 let mut earlier: Vec<Grid> = std::mem::take(&mut result.earlier)
                     .into_iter()
                     .filter_map(|outcome| match outcome {
@@ -2694,6 +2733,18 @@ impl Workspace {
                         tab.shown_set = earlier.len();
                         tab.sets = earlier.into_iter().map(Some).chain([None]).collect();
                     }
+                }
+                if tab.sets_total > tab.sets.len() && tab.sets.len() > 1 {
+                    let left_out = tab.sets_total - tab.sets.len();
+                    tab.flash = Some((
+                        format!(
+                            "{} results: showing the first {} and the last; {left_out} in between aren't shown.",
+                            tab.sets_total,
+                            tab.sets.len() - 1
+                        )
+                        .into(),
+                        false,
+                    ));
                 }
                 if result.cancelled && tab.timed_out.is_some() {
                     tab.flash = Some((time_limit_note(tab.timed_out).into(), true));
@@ -4233,7 +4284,7 @@ impl Workspace {
         }
         // Keys are listed here rather than looked up: several bindings only
         // apply inside the editor or grid, which the palette's focus isn't.
-        let commands: [(&str, &str, Box<dyn gpui::Action>); 34] = [
+        let commands: [(&str, &str, Box<dyn gpui::Action>); 35] = [
             ("Run Statement", "⌘↵", Box::new(RunQuery)),
             ("Run All", "⇧⌘↵", Box::new(RunAll)),
             ("Explain", "⌘E", Box::new(Explain)),
@@ -4260,7 +4311,8 @@ impl Workspace {
             ("Copy Cells as SQL Inserts", "", Box::new(CopySql)),
             ("Export Results…", "⇧⌘S", Box::new(ExportResults)),
             ("Show Table Structure", "", Box::new(ToggleStructure)),
-            ("Save Query", "⌘S", Box::new(SaveEdits)),
+            ("Save Query", "", Box::new(SaveQuery)),
+            ("Save Changes", "⌘S", Box::new(SaveEdits)),
             ("Save Query As…", "", Box::new(SaveQueryAs)),
             ("Show Saved Queries", "", Box::new(ShowSaved)),
             ("Theme: Match System", "", Box::new(UseSystemTheme)),
@@ -4667,6 +4719,10 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &SaveQueryAs, window, cx| this.save_query(true, window, cx)),
             )
+            .on_action(
+                // The query only: never staged changes (that's ⌘S).
+                cx.listener(|this, _: &SaveQuery, window, cx| this.save_query(false, window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ShowSaved, window, cx| {
                 this.show_panel(SidePanel::Saved, window, cx)
             }))
@@ -4887,6 +4943,22 @@ impl Workspace {
                     })
                     .when(active && production && !classic, |el| {
                         el.border_1().border_color(theme.err)
+                    })
+                    // Every production tab is marked, more faintly when it isn't
+                    // the one in front: one running there shows where it runs.
+                    .when(!active && production && classic, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(2.))
+                                .bg(theme.err.opacity(0.45)),
+                        )
+                    })
+                    .when(!active && production && !classic, |el| {
+                        el.border_1().border_color(theme.err.opacity(0.45))
                     })
             });
 
@@ -5592,7 +5664,15 @@ impl Workspace {
                             el.text_color(theme.t3).hover(|s| s.text_color(theme.t2))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| this.show_set(ix, cx)))
-                        .child(format!("Result {}", ix + 1))
+                        // The last is the script's last, whatever was left out.
+                        .child(format!(
+                            "Result {}",
+                            if ix + 1 == tab.sets.len() {
+                                tab.sets_total.max(ix + 1)
+                            } else {
+                                ix + 1
+                            }
+                        ))
                         .child(
                             div()
                                 .font_family(crate::theme::mono_font())

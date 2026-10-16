@@ -173,17 +173,51 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.active_session().map(|s| s.id) else {
+        let Some(mut session) = self.active_session().map(|s| s.id) else {
             self.notice = Some("Connect to a database to open a saved query.".into());
             cx.notify();
             return;
         };
+        let mut run = run;
+        // Written for another saved connection: its session if it's open; else
+        // loaded here, but not run on a database it wasn't written for.
+        if let Some(written_for) = query.connection
+            && self
+                .session(session)
+                .is_some_and(|s| s.saved_id != Some(written_for))
+        {
+            match self
+                .sessions
+                .iter()
+                .find(|s| s.saved_id == Some(written_for))
+            {
+                Some(open) => session = open.id,
+                None if run => {
+                    run = false;
+                    self.flash(
+                        "Saved for another connection: loaded here, not run.",
+                        false,
+                        cx,
+                    );
+                }
+                None => {}
+            }
+        }
         if let Some(index) = self
             .tabs
             .iter()
             .position(|t| t.saved_query == Some(query.id) && t.session == Some(session))
         {
             self.activate_tab(index, window, cx);
+            // Its tab has changes: run the saved query only as saved.
+            if run && self.active_tab().editor.read(cx).value().trim() != query.sql.trim() {
+                run = false;
+                self.flash(
+                    "This tab has changes: run them with ⌘↵ if you mean to.",
+                    false,
+                    cx,
+                );
+            }
         } else {
             let tab = self.active_tab();
             let reuse = tab.browse.is_none()
@@ -507,7 +541,7 @@ impl Workspace {
     /// Write the open tabs to the store when they've changed. Skipped while
     /// last session's tabs are still being reopened, so they aren't lost.
     pub(crate) fn persist_tabs(&mut self, cx: &Context<Self>) {
-        if !self.restoring.is_empty() {
+        if !self.restoring.is_empty() || self.keep_saved_tabs {
             return;
         }
         let tabs = if self.prefs.restore_tabs {

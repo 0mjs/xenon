@@ -91,6 +91,7 @@ actions!(
         ExportResults,
         ToggleStructure,
         SaveQueryAs,
+        SaveQuery,
         CommitCell,
         ShowSaved,
         FocusEditor,
