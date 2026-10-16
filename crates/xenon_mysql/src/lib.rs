@@ -198,8 +198,6 @@ pub struct MysqlConnection {
     /// The database connected to, if any: where unqualified names resolve.
     schema: Option<String>,
     mariadb: bool,
-    /// The server's `NO_BACKSLASH_ESCAPES` mode: backslashes in strings are plain.
-    plain_backslashes: bool,
     read_only: bool,
     conn: Mutex<Conn>,
     cancel: Arc<MyCancel>,
@@ -349,11 +347,6 @@ impl MysqlConnection {
             .ok()
             .flatten()
             == Some(0);
-        let plain_backslashes = conn
-            .query_first::<String, _>("select @@session.sql_mode")
-            .ok()
-            .flatten()
-            .is_some_and(|mode| mode.to_ascii_uppercase().contains("NO_BACKSLASH_ESCAPES"));
         let number = raw_version
             .split(['-', ' '])
             .next()
@@ -370,7 +363,6 @@ impl MysqlConnection {
             local: matches!(host, "localhost" | "127.0.0.1" | "::1"),
             version: format!("{} {number}", if mariadb { "mariadb" } else { "mysql" }),
             mariadb,
-            plain_backslashes,
             schema,
             read_only: options.read_only,
             cancel: Arc::new(MyCancel {
@@ -832,11 +824,15 @@ impl Connection for MysqlConnection {
 
     fn literal(&self, value: &Value) -> String {
         match value {
-            // Backslash is an escape character in MySQL strings by default.
-            Value::Text(text) if self.plain_backslashes => {
-                format!("'{}'", text.replace('\'', "''"))
+            // A backslash is an escape in MySQL strings, unless the session's
+            // `NO_BACKSLASH_ESCAPES` says it isn't, and that can change after
+            // connecting (or the SQL can be run elsewhere). Text with one is
+            // written as its UTF-8 bytes, which mean the same either way; other
+            // text needs only its quotes doubled, which also works either way.
+            Value::Text(text) if text.contains('\\') => {
+                format!("_utf8mb4 X'{}'", xenon_driver::hex(text.as_bytes()))
             }
-            Value::Text(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''")),
+            Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
             Value::Blob(bytes) => format!("X'{}'", xenon_driver::hex(bytes)),
             Value::Null => "NULL".into(),
             Value::Integer(n) => n.to_string(),
@@ -1346,6 +1342,28 @@ mod live {
         ] {
             assert!(conn.execute(script, 10).is_err(), "{script}");
         }
+
+        // Text round-trips whatever the session's backslash mode, even one set
+        // after connecting.
+        for mode in ["NO_BACKSLASH_ESCAPES", ""] {
+            conn.execute(&format!("set session sql_mode = '{mode}'"), 1)
+                .unwrap();
+            for text in [r"a\'b", r"C:\new\table", "it's", r"\"] {
+                let back = match conn
+                    .execute(
+                        &format!("select {}", conn.literal(&Value::Text(text.into()))),
+                        1,
+                    )
+                    .unwrap()
+                    .outcome
+                {
+                    QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+                    other => panic!("{other:?}"),
+                };
+                assert_eq!(back, Value::Text(text.into()), "{text:?} under {mode:?}");
+            }
+        }
+        conn.execute("set session sql_mode = default", 1).unwrap();
 
         // A change of case or trailing spaces elsewhere is noticed, despite the
         // default `_ci` / PAD SPACE collation.

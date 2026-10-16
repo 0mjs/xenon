@@ -337,8 +337,10 @@ pub(crate) enum Pending {
     },
     Forget(i64),
     DeleteQuery(i64),
-    /// Disconnect a session with a transaction open.
+    /// Disconnect a session with a transaction open, or unsaved changes.
     Disconnect(usize),
+    /// Close a tab with unsaved changes.
+    CloseTab(usize),
     /// Sort a large table by a column without an index.
     Sort {
         tab_id: usize,
@@ -1032,6 +1034,26 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Staged changes would go with it: ask.
+        let tab = &self.tabs[index];
+        if !tab.edits.is_empty() {
+            let body = format!(
+                "{} has {} not saved. Closing it discards them.",
+                tab.title,
+                changes(tab.edits.count())
+            );
+            let tab_id = tab.id;
+            let dialog = cx.new(|cx| {
+                ConfirmDialog::new("Discard changes?", body, "", None, window, cx)
+                    .action("Discard and close", true)
+            });
+            self.show_confirm(dialog, Pending::CloseTab(tab_id), window, cx);
+            return;
+        }
+        self.close_tab_now(index, window, cx);
+    }
+
+    fn close_tab_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         // A tab's query stops with it, except on SQL Server inside a transaction,
         // where stopping it would end the session and roll the transaction back.
         let ends_session = self.tabs[index]
@@ -1477,6 +1499,25 @@ impl Workspace {
         let Some(session) = self.session(id) else {
             return;
         };
+        let unsaved: usize = self
+            .tabs
+            .iter()
+            .filter(|t| t.session == Some(id))
+            .map(|t| t.edits.count())
+            .sum();
+        if unsaved > 0 && !session.in_transaction {
+            let body = format!(
+                "{} not saved on {}. Disconnecting discards them.",
+                changes(unsaved),
+                session.name
+            );
+            let dialog = cx.new(|cx| {
+                ConfirmDialog::new("Discard changes?", body, "", None, window, cx)
+                    .action("Discard and disconnect", true)
+            });
+            self.show_confirm(dialog, Pending::Disconnect(id), window, cx);
+            return;
+        }
         if session.in_transaction {
             let body = format!(
                 "A transaction is open on {}. Disconnecting rolls back everything it changed.",
@@ -1766,6 +1807,12 @@ impl Workspace {
                     Pending::DeleteQuery(id) => this.forget_query(id, cx),
                     Pending::Disconnect(id) => {
                         this.disconnect(id, window, cx);
+                        return;
+                    }
+                    Pending::CloseTab(tab_id) => {
+                        if let Some(index) = this.tabs.iter().position(|t| t.id == tab_id) {
+                            this.close_tab_now(index, window, cx);
+                        }
                         return;
                     }
                     Pending::Cancel(tab_id) => {
@@ -2755,17 +2802,33 @@ impl Workspace {
     /// Returns whether Xenon may close now.
     pub(crate) fn may_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let open = self.open_transactions();
-        if open.is_empty() {
+        let unsaved: usize = self.tabs.iter().map(|t| t.edits.count()).sum();
+        if open.is_empty() && unsaved == 0 {
             return true;
         }
-        let body = format!(
-            "A transaction is open on {}. Quitting rolls back everything it changed.",
-            open.join(", ")
-        );
-        let dialog = cx.new(|cx| {
-            ConfirmDialog::new("Roll back and quit?", body, "", None, window, cx)
-                .action("Roll back and quit", true)
-        });
+        let (title, body, action) = if open.is_empty() {
+            (
+                "Discard changes?",
+                format!("{} not saved. Quitting discards them.", changes(unsaved)),
+                "Discard and quit",
+            )
+        } else {
+            let also = if unsaved > 0 {
+                format!(" {} not saved are discarded too.", changes(unsaved))
+            } else {
+                String::new()
+            };
+            (
+                "Roll back and quit?",
+                format!(
+                    "A transaction is open on {}. Quitting rolls back everything it changed.{also}",
+                    open.join(", ")
+                ),
+                "Roll back and quit",
+            )
+        };
+        let dialog =
+            cx.new(|cx| ConfirmDialog::new(title, body, "", None, window, cx).action(action, true));
         self.show_confirm(dialog, Pending::Quit, window, cx);
         false
     }
@@ -3285,30 +3348,23 @@ impl Workspace {
             || grid.data.columns[editor.column]
                 .type_name
                 .as_deref()
-                .is_some_and(|t| {
-                    let t = t.to_ascii_lowercase();
-                    [
-                        "int", "numeric", "decimal", "float", "double", "real", "money", "serial",
-                    ]
-                    .iter()
-                    .any(|n| t.contains(n))
-                });
+                .is_some_and(crate::value_editor::is_numeric_type);
         // Laid out for editing, JSON reads differently but may mean the same.
         let same_json = editor.kind == crate::value_editor::ValueKind::Json
-            && original.as_ref().is_some_and(|o| {
-                serde_json::from_str::<serde_json::Value>(&o.display()).ok()
-                    == serde_json::from_str::<serde_json::Value>(&text).ok()
-                    && serde_json::from_str::<serde_json::Value>(&text).is_ok()
-            });
+            && original
+                .as_ref()
+                .is_some_and(|o| crate::value_editor::same_json(&o.display(), &text));
         let value = if set_null {
             Value::Null
         } else if same_json
             || original
                 .as_ref()
                 .is_some_and(|o| !o.is_null() && o.display() == text)
+            // A NULL cell opens empty: left empty, it's still NULL, not ''.
+            || (text.is_empty() && original.as_ref().is_some_and(Value::is_null))
         {
             original.clone().expect("checked above")
-        } else if numeric && text.trim().parse::<f64>().is_ok() {
+        } else if numeric && crate::value_editor::is_plain_number(text.trim()) {
             Value::Decimal(text.trim().to_string())
         } else {
             Value::Text(text)
@@ -3440,6 +3496,12 @@ impl Workspace {
         let (Some(session), Some(grid)) = (self.active_session(), &tab.grid) else {
             return Err("Nothing loaded yet.");
         };
+        if edits::touches_null_key(&target, &grid.data, &tab.edits) {
+            return Err(
+                "A changed or deleted row has no key (it's NULL), so it can't be told apart from \
+                 others: undo that change to save the rest.",
+            );
+        }
         Ok(edits::statements(
             session.conn.as_ref(),
             &target,
@@ -6593,6 +6655,15 @@ fn time_limit_note(limit: Option<std::time::Duration>) -> String {
 
 const ATOMIC_ROLLED_BACK: &str =
     "The script ran as one transaction (production), so nothing it did was kept";
+
+/// "1 change", "3 changes".
+fn changes(n: usize) -> String {
+    if n == 1 {
+        "1 change".into()
+    } else {
+        format!("{n} changes")
+    }
+}
 
 /// How a production statement is wrapped in a transaction.
 #[derive(Clone, Copy)]

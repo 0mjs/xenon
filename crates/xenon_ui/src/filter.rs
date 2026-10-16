@@ -91,7 +91,7 @@ fn clause(conn: &dyn Connection, condition: &Condition) -> Option<String> {
         return None;
     }
     let literal = |text: &str| {
-        let value = if condition.numeric && text.parse::<f64>().is_ok() {
+        let value = if condition.numeric && crate::value_editor::is_plain_number(text) {
             Value::Decimal(text.to_string())
         } else {
             Value::Text(text.to_string())

@@ -175,3 +175,76 @@ fn hardening_a_pasted_url_keeps_the_forms_tls() {
         assert_eq!(options.ssl, xenon_driver::SslMode::VerifyFull);
     });
 }
+
+/// W11: opening a NULL cell and leaving it empty keeps it NULL.
+#[test]
+#[ignore]
+fn hardening_a_null_cell_left_empty_stays_null() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("w11");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let id = w.sessions[0].id;
+        w.browse(id, "main", "orders", window, cx)
+    });
+    assert!(shot.settle(10, |w| !w.is_running() && w.active_tab().grid.is_some()));
+    shot.act(|w, window, cx| {
+        let grid = w.active_tab().grid.as_ref().unwrap();
+        let note = grid
+            .data
+            .columns
+            .iter()
+            .position(|c| c.name == "note")
+            .unwrap();
+        assert!(
+            grid.data.rows[0][note].is_null(),
+            "the fixture's first note is NULL"
+        );
+        w.begin_edit(0, note, window, cx);
+        w.commit_edit(false, window, cx);
+        assert!(w.active_tab().edits.is_empty(), "NULL became ''");
+    });
+}
+
+/// W12: closing a tab, disconnecting or quitting with staged changes asks
+/// before discarding them.
+#[test]
+#[ignore]
+fn hardening_unsaved_changes_are_never_dropped_silently() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("w12");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let id = w.sessions[0].id;
+        w.browse(id, "main", "orders", window, cx)
+    });
+    assert!(shot.settle(10, |w| !w.is_running() && w.active_tab().grid.is_some()));
+    shot.act(|w, window, cx| {
+        let status = w
+            .active_tab()
+            .grid
+            .as_ref()
+            .unwrap()
+            .data
+            .columns
+            .iter()
+            .position(|c| c.name == "status")
+            .unwrap();
+        w.begin_edit(0, status, window, cx);
+        w.type_into_cell("changed", window, cx);
+        w.commit_edit(false, window, cx);
+        assert!(!w.active_tab().edits.is_empty());
+        let tabs = w.tabs().len();
+        w.close_tab_at(w.active, window, cx);
+        assert!(w.confirm.is_some(), "closing the tab didn't ask");
+        assert_eq!(w.tabs().len(), tabs);
+        w.confirm = None;
+        let session = w.sessions[0].id;
+        w.close_session(session, window, cx);
+        assert!(w.confirm.is_some(), "disconnecting didn't ask");
+        assert_eq!(w.sessions.len(), 1);
+        w.confirm = None;
+        assert!(!w.may_quit(window, cx), "quitting didn't ask");
+        w.confirm = None;
+    });
+}

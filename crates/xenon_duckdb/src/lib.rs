@@ -147,6 +147,10 @@ impl DuckDbConnection {
         let catalog: Option<String> = conn
             .query_row("select current_database()", [], |row| row.get(0))
             .ok();
+        // Times with a zone are shown in UTC: read typed ones in UTC too, or a
+        // value typed as shown is stored hours off (and conflict checks on it
+        // never match).
+        let _ = conn.execute_batch("set TimeZone = 'UTC'");
         let cancel = Arc::new(Interrupt {
             handle: conn.interrupt_handle(),
             user: AtomicBool::new(false),
@@ -883,6 +887,31 @@ mod tests {
             ]
         );
         assert_eq!(read.columns[1].type_name.as_deref(), Some("DECIMAL(5,2)"));
+    }
+
+    #[test]
+    fn a_time_with_a_zone_is_read_as_it_is_shown() {
+        let db = DuckDbConnection::open_in_memory().unwrap();
+        db.execute(
+            "create table t (ts timestamptz); insert into t values ('2026-07-01 12:00:00')",
+            0,
+        )
+        .unwrap();
+        let shown = match db.execute("select ts from t", 1).unwrap().outcome {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].display().to_string(),
+            other => panic!("{other:?}"),
+        };
+        assert!(shown.starts_with("2026-07-01 12:00:00"), "{shown}");
+        // Typed back as shown, it matches (so a conflict check on it can).
+        let found = match db
+            .execute(&format!("select count(*) from t where ts = '{shown}'"), 1)
+            .unwrap()
+            .outcome
+        {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(found, Value::Integer(1));
     }
 
     #[test]

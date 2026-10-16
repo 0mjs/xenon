@@ -198,6 +198,24 @@ pub fn script(conn: &dyn Connection, statements: &[Statement]) -> String {
     lines.join("\n")
 }
 
+/// True when `edits` change or delete a row whose key is NULL somewhere. SQLite
+/// allows NULLs in a primary key that isn't an integer, and several rows can
+/// share one: such a row can't be told apart from the others, so it can't be
+/// edited or deleted safely.
+pub fn touches_null_key(target: &TableRef, data: &ResultSet, edits: &Edits) -> bool {
+    edits
+        .cells
+        .keys()
+        .map(|(row, _)| *row)
+        .chain(edits.deleted.iter().copied())
+        .any(|row| {
+            target
+                .key
+                .iter()
+                .any(|&ix| data.rows.get(row).is_some_and(|r| r[ix].is_null()))
+        })
+}
+
 /// A save whose commit may or may not have happened (the connection dropped
 /// during it): saving the same edits again could apply them twice.
 #[derive(Debug)]
@@ -608,6 +626,33 @@ mod tests {
         assert!(err.downcast_ref::<CommitUnknown>().is_some(), "{err:#}");
         assert!(format!("{err:#}").contains("can't tell"), "{err:#}");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rows_with_a_null_key_are_spotted() {
+        let conn = SqliteConnection::open_in_memory().unwrap();
+        conn.execute(
+            "create table t (k text primary key, v text); insert into t values (null, 'a'), ('x', 'b')",
+            0,
+        )
+        .unwrap();
+        let QueryOutcome::Rows(data) = conn
+            .execute("select * from t order by rowid", 10)
+            .unwrap()
+            .outcome
+        else {
+            panic!("no rows")
+        };
+        let target = TableRef {
+            schema: None,
+            table: "t".into(),
+            key: vec![0],
+        };
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(1), 1, Value::Text("c".into()), None);
+        assert!(!touches_null_key(&target, &data, &edits));
+        edits.deleted.insert(0);
+        assert!(touches_null_key(&target, &data, &edits));
     }
 
     /// A key that isn't valid UTF-8 isn't read as U+FFFD, which another row's
