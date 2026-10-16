@@ -11,6 +11,7 @@ esac
 dir="${RUNNER_TEMP:-/tmp}/duckdb-$version"
 mkdir -p "$dir"
 curl -fsSL -o "$dir/$archive" "https://github.com/duckdb/duckdb/releases/download/v$version/$archive"
+"$(dirname "$0")/verify-duckdb.sh" --zip "$dir/$archive"
 unzip -oq "$dir/$archive" -d "$dir"
 # Cargo only puts library folders inside target/ on the loader path for tests.
 {

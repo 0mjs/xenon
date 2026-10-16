@@ -20,6 +20,10 @@ cp target/release/xenon "$app/Contents/MacOS/xenon"
 
 # DuckDB's library, Apple silicon only (its download holds Intel code too, twice the size).
 mkdir -p "$app/Contents/Frameworks"
+./scripts/verify-duckdb.sh target/release/deps/libduckdb.dylib
+# The GPLv3, and the licences and notices of everything built in.
+cp LICENSE "$app/Contents/Resources/LICENSE"
+python3 scripts/third-party-notices.py "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
 lipo target/release/deps/libduckdb.dylib -thin arm64 -output "$app/Contents/Frameworks/libduckdb.dylib"
 
 # Icon: compile the layered Icon Composer icon. macOS 26 renders its light, dark, clear and

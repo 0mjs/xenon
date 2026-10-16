@@ -148,11 +148,27 @@ where
         }
         out.write_all(b"\n")
     };
-    line(&mut columns.iter().map(|c| c.name.clone()))?;
+    line(&mut columns.iter().map(|c| defused(c.name.clone())))?;
     for row in rows {
-        line(&mut row.into_iter().map(plain))?;
+        line(&mut row.into_iter().map(|value| match value {
+            // Numbers stay as they are (`-5`); text that a spreadsheet would
+            // run as a formula is set apart.
+            Value::Text(_) => defused(plain(value)),
+            other => plain(other),
+        }))?;
     }
     Ok(())
+}
+
+/// Text starting with `=`, `+`, `-`, `@`, a tab or a carriage return is run
+/// as a formula by spreadsheets opening a CSV or TSV (`=HYPERLINK(…)`,
+/// `@SUM(…)`): a leading `'` keeps it text, as the spreadsheet's own escape.
+fn defused(cell: String) -> String {
+    if cell.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{cell}")
+    } else {
+        cell
+    }
 }
 
 /// RFC 4180 quoting: wrap in quotes when the cell holds the separator, a quote
@@ -311,6 +327,27 @@ mod tests {
 
     fn refs(rows: &[Vec<Value>]) -> Vec<Vec<&Value>> {
         rows.iter().map(|row| row.iter().collect()).collect()
+    }
+
+    #[test]
+    fn csv_and_tsv_dont_pass_formulas_through() {
+        let c = Column {
+            name: "note".into(),
+            type_name: None,
+        };
+        let n = Column {
+            name: "n".into(),
+            type_name: None,
+        };
+        let formula = Value::Text("=HYPERLINK(\"http://x\")".into());
+        let at = Value::Text("@SUM(A1)".into());
+        let minus = Value::Integer(-5);
+        let rows = vec![vec![&formula, &minus], vec![&at, &minus]];
+        let csv = render(Format::Csv, &[&c, &n], &rows);
+        assert!(csv.contains("\"'=HYPERLINK(\"\"http://x\"\")\""), "{csv}");
+        assert!(csv.contains("'@SUM(A1),-5"), "{csv}");
+        let tsv = render(Format::Tsv, &[&c, &n], &rows);
+        assert!(tsv.contains("'@SUM(A1)\t-5"), "{tsv}");
     }
 
     #[test]

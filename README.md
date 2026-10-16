@@ -170,5 +170,9 @@ Software Ltd. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending code.
 ## Credits
 
 Fonts: Archivo, Inter, Geist, IBM Plex Sans, IBM Plex Mono, JetBrains Mono, Fira Code and Geist
-Mono, under the SIL Open Font License (`assets/fonts`). UI built on
+Mono, under the SIL Open Font License (`assets/fonts`). Icons from [Lucide](https://lucide.dev)
+(ISC) and database logos from [Simple Icons](https://simpleicons.org) (CC0; the marks belong to
+their owners). [DuckDB](https://duckdb.org) (MIT) is built in. Every licence and notice of the
+code built into the app is in `Xenon.app/Contents/Resources/THIRD-PARTY-NOTICES.txt`, made by
+`scripts/third-party-notices.py`. UI built on
 [GPUI](https://gpui.rs) and [gpui-component](https://github.com/longbridge/gpui-kit).

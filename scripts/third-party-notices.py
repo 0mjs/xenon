@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Write THIRD-PARTY-NOTICES.txt: every crate built into Xenon, with its licence and
+notice files, plus DuckDB, the icons and the fonts. Run at build time:
+
+    scripts/third-party-notices.py <output file>
+"""
+
+import json
+import pathlib
+import subprocess
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+NAMES = ("license", "licence", "copying", "notice", "unlicense")
+
+
+def run(*args):
+    return subprocess.run(args, cwd=ROOT, check=True, capture_output=True, text=True).stdout
+
+
+def runtime_crates():
+    """(name, version) of what the app links: normal dependencies, this platform."""
+    tree = run(
+        "cargo", "tree", "-p", "xenon", "-e", "normal", "--prefix", "none",
+        "--format", "{p}", "--target", "aarch64-apple-darwin",
+    )
+    crates = set()
+    for line in tree.splitlines():
+        parts = line.replace(" (*)", "").split()
+        if len(parts) >= 2 and parts[1].startswith("v"):
+            crates.add((parts[0], parts[1][1:]))
+    return crates
+
+
+def notice_files(directory):
+    return sorted(
+        path for path in directory.iterdir()
+        if path.is_file() and path.name.lower().startswith(NAMES)
+    )
+
+
+def main():
+    out = pathlib.Path(sys.argv[1])
+    metadata = json.loads(run("cargo", "metadata", "--format-version", "1"))
+    wanted = runtime_crates()
+    packages = sorted(
+        (p for p in metadata["packages"]
+         if (p["name"], p["version"]) in wanted and p.get("source")),
+        key=lambda p: (p["name"], p["version"]),
+    )
+    parts = [
+        "Xenon is free software under the GNU General Public License v3.0 (LICENSE, beside\n"
+        "this file). It's built with the open-source work below; each keeps its own licence.\n",
+    ]
+
+    def section(title, text):
+        parts.append(f"\n{'=' * 78}\n{title}\n{'=' * 78}\n\n{text.strip()}\n")
+
+    duckdb = next(p for p in metadata["packages"] if p["name"] == "libduckdb-sys")
+    section("DuckDB (libduckdb.dylib)", (pathlib.Path(duckdb["manifest_path"]).parent / "LICENSE").read_text())
+    for name, title in [("LICENSE-LUCIDE", "Lucide icons"), ("LICENSE-SIMPLE-ICONS", "Simple Icons database logos")]:
+        section(title, (ROOT / "assets/icons" / name).read_text())
+    for font in sorted((ROOT / "assets/fonts").glob("OFL-*.txt")):
+        section(f"Font: {font.stem.removeprefix('OFL-')}", font.read_text())
+
+    for package in packages:
+        directory = pathlib.Path(package["manifest_path"]).parent
+        header = f"{package['name']} {package['version']} ({package.get('license') or 'see below'})"
+        files = notice_files(directory)
+        if files:
+            text = "\n\n".join(f"--- {f.name} ---\n{f.read_text(errors='replace')}" for f in files)
+        else:
+            authors = ", ".join(package.get("authors") or []) or "its authors"
+            text = f"Licensed under {package.get('license') or 'its stated terms'}. Copyright {authors}."
+        if package.get("repository"):
+            text = f"{package['repository']}\n\n{text}"
+        section(header, text)
+
+    out.write_text("".join(parts))
+    print(f"wrote {out} ({len(packages)} crates)")
+
+
+if __name__ == "__main__":
+    main()

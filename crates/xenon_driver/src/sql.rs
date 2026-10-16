@@ -885,6 +885,10 @@ pub fn lifts_read_only(sql: &str) -> bool {
         return true;
     }
     statements_every_way(sql).any(|words| {
+        // Reading a setting (`show default_transaction_read_only`) changes nothing.
+        if words.first().is_some_and(|first| first == "show") {
+            return false;
+        }
         words
             .windows(2)
             .any(|pair| pair[0] == "read" && pair[1] == "write")
@@ -1666,6 +1670,14 @@ mod tests {
         assert!(!mysql_has_implicit_commit(
             "insert into t values (1); create temporary table x (a int)"
         ));
+    }
+
+    #[test]
+    fn reading_the_read_only_setting_doesnt_lift_it() {
+        assert!(!lifts_read_only("show default_transaction_read_only"));
+        assert!(!lifts_read_only("show transaction_read_only"));
+        assert!(lifts_read_only("set default_transaction_read_only = off"));
+        assert!(lifts_read_only("set @@session.transaction_read_only = 0"));
     }
 
     #[test]

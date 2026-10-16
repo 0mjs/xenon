@@ -57,6 +57,10 @@ impl FileKind {
     }
 }
 
+/// The stack a query runs on: room for values nested thousands deep (they're
+/// copied and printed recursively). Reserved, not used, until needed.
+const QUERY_STACK: usize = 256 * 1024 * 1024;
+
 pub struct DuckDbConnection {
     conn: Mutex<duckdb::Connection>,
     /// Refuse writes: a read-only database file is protected by DuckDB too, but
@@ -164,6 +168,24 @@ impl DuckDbConnection {
             catalog,
             cancel,
         })
+    }
+
+    fn run_streaming(
+        &self,
+        sql: &str,
+        row_limit: usize,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<QueryResult> {
+        if self.read_only
+            && let Some((_, what)) = xenon_driver::sql::assess(sql)
+        {
+            return Err(QueryError {
+                message: format!("This is a read-only connection, so {what} isn't allowed."),
+                position: None,
+            }
+            .into());
+        }
+        self.run(sql, row_limit, progress)
     }
 
     fn lock(&self) -> MutexGuard<'_, duckdb::Connection> {
@@ -299,16 +321,27 @@ impl Connection for DuckDbConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
-        if self.read_only
-            && let Some((_, what)) = xenon_driver::sql::assess(sql)
-        {
-            return Err(QueryError {
-                message: format!("This is a read-only connection, so {what} isn't allowed."),
-                position: None,
+        // A deeply nested value (a list in a list, 600 times over) is copied
+        // and printed recursively, here and in the duckdb crate. The threads
+        // background work runs on have small stacks, and running out aborts the
+        // whole app: run the query on one with room, passing progress back.
+        let (sender, receiver) = std::sync::mpsc::channel::<Progress>();
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("xenon-duckdb".into())
+                .stack_size(QUERY_STACK)
+                .spawn_scoped(scope, move || {
+                    self.run_streaming(sql, row_limit, &mut |p| {
+                        let _ = sender.send(p);
+                    })
+                })?;
+            for p in receiver {
+                progress(p);
             }
-            .into());
-        }
-        self.run(sql, row_limit, progress)
+            worker
+                .join()
+                .unwrap_or_else(|_| Err(anyhow!("DuckDB stopped unexpectedly while running this.")))
+        })
     }
 
     fn introspect(&self) -> Result<Vec<Schema>> {
@@ -887,6 +920,31 @@ mod tests {
             ]
         );
         assert_eq!(read.columns[1].type_name.as_deref(), Some("DECIMAL(5,2)"));
+    }
+
+    #[test]
+    fn a_deeply_nested_value_doesnt_crash() {
+        // GPUI runs background work on threads with 512 KB stacks.
+        let depth = 800;
+        let sql = format!("select {}1{}", "[".repeat(depth), "]".repeat(depth));
+        let shown = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || {
+                let db = DuckDbConnection::open_in_memory().unwrap();
+                db.execute("set max_expression_depth to 10000", 0).unwrap();
+                match db.execute(&sql, 1).unwrap().outcome {
+                    QueryOutcome::Rows(rows) => rows.rows[0][0].display().to_string(),
+                    other => panic!("{other:?}"),
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(
+            shown.starts_with("[[[") && shown.contains('1'),
+            "{}",
+            &shown[..20]
+        );
     }
 
     #[test]

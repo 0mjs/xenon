@@ -185,8 +185,10 @@ pub struct MssqlConnection {
 
 struct MsCancel {
     options: ConnectOptions,
-    /// The session id (`@@SPID`) of the current connection.
-    spid: Mutex<i32>,
+    /// The session id (`@@SPID`) of the current connection, and when it
+    /// logged in: a session id is reused once its session ends, so a cancel
+    /// that arrives late kills only a session that's still this one.
+    spid: Mutex<(i32, String)>,
     /// Set when a cancel kills the session, so the next query reconnects.
     killed: std::sync::atomic::AtomicBool,
 }
@@ -194,14 +196,19 @@ struct MsCancel {
 impl CancelHandle for MsCancel {
     fn cancel(&self) {
         let options = self.options.clone();
-        let spid = *self.spid.lock().unwrap_or_else(|e| e.into_inner());
+        let (spid, login_time) = self.spid.lock().unwrap_or_else(|e| e.into_inner()).clone();
         self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
         std::thread::spawn(move || {
-            // SQL Server can't stop just the query, so end the session.
+            // SQL Server can't stop just the query, so end the session, and only
+            // if it's still Xenon's (it logged in when this one did).
             let _ = runtime().block_on(async move {
                 let mut killer = open(&options).await?;
                 killer
-                    .simple_query(format!("KILL {spid}"))
+                    .simple_query(format!(
+                        "if exists (select 1 from sys.dm_exec_sessions where session_id = {spid} \
+                         and convert(varchar(30), login_time, 126) = '{}') kill {spid}",
+                        login_time.replace('\'', "")
+                    ))
                     .await?
                     .into_results()
                     .await?;
@@ -339,7 +346,8 @@ impl MssqlConnection {
             let row = client
                 .simple_query(
                     "select @@spid, cast(serverproperty('ProductVersion') as nvarchar(64)), \
-                     cast(serverproperty('EngineEdition') as int), schema_name(), db_name()",
+                     cast(serverproperty('EngineEdition') as int), schema_name(), db_name(), \
+                     convert(varchar(30), (select login_time from sys.dm_exec_sessions where session_id = @@spid), 126)",
                 )
                 .await
                 .map_err(describe)?
@@ -352,8 +360,15 @@ impl MssqlConnection {
             let azure = row.get::<i32, _>(2) == Some(5);
             let schema = row.get::<&str, _>(3).map(str::to_string);
             let catalog = row.get::<&str, _>(4).map(str::to_string);
+            let login_time = row.get::<&str, _>(5).unwrap_or_default().to_string();
             let label = if azure { "azure sql" } else { "sqlserver" };
-            anyhow::Ok((client, spid, format!("{label} {version}"), schema, catalog))
+            anyhow::Ok((
+                client,
+                (spid, login_time),
+                format!("{label} {version}"),
+                schema,
+                catalog,
+            ))
         })?;
         let database = &options.database;
         Ok(Self {
@@ -562,17 +577,20 @@ impl Connection for MssqlConnection {
             // The last session was killed (cancel or row limit): open another.
             let fresh = runtime().block_on(async {
                 let mut client = open(&self.options).await?;
-                let spid = client
-                    .simple_query("select @@spid")
+                let row = client
+                    .simple_query("select @@spid, convert(varchar(30), (select login_time from sys.dm_exec_sessions where session_id = @@spid), 126)")
                     .await
                     .map_err(describe)?
                     .into_row()
                     .await
-                    .map_err(describe)?
-                    .and_then(|row| row.get::<i16, _>(0))
-                    .map(i32::from)
-                    .unwrap_or_default();
-                anyhow::Ok((client, spid))
+                    .map_err(describe)?;
+                let spid = row.as_ref().and_then(|row| row.get::<i16, _>(0)).map(i32::from);
+                let login_time = row
+                    .as_ref()
+                    .and_then(|row| row.get::<&str, _>(1))
+                    .unwrap_or_default()
+                    .to_string();
+                anyhow::Ok((client, (spid.unwrap_or_default(), login_time)))
             })?;
             *self.cancel.spid.lock().unwrap_or_else(|e| e.into_inner()) = fresh.1;
             *guard = Some(fresh.0);
