@@ -41,7 +41,7 @@ impl ThemeChoice {
 
     fn label(self) -> &'static str {
         match self {
-            ThemeChoice::System => "Match System",
+            ThemeChoice::System => "System",
             ThemeChoice::Light => "Light",
             ThemeChoice::Dark => "Dark",
         }
@@ -238,6 +238,16 @@ pub(crate) struct SettingsDialog {
     /// "Clear history" asks once more before it clears.
     clear_armed: bool,
     cleared: bool,
+    /// The dropdown showing its choices, by id.
+    open: Option<&'static str>,
+}
+
+/// How a dropdown shows its choices: as words, each in its own font, or with
+/// a few of its colours.
+enum Look {
+    Plain,
+    Fonts(Vec<&'static str>),
+    Swatches(Vec<Vec<gpui::Rgba>>),
 }
 
 impl EventEmitter<SettingsEvent> for SettingsDialog {}
@@ -251,6 +261,7 @@ impl SettingsDialog {
             prefs,
             clear_armed: false,
             cleared: false,
+            open: None,
         }
     }
 
@@ -261,52 +272,181 @@ impl SettingsDialog {
         cx.notify();
     }
 
-    /// Code themes, each with a swatch of its colours in the current mode.
-    fn render_code_themes(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::code_themes::CodeTheme;
+    /// Open a dropdown, for tests.
+    #[cfg(test)]
+    pub(crate) fn open_menu(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.open = Some(id);
+        cx.notify();
+    }
+
+    /// Text size: smaller, the size, bigger (as ⌘−, ⌘+).
+    fn zoom_stepper(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let at = ZOOMS
+            .iter()
+            .position(|z| (*z - self.prefs.zoom).abs() < 0.001)
+            .unwrap_or(2);
+        let step = |id: &'static str, label: &'static str, to: Option<usize>| {
+            div()
+                .id(id)
+                .size(px(30.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_CONTROL))
+                .text_size(crate::theme::text(15.))
+                .map(|el| match to {
+                    Some(to) => el
+                        .cursor_pointer()
+                        .text_color(theme.text)
+                        .hover(|s| s.bg(theme.s3))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.change(cx, |p| p.zoom = ZOOMS[to])
+                        })),
+                    None => el.text_color(theme.t3),
+                })
+                .child(label)
+        };
         div()
             .flex()
-            .flex_wrap()
-            .gap(px(8.))
-            .children(CodeTheme::ALL.into_iter().enumerate().map(|(ix, code)| {
-                let on = code == self.prefs.code_theme;
-                let colors: Vec<gpui::Rgba> = match code.palette(theme.mode) {
-                    Some(p) => p.swatch().into_iter().map(gpui::rgb).collect(),
-                    None => vec![theme.text, theme.acc, theme.ok, theme.warn],
-                };
+            .items_center()
+            .gap(px(2.))
+            .p(px(1.))
+            .rounded(px(RADIUS_CONTROL + 1.))
+            .border_1()
+            .border_color(theme.line)
+            .bg(theme.field)
+            .child(step("zoom-out", "−", at.checked_sub(1)))
+            .child(
                 div()
-                    .id(("code-theme", ix))
-                    .w(px(136.))
-                    .h(px(36.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .rounded(px(RADIUS_CONTROL + 1.))
-                    .border_1()
-                    .border_color(if on { theme.acc } else { theme.line })
-                    .bg(if on { theme.acc_wash } else { theme.field })
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(theme.t3))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.change(cx, |p| p.code_theme = code)),
-                    )
-                    .child(
-                        div().flex().flex_none().gap(px(2.)).children(
-                            colors
-                                .into_iter()
-                                .map(|c| div().size(px(7.)).rounded_full().bg(c)),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .text_size(crate::theme::text(12.))
-                            .truncate()
-                            .text_color(if on { theme.text } else { theme.t2 })
-                            .when(on, |el| el.font_weight(FontWeight::MEDIUM))
-                            .child(code.label()),
-                    )
+                    .w(px(56.))
+                    .text_center()
+                    .font_family(crate::theme::mono_font())
+                    .text_color(theme.text)
+                    .child(format!("{:.0}%", ZOOMS[at] * 100.)),
+            )
+            .child(step(
+                "zoom-in",
+                "+",
+                (at + 1 < ZOOMS.len()).then_some(at + 1),
+            ))
+    }
+
+    /// One of several choices: the current one, and the rest in a menu.
+    fn dropdown(
+        &self,
+        cx: &mut Context<Self>,
+        theme: &Theme,
+        id: &'static str,
+        look: Look,
+        options: Vec<(&'static str, bool)>,
+        pick: Pick,
+    ) -> gpui::Div {
+        let open = self.open == Some(id);
+        let current = options.iter().position(|(_, on)| *on).unwrap_or(0);
+        let font = |ix: usize| match &look {
+            Look::Fonts(fonts) => fonts.get(ix).copied(),
+            _ => None,
+        };
+        let swatch = |ix: usize| -> Option<gpui::Div> {
+            let Look::Swatches(colors) = &look else {
+                return None;
+            };
+            Some(
+                div().flex().flex_none().gap(px(2.)).children(
+                    colors
+                        .get(ix)?
+                        .iter()
+                        .map(|c| div().size(px(7.)).rounded_full().bg(*c)),
+                ),
+            )
+        };
+        let label = |ix: usize, color: gpui::Rgba| {
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_color(color)
+                .when_some(font(ix), |el, family| el.font_family(family))
+                .child(options.get(ix).map_or("", |(l, _)| *l))
+        };
+        let pick = std::rc::Rc::new(pick);
+        let button = div()
+            .id(id)
+            .w_full()
+            .h(px(32.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded(px(RADIUS_CONTROL + 1.))
+            .border_1()
+            .border_color(if open { theme.acc } else { theme.line })
+            .bg(theme.field)
+            .cursor_pointer()
+            .hover(|s| s.border_color(theme.t3))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open = if this.open == Some(id) {
+                    None
+                } else {
+                    Some(id)
+                };
+                cx.notify();
             }))
+            .children(swatch(current))
+            .child(label(current, theme.text))
+            .child(
+                gpui::svg()
+                    .path(crate::assets::icon("chevron-down"))
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(theme.t3),
+            );
+        let menu = open.then(|| {
+            gpui::deferred(
+                div().absolute().top(px(36.)).left_0().right_0().child(
+                    widgets::overlay_panel(theme)
+                        .id(("menu", id.len()))
+                        .h_auto()
+                        .max_h(px(320.))
+                        .overflow_y_scroll()
+                        .p(px(4.))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.open = None;
+                            cx.notify();
+                        }))
+                        .children((0..options.len()).map(|ix| {
+                            let pick = pick.clone();
+                            div()
+                                .id(("choice", ix))
+                                .h(px(30.))
+                                .px(px(8.))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .rounded(px(RADIUS_CONTROL))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.s3))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open = None;
+                                    let pick = pick.clone();
+                                    this.change(cx, move |p| pick(p, ix))
+                                }))
+                                .child(div().size(px(14.)).flex_none().when(ix == current, |el| {
+                                    el.child(
+                                        gpui::svg()
+                                            .path(crate::assets::icon("check"))
+                                            .size(px(14.))
+                                            .text_color(theme.acc),
+                                    )
+                                }))
+                                .children(swatch(ix))
+                                .child(label(ix, if ix == current { theme.text } else { theme.t2 }))
+                        })),
+                ),
+            )
+            .with_priority(1)
+        });
+        div().relative().child(button).children(menu)
     }
 
     fn render_accents(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -471,49 +611,43 @@ impl Render for SettingsDialog {
                     &theme,
                     "Interface font",
                     None,
-                    segmented_of(
+                    self.dropdown(
                         cx,
+                        &theme,
                         "ui-font",
+                        Look::Fonts(UiFont::ALL.iter().map(|f| f.family()).collect()),
                         UiFont::ALL
                             .into_iter()
                             .map(|f| (f.label(), f == prefs.ui_font))
                             .collect(),
                         Box::new(|p, ix| p.ui_font = UiFont::ALL[ix]),
                     )
-                    .w(px(360.)),
+                    .w(px(240.)),
                 )
                 .into_any_element(),
                 row(
                     &theme,
                     "Code font",
                     Some("The editor, results and anything set in a fixed-width face."),
-                    segmented_of(
+                    self.dropdown(
                         cx,
+                        &theme,
                         "code-font",
+                        Look::Fonts(CodeFont::ALL.iter().map(|f| f.family()).collect()),
                         CodeFont::ALL
                             .into_iter()
                             .map(|f| (f.label(), f == prefs.code_font))
                             .collect(),
                         Box::new(|p, ix| p.code_font = CodeFont::ALL[ix]),
                     )
-                    .w(px(360.)),
+                    .w(px(240.)),
                 )
                 .into_any_element(),
                 row(
                     &theme,
                     "Text size",
                     Some("Everything, the editor too: ⌘+ and ⌘− step it, ⌘0 resets."),
-                    segmented_of(
-                        cx,
-                        "zoom",
-                        ZOOMS
-                            .iter()
-                            .zip(["85%", "92%", "100%", "108%", "116%", "125%", "135%"])
-                            .map(|(z, label)| (label, (*z - prefs.zoom).abs() < 0.001))
-                            .collect(),
-                        Box::new(|p, ix| p.zoom = ZOOMS[ix]),
-                    )
-                    .w(px(360.)),
+                    self.zoom_stepper(&theme, cx),
                 )
                 .into_any_element(),
                 row(
@@ -549,26 +683,34 @@ impl Render for SettingsDialog {
                     )
                     .child(self.render_accents(&theme, cx))
                     .into_any_element(),
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .py(px(10.))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(div().text_color(theme.text).child("Code theme"))
-                            .child(
-                                div()
-                                    .text_size(crate::theme::text(11.5))
-                                    .text_color(theme.t3)
-                                    .child("Syntax colours in the editor, light and dark."),
-                            ),
-                    )
-                    .child(self.render_code_themes(&theme, cx))
-                    .into_any_element(),
+                row(
+                    &theme,
+                    "Code theme",
+                    Some("Syntax colours in the editor, light and dark."),
+                    {
+                        use crate::code_themes::CodeTheme;
+                        let swatches = CodeTheme::ALL
+                            .iter()
+                            .map(|code| match code.palette(theme.mode) {
+                                Some(p) => p.swatch().into_iter().map(gpui::rgb).collect(),
+                                None => vec![theme.text, theme.acc, theme.ok, theme.warn],
+                            })
+                            .collect();
+                        self.dropdown(
+                            cx,
+                            &theme,
+                            "code-theme",
+                            Look::Swatches(swatches),
+                            CodeTheme::ALL
+                                .into_iter()
+                                .map(|t| (t.label(), t == prefs.code_theme))
+                                .collect(),
+                            Box::new(|p, ix| p.code_theme = CodeTheme::ALL[ix]),
+                        )
+                        .w(px(240.))
+                    },
+                )
+                .into_any_element(),
             ],
         );
 
@@ -580,48 +722,54 @@ impl Render for SettingsDialog {
                     &theme,
                     "Rows kept from a result",
                     Some("More rows use more memory; the rest are skipped and flagged."),
-                    segmented_of(
+                    self.dropdown(
                         cx,
+                        &theme,
                         "row-limit",
+                        Look::Plain,
                         ROW_LIMITS
                             .iter()
                             .map(|(n, l)| (*l, *n == prefs.row_limit))
                             .collect(),
                         Box::new(|p, ix| p.row_limit = ROW_LIMITS[ix].0),
                     )
-                    .w(px(270.)),
+                    .w(px(240.)),
                 )
                 .into_any_element(),
                 row(
                     &theme,
                     "Rows when browsing a table",
                     None,
-                    segmented_of(
+                    self.dropdown(
                         cx,
+                        &theme,
                         "browse-limit",
+                        Look::Plain,
                         BROWSE_LIMITS
                             .iter()
                             .map(|(n, l)| (*l, *n == prefs.browse_limit))
                             .collect(),
                         Box::new(|p, ix| p.browse_limit = BROWSE_LIMITS[ix].0),
                     )
-                    .w(px(270.)),
+                    .w(px(240.)),
                 )
                 .into_any_element(),
                 row(
                     &theme,
                     "Editor text size",
                     None,
-                    segmented_of(
+                    self.dropdown(
                         cx,
+                        &theme,
                         "editor-font",
+                        Look::Plain,
                         EDITOR_FONTS
                             .iter()
                             .map(|(size, l)| (*l, (*size - prefs.editor_font).abs() < 0.01))
                             .collect(),
                         Box::new(|p, ix| p.editor_font = EDITOR_FONTS[ix].0),
                     )
-                    .w(px(270.)),
+                    .w(px(240.)),
                 )
                 .into_any_element(),
             ],
@@ -651,16 +799,18 @@ impl Render for SettingsDialog {
                     &theme,
                     "Production query time limit",
                     Some("Xenon stops a query on a production connection that runs longer than this."),
-                    segmented_of(
+                    self.dropdown(
                         cx,
+                        &theme,
                         "query-limit",
+                        Look::Plain,
                         QUERY_LIMITS
                             .iter()
                             .map(|(n, l)| (*l, *n == prefs.query_limit))
                             .collect(),
                         Box::new(|p, ix| p.query_limit = QUERY_LIMITS[ix].0),
                     )
-                    .w(px(270.)),
+                    .w(px(240.)),
                 )
                 .into_any_element(),
                 row(
@@ -670,16 +820,18 @@ impl Render for SettingsDialog {
                         "A statement waiting this long for another session's lock fails instead of \
                          queuing everyone behind it. Applies from the next connect.",
                     ),
-                    segmented_of(
+                    self.dropdown(
                         cx,
+                        &theme,
                         "lock-wait",
+                        Look::Plain,
                         LOCK_WAITS
                             .iter()
                             .map(|(n, l)| (*l, *n == prefs.lock_wait))
                             .collect(),
                         Box::new(|p, ix| p.lock_wait = LOCK_WAITS[ix].0),
                     )
-                    .w(px(270.)),
+                    .w(px(240.)),
                 )
                 .into_any_element(),
             ],

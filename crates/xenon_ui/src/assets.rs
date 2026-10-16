@@ -18,6 +18,8 @@ icons![
     "bookmark",
     "check",
     "braces",
+    "check",
+    "chevron-down",
     "clock",
     "close",
     "database",

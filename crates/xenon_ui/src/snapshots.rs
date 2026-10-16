@@ -1175,6 +1175,12 @@ fn snapshots() {
         shot.act(|w, window, cx| w.open_settings(&crate::OpenSettings, window, cx));
         shot.save(&format!("15-settings-{suffix}"));
         shot.act(|w, _, cx| {
+            if let Some((dialog, _)) = &w.settings {
+                dialog.update(cx, |d, cx| d.open_menu("ui-font", cx));
+            }
+        });
+        shot.save(&format!("53-settings-font-menu-{suffix}"));
+        shot.act(|w, _, cx| {
             w.settings = None;
             cx.notify();
         });
