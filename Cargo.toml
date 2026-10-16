@@ -34,7 +34,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls", "chrono"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "native-tls"] }
-rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype", "hooks"] }
 
 # The GPUI snapshot that gpui-component 0.7.3 pins; the two must move together.
 gpui = { package = "gpui-pre", version = "=0.3.9" }

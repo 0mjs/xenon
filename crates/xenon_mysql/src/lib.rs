@@ -225,20 +225,24 @@ struct MyCancel {
     connection_id: u32,
     /// Set when the user cancels (not the row limit), so the rows read so far are kept.
     user: std::sync::atomic::AtomicBool,
+    /// A user's kill on its way: the query waits for it to land before
+    /// returning, so it can't stop what runs next instead.
+    pending: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl CancelHandle for MyCancel {
     fn cancel(&self) {
         self.user.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.stop();
+        let kill = self.stop();
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(kill);
     }
 }
 
 impl MyCancel {
     /// Stop the running query from another thread, without waiting.
-    fn stop(&self) {
+    fn stop(&self) -> std::thread::JoinHandle<()> {
         let (opts, id) = (self.opts.clone(), self.connection_id);
-        std::thread::spawn(move || kill_query(opts, id));
+        std::thread::spawn(move || kill_query(opts, id))
     }
 
     /// Stop the running query and wait until the server has, so the kill can't
@@ -392,6 +396,7 @@ impl MysqlConnection {
                 _identity: identity,
                 connection_id: conn.connection_id(),
                 user: Default::default(),
+                pending: Default::default(),
             }),
             conn: Mutex::new(conn),
             transaction: Mutex::new((autocommit_off, autocommit_off)),
@@ -573,6 +578,17 @@ impl Connection for MysqlConnection {
                 cancelled,
             })
         })();
+        // A kill sent while it ran: wait for it to land (MySQL drops one that
+        // finds the connection idle) before anything else runs here.
+        let pending = self
+            .cancel
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.join();
+        }
         // Follow the transaction: MySQL can't be asked. A failed script may have
         // opened one before failing, so then it counts as open.
         let mut state = self.transaction.lock().unwrap_or_else(|e| e.into_inner());

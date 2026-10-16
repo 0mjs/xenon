@@ -97,12 +97,17 @@ struct PgCancel {
     tls: MakeTlsConnector,
     /// Set when the user cancels (not the row limit), so the rows read so far are kept.
     user: std::sync::atomic::AtomicBool,
+    /// A user's cancel on its way to the server. The next query waits for it
+    /// to land first: arriving late, it would stop that one instead (or the
+    /// transaction check, or a commit).
+    pending: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl CancelHandle for PgCancel {
     fn cancel(&self) {
         self.user.store(true, std::sync::atomic::Ordering::SeqCst);
-        drop(self.stop());
+        let stop = self.stop();
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(stop);
     }
 }
 
@@ -271,6 +276,7 @@ impl PostgresConnection {
                     token: client.cancel_token(),
                     tls,
                     user: Default::default(),
+                    pending: Default::default(),
                 }),
                 client,
             })
@@ -505,6 +511,20 @@ impl Connection for PostgresConnection {
             }
         }
         let result = runtime().block_on(self.run(sql, row_limit, progress));
+        // A cancel sent while it ran: wait for it to land (and for the server
+        // to act on it) before anything else runs on this session.
+        let pending = self
+            .cancel
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            runtime().block_on(async {
+                let _ = pending.await;
+                tokio::time::sleep(CANCEL_SETTLE).await;
+            });
+        }
         if self.read_only {
             // However it was done (a `do` block building the statement, say),
             // a read-only session switched to read-write goes straight back.

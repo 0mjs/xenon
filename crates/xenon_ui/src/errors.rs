@@ -163,15 +163,28 @@ pub(crate) fn locate(
     }
     let name = unknown?;
     let is_word = |b: Option<char>| b.is_some_and(|c| c.is_alphanumeric() || c == '_');
-    let lower = ran_text.to_lowercase();
-    let needle = name.to_lowercase();
-    // Only when lowercasing keeps every offset: otherwise don't guess.
-    if lower.len() != ran_text.len() {
-        return None;
-    }
+    // Lowercased character by character, keeping any character whose lowercase
+    // is a different length as it is: every offset then matches the text's.
+    let fold = |text: &str| -> String {
+        text.chars()
+            .map(|c| {
+                let mut lower = c.to_lowercase();
+                match (lower.next(), lower.next()) {
+                    (Some(l), None) if l.len_utf8() == c.len_utf8() => l,
+                    _ => c,
+                }
+            })
+            .collect()
+    };
+    let lower = fold(ran_text);
+    let needle = fold(name);
     let mut found = lower.match_indices(&needle).filter(|(i, _)| {
-        !is_word(ran_text[..*i].chars().next_back())
-            && !is_word(ran_text[i + needle.len()..].chars().next())
+        ran_text
+            .get(..*i)
+            .is_some_and(|before| !is_word(before.chars().next_back()))
+            && ran_text
+                .get(i + needle.len()..)
+                .is_some_and(|after| !is_word(after.chars().next()))
     });
     let (first, _) = found.next()?;
     // More than once: which one is unclear.
@@ -189,6 +202,14 @@ mod tests {
 
     fn unknown(message: &str) -> Option<(String, bool)> {
         unknown_name(message).map(|u| (u.name, u.table))
+    }
+
+    #[test]
+    fn unusual_letters_dont_break_locating() {
+        // `İ` grows when lowercased and `Ω` (ohm) shrinks: this used to panic.
+        let text = "select 'İ', émial from t where 'Ω' = 1";
+        let at = locate(text, 0..text.len(), None, Some("émial"));
+        assert_eq!(at.map(|r| &text[r]), Some("émial"));
     }
 
     #[test]

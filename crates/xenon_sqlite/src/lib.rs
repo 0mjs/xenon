@@ -19,12 +19,19 @@ pub struct SqliteConnection {
     id: String,
     conn: Mutex<rusqlite::Connection>,
     interrupt: Arc<Interrupt>,
+    /// Opened read-only: SQLite stops writes to the file itself, but not
+    /// `vacuum into` another file or `attach`, so recognised writes are refused.
+    read_only: bool,
 }
 
-struct Interrupt(InterruptHandle);
+/// SQLite's interrupt does nothing when no statement is running, and a script
+/// of many short ones is mostly between statements: so a cancel also sets a
+/// flag, checked between statements and while one runs, until the next query.
+struct Interrupt(InterruptHandle, Arc<std::sync::atomic::AtomicBool>);
 
 impl CancelHandle for Interrupt {
     fn cancel(&self) {
+        self.1.store(true, std::sync::atomic::Ordering::SeqCst);
         self.0.interrupt();
     }
 }
@@ -57,7 +64,10 @@ impl SqliteConnection {
             .unwrap_or_else(|_| path.to_path_buf())
             .display()
             .to_string();
-        Ok(Self::new(name, id, conn))
+        Ok(Self {
+            read_only,
+            ..Self::new(name, id, conn)
+        })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -69,12 +79,23 @@ impl SqliteConnection {
     }
 
     fn new(name: String, id: String, conn: rusqlite::Connection) -> Self {
-        let interrupt = Arc::new(Interrupt(conn.get_interrupt_handle()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            // Every thousand virtual-machine steps, stop if a cancel came.
+            let stop = stop.clone();
+            // If it can't be set, the check between statements still holds.
+            let _ = conn.progress_handler(
+                1_000,
+                Some(move || stop.load(std::sync::atomic::Ordering::SeqCst)),
+            );
+        }
+        let interrupt = Arc::new(Interrupt(conn.get_interrupt_handle(), stop));
         Self {
             name,
             id,
             conn: Mutex::new(conn),
             interrupt,
+            read_only: false,
         }
     }
 
@@ -104,6 +125,15 @@ impl Connection for SqliteConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        if self.read_only
+            && let Some((_, what)) = xenon_driver::sql::assess(sql)
+        {
+            return Err(QueryError {
+                message: format!("This is a read-only connection, so {what} isn't allowed."),
+                position: None,
+            }
+            .into());
+        }
         self.run(sql, row_limit, progress).map_err(query_error)
     }
 
@@ -346,6 +376,10 @@ impl SqliteConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        // A new query: forget an old cancel, before anything else (reading a
+        // long script takes a while, and a cancel then must count).
+        let stop = self.interrupt.1.clone();
+        stop.store(false, std::sync::atomic::Ordering::SeqCst);
         let conn = self.lock()?;
         let started = Instant::now();
         let mut feed = Feed::new(progress);
@@ -355,8 +389,11 @@ impl SqliteConnection {
         let mut outcome = None;
         let mut earlier = Vec::new();
         let mut statements = 0;
-
         while let Some(mut stmt) = batch.next()? {
+            // Cancelled between statements: the rest don't run.
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(anyhow::anyhow!("Cancelled before the end of the script."));
+            }
             statements += 1;
             if stmt.column_count() == 0 {
                 earlier.extend(outcome.replace(QueryOutcome::Affected(stmt.execute([])? as u64)));
@@ -670,8 +707,39 @@ mod tests {
         let err = read_only
             .execute("insert into t values (1)", 10)
             .unwrap_err();
-        assert!(err.to_string().contains("readonly"), "{err}");
+        assert!(err.to_string().contains("read-only connection"), "{err}");
+        // Writing the database somewhere else, or attaching another, is refused too.
+        let copy = dir.join("copy.db");
+        for sql in [
+            format!("vacuum into '{}'", copy.display()),
+            format!("attach '{}' as other", copy.display()),
+        ] {
+            assert!(read_only.execute(&sql, 10).is_err(), "{sql}");
+        }
+        assert!(!copy.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A cancel between the statements of a script still stops it.
+    #[test]
+    fn a_cancel_stops_a_script_of_many_statements() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute("create table t (n int)", 0).unwrap();
+        let script: String = (0..200_000)
+            .map(|n| format!("insert into t values ({n});"))
+            .collect();
+        let cancel = db.cancel_handle();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            cancel.cancel();
+        });
+        let _ = db.execute(&script, 0);
+        stopper.join().unwrap();
+        let count = match db.execute("select count(*) from t", 1).unwrap().outcome {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(count, Value::Integer(200_000), "the cancel was lost");
     }
 
     #[test]
