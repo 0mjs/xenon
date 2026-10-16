@@ -105,24 +105,30 @@ impl Workspace {
         });
     }
 
-    /// Grid / Records / JSON, beside Export.
+    /// Grid / Records / JSON, as three icons beside Export.
     pub(crate) fn render_view_switch(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let current = self.active_tab().view;
-        let this = cx.entity().downgrade();
-        widgets::segmented(
-            theme,
-            "result-view",
-            ResultView::ALL
-                .into_iter()
-                .map(|v| (v.label(), v == current))
-                .collect(),
-            move |ix, _, cx| {
-                let view = ResultView::ALL[*ix];
-                this.update(cx, |this, cx| this.set_view(view, cx)).ok();
-            },
-        )
-        .w(px(200.))
-        .into_any_element()
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(1.))
+            .p(px(2.))
+            .rounded(px(7.))
+            .border_1()
+            .border_color(theme.line_2)
+            .children(ResultView::ALL.into_iter().enumerate().map(|(ix, view)| {
+                let icon = match view {
+                    ResultView::Grid => "table-2",
+                    ResultView::Records => "list",
+                    ResultView::Json => "braces",
+                };
+                crate::workspace::icon_button(theme, ("result-view", ix), icon, view == current)
+                    .size(px(22.))
+                    .tooltip(widgets::tooltip(view.label(), ""))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
+            }))
+            .into_any_element()
     }
 
     /// Each row as a card of field and value.

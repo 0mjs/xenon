@@ -133,8 +133,12 @@ impl Workspace {
         } else {
             format!("{}–{}", group_digits(first + 1), group_digits(first + rows))
         };
+        // Narrow, "of" gives way to a slash.
+        let compact = self.compact_bar();
         let total = match browse.total {
+            Some(Total::Exact(n)) if compact => format!(" / {}", group_digits(n as usize)),
             Some(Total::Exact(n)) => format!(" of {}", group_digits(n as usize)),
+            Some(Total::About(n)) if compact => format!(" / ~{}", rough(n)),
             Some(Total::About(n)) => format!(" of about {}", rough(n)),
             None => String::new(),
         };

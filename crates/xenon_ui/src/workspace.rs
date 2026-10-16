@@ -2,7 +2,7 @@
 //! or history), editor and results, inspector, status bar.
 //! Layout follows PLAN.md, "Design direction".
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -64,6 +64,10 @@ const MAX_SIDE_PANEL_WIDTH: f32 = 520.;
 const INSPECTOR_WIDTH: f32 = 260.;
 const MIN_INSPECTOR_WIDTH: f32 = 200.;
 const MAX_INSPECTOR_WIDTH: f32 = 640.;
+/// The results keep at least this much width when the inspector widens.
+const MIN_RESULTS_WIDTH: f32 = 680.;
+/// Narrower than this, the results bar's controls go compact.
+const ROOMY_RESULTS: f32 = 1_000.;
 const EDITOR_HEIGHT: f32 = 220.;
 const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
@@ -596,7 +600,13 @@ pub struct Workspace {
     bench_frame_requested: bool,
     editor_height: f32,
     side_panel_width: f32,
-    inspector_width: f32,
+    pub(crate) inspector_width: f32,
+    /// How wide the results are, worked out each frame: narrow, the bar's
+    /// controls go compact.
+    results_width: Cell<f32>,
+    /// The inspector's width as drawn: its own, unless the window is too narrow
+    /// to leave the results their room.
+    inspector_shown: Cell<f32>,
     /// Which text fields have focus, refreshed each render, for focus rings.
     pub(crate) field_focus: FieldFocus,
     /// The launcher's "paste anything" field and what it recognised (text, is_error).
@@ -737,6 +747,8 @@ impl Workspace {
             editor_height: EDITOR_HEIGHT,
             side_panel_width: SIDE_PANEL_WIDTH,
             inspector_width: INSPECTOR_WIDTH,
+            results_width: Cell::new(f32::MAX),
+            inspector_shown: Cell::new(INSPECTOR_WIDTH),
             field_focus: FieldFocus::default(),
             paste_input,
             paste_note: (SharedString::default(), false),
@@ -3765,9 +3777,18 @@ impl Workspace {
                 start_x,
                 start_width,
             } => {
-                // Its left edge: dragging left widens it.
+                // Its left edge: dragging left widens it, as long as the results
+                // keep room to work in.
+                let beside = RAIL_WIDTH
+                    + if self.show_side_panel {
+                        self.side_panel_width
+                    } else {
+                        0.
+                    };
+                let room = f32::from(window.viewport_size().width) - beside - MIN_RESULTS_WIDTH;
+                let max = MAX_INSPECTOR_WIDTH.min(room).max(MIN_INSPECTOR_WIDTH);
                 self.inspector_width = (start_width - f32::from(event.position.x - *start_x))
-                    .clamp(MIN_INSPECTOR_WIDTH, MAX_INSPECTOR_WIDTH)
+                    .clamp(MIN_INSPECTOR_WIDTH, max)
                     .round();
             }
             Drag::Split {
@@ -4142,6 +4163,23 @@ impl Render for Workspace {
 
         let open = self.side_panel_open(window);
         let gap = self.card_gap();
+        // What's left for the results, beside the rail, side panel and inspector.
+        let beside = RAIL_WIDTH + (self.side_panel_width + gap) * open + 2. * gap;
+        let fits = f32::from(window.viewport_size().width) - beside - MIN_RESULTS_WIDTH;
+        self.inspector_shown
+            .set(self.inspector_width.min(fits).max(MIN_INSPECTOR_WIDTH));
+        let inspector = if self.show_inspector && self.active_session().is_some() {
+            self.inspector_shown.get()
+        } else {
+            0.
+        };
+        self.results_width.set(
+            f32::from(window.viewport_size().width)
+                - RAIL_WIDTH
+                - (self.side_panel_width + gap) * open
+                - inspector
+                - 2. * gap,
+        );
         let body = div()
             .flex()
             .flex_row()
@@ -5464,111 +5502,123 @@ impl Workspace {
 
     /// The right of the results bar: staged changes and how to save them, or
     /// how to start editing, or why this table can't be edited.
-    fn render_edit_status(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The tab's note (saved, an error, why it can't be edited): it gives way,
+    /// cut short, so the controls on the right always fit.
+    fn render_note(&self, theme: &Theme) -> Option<AnyElement> {
         let tab = self.active_tab();
+        let (text, color) = match &tab.flash {
+            Some((message, error)) => (message.clone(), if *error { theme.err } else { theme.ok }),
+            None if tab.saving => ("Saving…".into(), theme.t2),
+            None => match self.edit_target() {
+                Err(why) if tab.browse.is_some() && tab.grid.is_some() && tab.edits.is_empty() => {
+                    (why.into(), theme.t3)
+                }
+                _ => return None,
+            },
+        };
+        Some(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_color(color)
+                .child(text)
+                .into_any_element(),
+        )
+    }
+
+    /// Whether the results are narrow enough that the bar's controls go compact.
+    pub(crate) fn compact_bar(&self) -> bool {
+        self.results_width.get() < ROOMY_RESULTS
+    }
+
+    /// Staged changes and what to do with them, or the button that adds a row.
+    fn render_edit_actions(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tab = self.active_tab();
+        let compact = self.compact_bar();
         let small = |button: gpui::Stateful<gpui::Div>| {
             button
                 .h(px(24.))
                 .px(px(9.))
                 .text_size(crate::theme::text(11.5))
         };
-        let mut status = div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .text_size(crate::theme::text(11.5));
-        if let Some((message, error)) = &tab.flash {
-            status = status.child(
-                div()
-                    .max_w(px(420.))
-                    .truncate()
-                    .mr(px(6.))
-                    .text_color(if *error { theme.err } else { theme.ok })
-                    .child(message.clone()),
-            );
-        }
         if tab.saving {
-            return status
-                .child(div().text_color(theme.t2).child("Saving…"))
-                .into_any_element();
+            return None;
         }
         if !tab.edits.is_empty() {
             let count = tab.edits.count();
-            return status
-                .child(div().size(px(7.)).rounded_full().bg(theme.warn))
-                .child(
-                    div()
-                        .mr(px(4.))
-                        .text_color(theme.text)
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(if count == 1 {
-                            "1 change".to_string()
-                        } else {
-                            format!("{count} changes")
-                        }),
-                )
-                .child(
-                    small(widgets::button(
-                        theme,
-                        "discard-edits",
-                        "Discard",
-                        ButtonKind::Ghost,
-                        true,
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.discard_edits(&DiscardEdits, window, cx)
-                    })),
-                )
-                .child(
-                    small(widgets::button(
-                        theme,
-                        "review-edits",
-                        "Review SQL",
-                        ButtonKind::Ghost,
-                        true,
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.review_edits(window, cx))),
-                )
-                .child(
-                    small(widgets::button(
-                        theme,
-                        "save-edits",
-                        "Save",
-                        ButtonKind::Primary,
-                        true,
-                    ))
-                    .pl(px(9.))
-                    .child(kbd_on_accent(theme, "⌘S"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.save_edits(&SaveEdits, window, cx)),
-                    ),
-                )
-                .into_any_element();
+            return Some(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(div().size(px(7.)).rounded_full().bg(theme.warn))
+                    .child(
+                        div()
+                            .mr(px(4.))
+                            .whitespace_nowrap()
+                            .text_color(theme.text)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(if count == 1 {
+                                "1 change".to_string()
+                            } else {
+                                format!("{count} changes")
+                            }),
+                    )
+                    .child(
+                        small(widgets::button(
+                            theme,
+                            "discard-edits",
+                            "Discard",
+                            ButtonKind::Ghost,
+                            true,
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.discard_edits(&DiscardEdits, window, cx)
+                        })),
+                    )
+                    .child(
+                        small(widgets::button(
+                            theme,
+                            "review-edits",
+                            if compact { "Review" } else { "Review SQL" },
+                            ButtonKind::Ghost,
+                            true,
+                        ))
+                        .tooltip(widgets::tooltip("Review the SQL that saves them", ""))
+                        .on_click(cx.listener(|this, _, window, cx| this.review_edits(window, cx))),
+                    )
+                    .child(
+                        small(widgets::button(
+                            theme,
+                            "save-edits",
+                            "Save",
+                            ButtonKind::Primary,
+                            true,
+                        ))
+                        .pl(px(9.))
+                        .when(!compact, |el| el.child(kbd_on_accent(theme, "⌘S")))
+                        .when(compact, |el| {
+                            el.tooltip(widgets::tooltip("Save changes", "⌘S"))
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.save_edits(&SaveEdits, window, cx)
+                        })),
+                    )
+                    .into_any_element(),
+            );
         }
-        match self.edit_target() {
-            Ok(_) => status
-                .child(
-                    div()
-                        .mr(px(4.))
-                        .text_color(theme.t3)
-                        .child("Double-click a cell to edit"),
-                )
-                .child(
-                    small(widgets::button(
-                        theme,
-                        "add-row",
-                        "+ Row",
-                        ButtonKind::Ghost,
-                        true,
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| this.add_row(&AddRow, window, cx))),
-                )
+        self.edit_target().ok()?;
+        Some(
+            icon_button(theme, "add-row", "plus", false)
+                .tooltip(widgets::tooltip(
+                    "Add a row (double-click a cell to edit one)",
+                    "",
+                ))
+                .on_click(cx.listener(|this, _, window, cx| this.add_row(&AddRow, window, cx)))
                 .into_any_element(),
-            Err(why) if tab.browse.is_some() && tab.grid.is_some() => status
-                .child(div().text_color(theme.t3).child(why))
-                .into_any_element(),
-            Err(_) => status.into_any_element(),
-        }
+        )
     }
 
     fn render_results_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5633,23 +5683,26 @@ impl Workspace {
             && matches!(&tab.query, Query::Done(result) if !result.cancelled)
             && tab.grid.as_ref().is_some_and(|grid| grid.data.truncated);
 
-        div()
-            .h(px(32.))
-            .flex_none()
+        // Left: what happened, giving way (cut short) when space runs out; the
+        // status itself always shows.
+        let note = tab.flash.as_ref().map(|(text, _)| text.clone());
+        let left = div()
+            .id("results-status")
+            // Cut short, a note can still be read in full on hover.
+            .when_some(note, |el, note| el.tooltip(widgets::tooltip(note, "")))
+            .flex_1()
+            .min_w(px(90.))
             .flex()
-            .flex_row()
             .items_center()
-            .gap(px(12.))
-            .px(px(14.))
-            .border_b_1()
-            .border_color(theme.line)
-            .bg(theme.s1)
-            .text_size(crate::theme::text(11.5))
+            .gap(px(10.))
+            .overflow_hidden()
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(7.))
+                    .whitespace_nowrap()
                     .text_color(theme.text)
                     .font_weight(FontWeight::MEDIUM)
                     .child(div().size(px(7.)).rounded_full().bg(dot))
@@ -5657,6 +5710,8 @@ impl Workspace {
             )
             .children(facts.into_iter().map(|fact| {
                 div()
+                    .flex_none()
+                    .whitespace_nowrap()
                     .font_family(crate::theme::mono_font())
                     .text_size(crate::theme::text(11.))
                     .text_color(theme.t3)
@@ -5665,6 +5720,7 @@ impl Workspace {
             .when(matches!(tab.query, Query::Running { .. }), |el| {
                 el.child(
                     widgets::with_keys(theme, &[("⌘.", true), ("to cancel", false)])
+                        .flex_none()
                         .text_size(crate::theme::text(11.))
                         .text_color(theme.t3),
                 )
@@ -5672,18 +5728,40 @@ impl Workspace {
             .when(can_fetch_all, |el| {
                 el.child(
                     widgets::button(theme, "fetch-all", "Fetch all", ButtonKind::Ghost, true)
+                        .flex_none()
                         .h(px(22.))
                         .px(px(8.))
                         .on_click(cx.listener(|this, _, w, cx| this.fetch_all(w, cx))),
                 )
             })
-            .child(div().flex_1())
-            .child(self.render_edit_status(theme, cx))
+            .children(self.render_note(theme));
+        // Right: the controls, always whole.
+        let right = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .children(self.render_edit_actions(theme, cx))
             .children(self.render_pager(theme, cx))
             .when(can_export, |el| {
                 el.child(self.render_view_switch(theme, cx))
                     .child(self.render_export(theme, cx))
-            })
+            });
+        div()
+            .h(px(32.))
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.))
+            .px(px(14.))
+            .overflow_hidden()
+            .border_b_1()
+            .border_color(theme.line)
+            .bg(theme.s1)
+            .text_size(crate::theme::text(11.5))
+            .child(left)
+            .child(right)
     }
 
     /// The Export button and, when open, its menu of formats.
@@ -5750,28 +5828,7 @@ impl Workspace {
         div()
             .relative()
             .child(
-                div()
-                    .id("export")
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .h(px(22.))
-                    .px(px(8.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .text_size(crate::theme::text(11.5))
-                    .text_color(theme.t2)
-                    .hover(|el| el.bg(theme.s2).text_color(theme.text))
-                    .when(self.export_menu, |el| {
-                        el.bg(theme.s2).text_color(theme.text)
-                    })
-                    .child(
-                        gpui::svg()
-                            .path(assets::icon("download"))
-                            .size(px(13.))
-                            .text_color(theme.t2),
-                    )
-                    .child("Export")
+                icon_button(theme, "export", "download", self.export_menu)
                     .tooltip(|window, cx| widgets::tooltip("Export results", "⇧⌘S")(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.export_menu = !this.export_menu;
@@ -6056,7 +6113,7 @@ impl Workspace {
     fn render_inspector(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.active_tab();
         let mut panel = div()
-            .w(px(self.inspector_width))
+            .w(px(self.inspector_shown.get()))
             .flex_none()
             .relative()
             .flex()
@@ -6458,4 +6515,30 @@ fn window_material(frosted: bool) -> gpui::WindowBackgroundAppearance {
     } else {
         gpui::WindowBackgroundAppearance::Opaque
     }
+}
+
+/// A small icon button for the results bar.
+pub(crate) fn icon_button(
+    theme: &Theme,
+    id: impl Into<gpui::ElementId>,
+    icon: &'static str,
+    active: bool,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .size(px(24.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .cursor_pointer()
+        .when(active, |el| el.bg(theme.s3))
+        .hover(|el| el.bg(theme.s3))
+        .child(
+            svg()
+                .path(assets::icon(icon))
+                .size(px(14.))
+                .text_color(if active { theme.text } else { theme.t2 }),
+        )
 }

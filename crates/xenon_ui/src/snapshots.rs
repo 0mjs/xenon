@@ -465,6 +465,29 @@ fn snapshots() {
             assert_eq!(w.active_tab().grid.as_ref().unwrap().data.rows.len(), 500);
         });
         shot.save(&format!("47-pages-{suffix}"));
+        // The busiest results bar: a long error, a staged change, paging, and a
+        // wide inspector. Everything stays in its lane.
+        shot.act(|w, window, cx| {
+            w.inspector_width = 600.;
+            w.begin_edit(1, 5, window, cx);
+            w.type_into_cell("x", window, cx);
+            w.commit_edit(false, window, cx);
+            let tab = w.active;
+            w.tabs[tab].flash = Some((
+                "ERROR 23502: null value in column \"name\" of relation \"events\" violates \
+                 not-null constraint DETAIL: Failing row contains (12, null, {}, 2026-10-15)."
+                    .into(),
+                true,
+            ));
+            cx.notify();
+        });
+        shot.save(&format!("52-busy-bar-{suffix}"));
+        shot.act(|w, window, cx| {
+            w.discard_edits(&crate::DiscardEdits, window, cx);
+            let tab = w.active;
+            w.tabs[tab].flash = None;
+            w.inspector_width = 260.;
+        });
         shot.act(|w, window, cx| w.turn_page(true, window, cx));
         assert!(shot.settle(10, |w| !w.is_running()));
         shot.act(|w, window, cx| {

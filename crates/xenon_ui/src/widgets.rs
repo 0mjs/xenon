@@ -86,17 +86,20 @@ fn keycaps(keys: &str, color: Rgba, background: Rgba, border: Rgba) -> gpui::Div
 /// A tooltip: a label and its shortcut as keycaps (the UI and code fonts have
 /// no ⌘ ⇧ ↵ glyphs, so shortcuts are never written into plain text).
 pub fn tooltip(
-    label: &'static str,
+    label: impl Into<gpui::SharedString>,
     keys: &'static str,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let label: gpui::SharedString = label.into();
     move |window, cx| {
+        let label = label.clone();
         gpui_component::tooltip::Tooltip::element(move |_, cx| {
             let theme = crate::theme::ActiveTheme::theme(cx).clone();
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(label)
+                .max_w(px(480.))
+                .child(label.clone())
                 // No keycap when there's no shortcut.
                 .when(!keys.is_empty(), |el| el.child(kbd(&theme, keys)))
         })
