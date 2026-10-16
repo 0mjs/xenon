@@ -346,7 +346,21 @@ impl ConnectDialog {
         cx.notify();
     }
 
-    fn request(&mut self, cx: &mut Context<Self>) -> Option<Request> {
+    /// Paste `url` and pick `ssl`, as a user would.
+    #[cfg(test)]
+    pub(crate) fn fill_for_test(
+        &mut self,
+        url: &str,
+        ssl: SslMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.url
+            .update(cx, |input, cx| input.set_value(url.to_string(), window, cx));
+        self.ssl = ssl;
+    }
+
+    pub(crate) fn request(&mut self, cx: &mut Context<Self>) -> Option<Request> {
         let value =
             |input: &Entity<InputState>, cx: &App| input.read(cx).value().trim().to_string();
         let mut name = value(&self.name, cx);
@@ -361,7 +375,23 @@ impl ConnectDialog {
             }
             let mut options = if !url.is_empty() {
                 match servers::parse_url(self.engine, &url) {
-                    Ok(options) => options,
+                    // The form's TLS still counts: the stricter mode wins (a new
+                    // production connection's verify-full isn't undone by a URL's
+                    // `prefer`), and certificates the URL doesn't name come from
+                    // the form.
+                    Ok(mut options) => {
+                        options.ssl = options.ssl.max(self.ssl);
+                        for (field, input) in [
+                            (&mut options.tls.ca, &self.tls_ca),
+                            (&mut options.tls.cert, &self.tls_cert),
+                            (&mut options.tls.key, &self.tls_key),
+                        ] {
+                            if field.is_empty() {
+                                *field = value(input, cx);
+                            }
+                        }
+                        options
+                    }
                     Err(err) => {
                         self.set_error(format!("{err:#}").into(), cx);
                         return None;

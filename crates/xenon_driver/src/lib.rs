@@ -301,8 +301,8 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// How a server connection uses TLS. The names follow libpq's `sslmode`; other
-/// engines map them onto their own settings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// engines map them onto their own settings. Ordered from weakest to strictest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SslMode {
     Disable,
     /// Use TLS when the server offers it; don't verify the certificate.

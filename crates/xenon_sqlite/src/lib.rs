@@ -434,7 +434,13 @@ fn to_value(value: ValueRef<'_>) -> Value {
         ValueRef::Null => Value::Null,
         ValueRef::Integer(v) => Value::Integer(v),
         ValueRef::Real(v) => Value::Real(v),
-        ValueRef::Text(v) => Value::Text(String::from_utf8_lossy(v).into_owned()),
+        // Text that isn't valid UTF-8 can't be shown as text without changing it
+        // (to U+FFFD, which another row's key may really hold): it's kept as its
+        // bytes, so it's never mistaken for a different value.
+        ValueRef::Text(v) => match std::str::from_utf8(v) {
+            Ok(text) => Value::Text(text.to_string()),
+            Err(_) => Value::Blob(v.to_vec()),
+        },
         ValueRef::Blob(v) => Value::Blob(v.to_vec()),
     }
 }

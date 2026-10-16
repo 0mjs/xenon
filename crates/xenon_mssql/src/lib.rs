@@ -176,6 +176,11 @@ pub struct MssqlConnection {
     /// `None` after a cancel killed the session; the next query reconnects.
     client: Mutex<Option<Tds>>,
     cancel: Arc<MsCancel>,
+    /// A transaction was open on the session, as last seen. When that session
+    /// ends (a cancel, the time limit, a dropped connection) the server rolls
+    /// it back, so the next statement isn't run on a fresh session as if it were
+    /// still open: it fails, saying so.
+    transaction_open: std::sync::atomic::AtomicBool,
 }
 
 struct MsCancel {
@@ -234,9 +239,10 @@ async fn open(options: &ConnectOptions) -> Result<Tds> {
     config.authentication(AuthMethod::sql_server(user, &options.password));
     match options.ssl {
         SslMode::Disable => config.encryption(EncryptionLevel::NotSupported),
-        // SQL Server's own default: encrypt the login, trust the certificate.
+        // Encrypt everything (trusting the certificate), and only when the server
+        // can't, fall back to its old default of encrypting just the login (below).
         SslMode::Prefer => {
-            config.encryption(EncryptionLevel::Off);
+            config.encryption(EncryptionLevel::Required);
             config.trust_cert();
         }
         SslMode::Require => {
@@ -277,6 +283,16 @@ async fn open(options: &ConnectOptions) -> Result<Tds> {
                 .await?
                 .next()
                 .ok_or_else(|| anyhow!("Couldn't find {host}."))?;
+            let tcp = connect_tcp(address).await?;
+            Client::connect(config, tcp.compat_write())
+                .await
+                .map_err(describe)?
+        }
+        // `prefer` on a server that can't encrypt the session: encrypt the login.
+        Err(tiberius::error::Error::Protocol(message))
+            if options.ssl == SslMode::Prefer && message.contains("encryption level") =>
+        {
+            config.encryption(EncryptionLevel::Off);
             let tcp = connect_tcp(address).await?;
             Client::connect(config, tcp.compat_write())
                 .await
@@ -358,6 +374,7 @@ impl MssqlConnection {
             }),
             options: options.clone(),
             client: Mutex::new(Some(client)),
+            transaction_open: Default::default(),
         })
     }
 
@@ -387,7 +404,9 @@ impl MssqlConnection {
         let mut sets: Vec<ResultSet> = Vec::new();
         let mut types: Vec<ColumnType> = Vec::new();
         let mut over_limit = false;
-        let writes = xenon_driver::sql::writes(sql) || in_transaction;
+        let writes = xenon_driver::sql::writes(sql)
+            || in_transaction
+            || xenon_driver::sql::controls_transaction(sql);
         let mut cancelled = false;
         loop {
             let item = match stream.try_next().await {
@@ -475,6 +494,17 @@ impl MssqlConnection {
     }
 }
 
+impl MssqlConnection {
+    /// The session just ended while running `sql`: if that began a transaction,
+    /// it was open, and is now rolled back.
+    fn note_lost_transaction(&self, sql: &str) {
+        if xenon_driver::sql::transaction_effect(sql) == Some(true) {
+            self.transaction_open
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 impl Connection for MssqlConnection {
     fn name(&self) -> &str {
         &self.name
@@ -515,6 +545,18 @@ impl Connection for MssqlConnection {
         };
         if killed() {
             *guard = None;
+        }
+        // The session ended with a transaction open: it was rolled back, and what
+        // follows was meant for it. Say so instead of running it in autocommit.
+        if guard.is_none()
+            && self
+                .transaction_open
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(anyhow!(
+                "The connection was reset (a cancel, the time limit or a network drop), so the \
+                 open transaction was rolled back: nothing in it was kept, and this didn't run."
+            ));
         }
         if guard.is_none() {
             // The last session was killed (cancel or row limit): open another.
@@ -571,6 +613,10 @@ impl Connection for MssqlConnection {
                 if cancelled {
                     killed();
                 }
+                if let Some(open) = xenon_driver::sql::transaction_effect(sql) {
+                    self.transaction_open
+                        .store(open, std::sync::atomic::Ordering::SeqCst);
+                }
                 Ok(QueryResult {
                     outcome,
                     earlier,
@@ -581,6 +627,7 @@ impl Connection for MssqlConnection {
             }
             Err(_) if killed() => {
                 *guard = None;
+                self.note_lost_transaction(sql);
                 Err(anyhow!(
                     "Cancelled. (SQL Server ends the session to stop a query; the next one reconnects.)"
                 ))
@@ -588,6 +635,7 @@ impl Connection for MssqlConnection {
             Err(err) if !err.is::<QueryError>() => {
                 // The connection broke: reconnect next time.
                 *guard = None;
+                self.note_lost_transaction(sql);
                 Err(err)
             }
             Err(err) => Err(locate(err, sql)),
@@ -861,6 +909,10 @@ impl Connection for MssqlConnection {
                     .and_then(|row| row.try_get::<i32, _>(0).ok().flatten())
             })
             .map(|count| count > 0)
+            .inspect(|open| {
+                self.transaction_open
+                    .store(*open, std::sync::atomic::Ordering::SeqCst)
+            })
     }
 
     fn is_local(&self) -> bool {
@@ -1118,6 +1170,60 @@ mod live {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// The default (`prefer`) encrypts the whole session, not just the login.
+    #[test]
+    #[ignore]
+    fn prefer_encrypts_the_session() {
+        let _serial = serial();
+        let db = fleet();
+        assert_eq!(db.options.ssl, SslMode::Prefer);
+        let encrypted = rows(
+            &db,
+            "select encrypt_option from sys.dm_exec_connections where session_id = @@spid",
+        );
+        assert_eq!(encrypted.rows[0][0], Value::Text("TRUE".into()));
+    }
+
+    /// A cancel ends the session and rolls back an open transaction: what's
+    /// run next isn't run in autocommit as if the transaction were still there.
+    #[test]
+    #[ignore]
+    fn a_lost_transaction_is_reported_not_continued() {
+        let _serial = serial();
+        let db = fleet();
+        db.execute(
+            "drop table if exists xenon_lost_tx; create table xenon_lost_tx (id int primary key)",
+            1,
+        )
+        .unwrap();
+        db.execute("begin transaction", 1).unwrap();
+        db.execute("insert into xenon_lost_tx values (1)", 1)
+            .unwrap();
+        let handle = db.cancel_handle();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            handle.cancel();
+        });
+        let _ = db.execute("waitfor delay '00:00:03'", 1);
+        stopper.join().unwrap();
+        let err = db
+            .execute("insert into xenon_lost_tx values (2)", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rolled back"), "{err}");
+        // Nothing of the transaction was kept, and the refused insert didn't run.
+        let rows = match db
+            .execute("select count(*) from xenon_lost_tx", 1)
+            .unwrap()
+            .outcome
+        {
+            QueryOutcome::Rows(rows) => rows.rows,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(rows[0][0], Value::Integer(0));
+        db.execute("drop table xenon_lost_tx", 1).unwrap();
     }
 
     #[test]

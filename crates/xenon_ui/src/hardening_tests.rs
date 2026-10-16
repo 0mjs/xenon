@@ -142,3 +142,36 @@ fn hardening_nothing_runs_on_a_connection_while_it_saves() {
         );
     });
 }
+
+/// C1: a URL pasted into the connect dialog doesn't undo the TLS mode picked
+/// in the form (a new production connection's verify-full).
+#[test]
+#[ignore]
+fn hardening_a_pasted_url_keeps_the_forms_tls() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, _) = setup("c1");
+    let mut shot = Shot::new(Mode::Dark, None, &root);
+    shot.act(|w, window, cx| {
+        w.new_server_connection(xenon_store::ServerEngine::Postgres, window, cx)
+    });
+    shot.act(|w, window, cx| {
+        let dialog = w.connect_dialog.as_ref().expect("dialog").0.clone();
+        let request = dialog.update(cx, |dialog, cx| {
+            dialog.fill_for_test(
+                "postgres://app@db.example.com/app?sslmode=prefer",
+                xenon_driver::SslMode::VerifyFull,
+                window,
+                cx,
+            );
+            dialog.request(cx)
+        });
+        let Some(crate::connect::Request {
+            target: crate::connect::RequestTarget::Server(_, options),
+            ..
+        }) = request
+        else {
+            panic!("no server request")
+        };
+        assert_eq!(options.ssl, xenon_driver::SslMode::VerifyFull);
+    });
+}

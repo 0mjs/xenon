@@ -70,6 +70,6 @@ jobs:
       - run: cargo test --workspace
       # Headless screens that also check the UI's guards (production prompts,
       # Fetch all, scripts rolled back, quit with a transaction open).
-      - run: cargo test -p xenon_ui snapshots -- --ignored
+      - run: cargo test -p xenon_ui -- --ignored snapshots hardening
       # Saved passwords live in the Keychain.
       - run: cargo test -p xenon_store keychain -- --ignored

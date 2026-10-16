@@ -467,6 +467,44 @@ mod tests {
         );
     }
 
+    /// A key that isn't valid UTF-8 isn't read as U+FFFD, which another row's
+    /// key may really be: the save matches no row and is refused.
+    #[test]
+    fn an_invalid_utf8_key_never_saves_into_another_row() {
+        let conn = SqliteConnection::open_in_memory().unwrap();
+        conn.execute(
+            "create table t (k text primary key, v text);
+             insert into t values (cast(x'80' as text), 'old'), ('\u{FFFD}', 'old')",
+            0,
+        )
+        .unwrap();
+        let QueryOutcome::Rows(data) = conn
+            .execute("select * from t order by rowid", 10)
+            .unwrap()
+            .outcome
+        else {
+            panic!("no rows")
+        };
+        assert_ne!(data.rows[0][0], data.rows[1][0]);
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(0), 1, Value::Text("saved".into()), None);
+        let target = TableRef {
+            schema: None,
+            table: "t".into(),
+            key: vec![0],
+        };
+        assert!(save(&conn, &statements(&conn, &target, &data, &edits)).is_err());
+        let QueryOutcome::Rows(after) = conn.execute("select v from t", 10).unwrap().outcome else {
+            panic!("no rows")
+        };
+        assert!(
+            after
+                .rows
+                .iter()
+                .all(|row| row[0] == Value::Text("old".into()))
+        );
+    }
+
     #[test]
     fn statements_read_like_sql() {
         let (conn, path) = shop();
