@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --release -p xenon
+cargo build --release --locked -p xenon
 version=$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="xenon"))')
 

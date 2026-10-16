@@ -6,7 +6,7 @@ export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 root="$SRCROOT/.."
 cd "$root"
 
-cargo build --release -p xenon
+cargo build --release --locked -p xenon
 
 mkdir -p "$(dirname "$TARGET_BUILD_DIR/$EXECUTABLE_PATH")" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 cp target/release/xenon "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"

@@ -13,7 +13,7 @@ services:
     # TLS on, with the fleet's own CA (dev/fleet/tls-setup/make.sh): copied in so
     # the key belongs to postgres with mode 0600, as Postgres insists.
     image: postgres:17
-    ports: ["55432:5432"]
+    ports: ["127.0.0.1:55432:5432"]
     entrypoint:
       - sh
       - -c
@@ -39,7 +39,7 @@ services:
 
   mysql:
     image: mysql:8.4
-    ports: ["53306:3306"]
+    ports: ["127.0.0.1:53306:3306"]
     environment:
       MYSQL_ROOT_PASSWORD: xenon
       MYSQL_USER: xenon
@@ -59,7 +59,7 @@ services:
 
   mariadb:
     image: mariadb:11.4
-    ports: ["53307:3306"]
+    ports: ["127.0.0.1:53307:3306"]
     environment:
       MARIADB_ROOT_PASSWORD: xenon
       MARIADB_USER: xenon
@@ -82,7 +82,7 @@ services:
   mssql:
     image: mcr.microsoft.com/mssql/server:2022-latest
     platform: linux/amd64
-    ports: ["51433:1433"]
+    ports: ["127.0.0.1:51433:1433"]
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: Xenon-fleet-1
@@ -113,7 +113,7 @@ services:
               cat /etc/ssh/sshd_config; } > /tmp/sshd_config \
          && mv /tmp/sshd_config /etc/ssh/sshd_config
         CMD ["/usr/sbin/sshd", "-D", "-e"]
-    ports: ["52222:22"]
+    ports: ["127.0.0.1:52222:22"]
     volumes:
       - ./ssh/id_ed25519.pub:/etc/ssh/keys/xenon.pub:ro
 

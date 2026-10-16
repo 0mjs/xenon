@@ -8,6 +8,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+# A release is built from exactly what's committed (the commit it's tagged at),
+# with the locked dependencies and the pinned toolchain (rust-toolchain.toml).
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  echo "commit or stash your changes first: a release is built from a commit" >&2
+  exit 1
+fi
+echo "commit $(git rev-parse --short HEAD), $(rustc --version)"
 out=target/xcode
 archive=$out/Xenon.xcarchive
 rm -rf "$archive" "$out/notarized"

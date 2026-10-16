@@ -126,7 +126,8 @@ filling the screen, and double-clicking the title bar returns it to its window s
 
 ## Build from source
 
-Needs macOS with Xcode (for Metal) and Rust 1.85+.
+Needs macOS with Xcode (for Metal) and Rust; `rust-toolchain.toml` pins the version (rustup
+installs it on first build).
 
 ```sh
 cargo run -p xenon                     # empty window
