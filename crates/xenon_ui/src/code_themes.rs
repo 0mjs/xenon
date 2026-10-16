@@ -6,9 +6,9 @@ use crate::theme::Mode;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CodeTheme {
-    #[default]
     Xenon,
     One,
+    #[default]
     GitHub,
     Solarized,
     Catppuccin,

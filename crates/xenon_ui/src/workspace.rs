@@ -478,6 +478,8 @@ pub(crate) struct Tab {
     /// Rows as a grid, as records, or as JSON.
     pub(crate) view: crate::views::ResultView,
     pub(crate) json: Option<crate::views::JsonView>,
+    /// The JSON view on one line per row instead of laid out.
+    pub(crate) json_compact: bool,
     /// Set when the production time limit stopped the running query.
     timed_out: Option<std::time::Duration>,
     /// The last SQL run here and where it began in the editor, for "Fetch all".
@@ -631,6 +633,8 @@ pub struct Workspace {
     /// When the side panel last opened or closed, to slide it.
     side_panel_since: Option<std::time::Instant>,
     show_inspector: bool,
+    /// When the inspector last opened or closed, to slide it.
+    inspector_since: Option<std::time::Instant>,
     pub(crate) _subscriptions: Vec<Subscription>,
     /// The Saved panel: queries matching its filter.
     pub(crate) saved_queries: Vec<xenon_store::SavedQuery>,
@@ -768,6 +772,7 @@ impl Workspace {
             titlebar_pressed: false,
             side_panel_since: None,
             show_inspector: true,
+            inspector_since: None,
             _subscriptions: vec![
                 appearance,
                 filter_changes,
@@ -918,6 +923,7 @@ impl Workspace {
             shown_set: 0,
             view: Default::default(),
             json: None,
+            json_compact: false,
             columns: None,
             last_run: None,
             saved_query: None,
@@ -2820,6 +2826,7 @@ impl Workspace {
             let mut state = EditorState::new(window, cx)
                 .language("sql")
                 .line_number(false)
+                .soft_wrap(false)
                 .searchable(true)
                 .default_value(text.clone());
             state.set_readonly(true, cx);
@@ -3142,6 +3149,12 @@ impl Workspace {
             .unwrap_or(0);
         tab.selection = Some(Selection::cell(ix, shown_at));
         tab.flash = None;
+        // Values too big for a cell (long text, JSON, a choice) are edited in
+        // the inspector: show it.
+        let in_place = matches!(
+            kind,
+            crate::value_editor::ValueKind::Line | crate::value_editor::ValueKind::Date(_)
+        );
         tab.editing = Some(CellEditor {
             row,
             column,
@@ -3150,10 +3163,13 @@ impl Workspace {
             area,
             _enter: enter,
         });
+        if !in_place {
+            self.set_inspector(true);
+        }
         cx.notify();
     }
 
-    /// Stage the edit bar's value (or NULL) and close it.
+    /// Stage the edited value (or NULL) and finish editing.
     pub(crate) fn commit_edit(
         &mut self,
         set_null: bool,
@@ -4102,23 +4118,24 @@ impl Workspace {
 
     /// How far open the side panel is, from 0 to 1, easing as it slides.
     fn side_panel_open(&self, window: &Window) -> f32 {
-        let progress = self.side_panel_since.map_or(1., |since| {
-            (since.elapsed().as_secs_f32() / SIDE_PANEL_SLIDE).min(1.)
-        });
-        if progress < 1. {
-            window.request_animation_frame();
-        }
-        let eased = 1. - (1. - progress).powi(3);
-        if self.show_side_panel {
-            eased
-        } else {
-            1. - eased
-        }
+        slide(self.side_panel_since, self.show_side_panel, window)
     }
 
     fn toggle_inspector(&mut self, _: &ToggleInspector, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_inspector = !self.show_inspector;
+        self.set_inspector(!self.show_inspector);
         cx.notify();
+    }
+
+    pub(crate) fn set_inspector(&mut self, show: bool) {
+        if show != self.show_inspector {
+            self.show_inspector = show;
+            self.inspector_since = Some(std::time::Instant::now());
+        }
+    }
+
+    /// How far open the inspector is, from 0 to 1, easing as it slides.
+    fn inspector_open(&self, window: &Window) -> f32 {
+        slide(self.inspector_since, self.show_inspector, window)
     }
 }
 
@@ -4168,8 +4185,9 @@ impl Render for Workspace {
         let fits = f32::from(window.viewport_size().width) - beside - MIN_RESULTS_WIDTH;
         self.inspector_shown
             .set(self.inspector_width.min(fits).max(MIN_INSPECTOR_WIDTH));
-        let inspector = if self.show_inspector && self.active_session().is_some() {
-            self.inspector_shown.get()
+        let inspector_open = self.inspector_open(window);
+        let inspector = if self.active_session().is_some() {
+            self.inspector_shown.get() * inspector_open
         } else {
             0.
         };
@@ -4215,8 +4233,23 @@ impl Render for Workspace {
                     .flex_row()
                     .child(self.render_center(&theme, cx))
                     .when(
-                        self.show_inspector && self.active_session().is_some(),
-                        |el| el.child(self.render_inspector(&theme, cx)),
+                        inspector_open > 0. && self.active_session().is_some(),
+                        |el| {
+                            let panel = self.render_inspector(&theme, cx);
+                            el.child(if inspector_open < 1. {
+                                // Sliding: clip it at full width as the space grows.
+                                div()
+                                    .w(px(self.inspector_shown.get() * inspector_open))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .overflow_hidden()
+                                    .child(panel)
+                                    .into_any_element()
+                            } else {
+                                panel.into_any_element()
+                            })
+                        },
                     ),
             );
 
@@ -4861,7 +4894,6 @@ impl Workspace {
                         None => el
                             .child(self.render_results_bar(theme, cx))
                             .children(self.render_result_sets(theme, cx))
-                            .children(self.render_edit_bar(theme, cx))
                             .child(
                                 div()
                                     .flex_1()
@@ -5224,21 +5256,17 @@ impl Workspace {
         cx.notify();
     }
 
-    fn render_edit_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The open cell edit, as its inspector field shows it: the value's own
+    /// editor (a text area, choices, true / false), or, for one typed into its
+    /// cell, the buttons that finish it. Nothing above the grid moves.
+    fn render_field_editor(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use crate::value_editor::ValueKind;
-        let tab = self.active_tab();
-        let editor = tab.editing.as_ref()?;
-        let grid = tab.grid.as_ref()?;
-        let column = grid.data.columns.get(editor.column)?.name.clone();
-        let small = |button: gpui::Stateful<gpui::Div>| button.h(px(26.)).px(px(10.));
-        let label = |text: String| {
-            div()
-                .max_w(px(180.))
-                .truncate()
-                .font_family(crate::theme::mono_font())
-                .text_size(crate::theme::text(11.))
-                .text_color(theme.acc)
-                .child(text)
+        let editor = self.active_tab().editing.as_ref()?;
+        let small = |button: gpui::Stateful<gpui::Div>| {
+            button
+                .h(px(24.))
+                .px(px(9.))
+                .text_size(crate::theme::text(11.5))
         };
         let set_null = small(widgets::button(
             theme,
@@ -5255,6 +5283,7 @@ impl Workspace {
             ButtonKind::Ghost,
             true,
         ))
+        .tooltip(widgets::tooltip("Leave it as it was", "esc"))
         .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx)));
         let done = |keys: &'static str| {
             small(widgets::button(
@@ -5264,11 +5293,40 @@ impl Workspace {
                 ButtonKind::Primary,
                 true,
             ))
-            .pl(px(10.))
+            .pl(px(9.))
             .child(kbd_on_accent(theme, keys))
             .on_click(cx.listener(|this, _, window, cx| this.commit_edit(false, window, cx)))
         };
-        let bar = div()
+        let buttons = |done_keys: Option<&'static str>| {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(4.))
+                .child(set_null)
+                .child(cancel)
+                .child(div().flex_1())
+                .children(done_keys.map(done))
+        };
+        let choice =
+            |id: (&'static str, usize), shown: SharedString, stored: String, on: bool| {
+                small(widgets::button(
+                    theme,
+                    id,
+                    shown,
+                    if on {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Secondary
+                    },
+                    true,
+                ))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.commit_text(stored.clone(), window, cx)
+                }))
+            };
+        let current = editor.input.read(cx).value().to_string();
+        let body = div()
             .key_context("CellEditor")
             .on_action(
                 cx.listener(|this, _: &gpui_component::input::Escape, window, cx| {
@@ -5278,133 +5336,81 @@ impl Workspace {
             .on_action(cx.listener(|this, _: &crate::CommitCell, window, cx| {
                 this.commit_edit(false, window, cx)
             }))
-            .flex_none()
-            .border_b_1()
-            .border_color(theme.line)
-            .bg(theme.s1);
-        let row = || {
-            div()
-                .h(px(44.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(8.))
-        };
-
-        let element = match &editor.kind {
-            // A text area: long text, or JSON (checked when you press Done).
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .font_family(crate::theme::ui_font());
+        let body = match &editor.kind {
+            // Long text, or JSON (checked when you press Done).
             ValueKind::Text | ValueKind::Json => {
                 let area = editor.area.as_ref()?;
-                let json = editor.kind == ValueKind::Json;
-                bar.flex()
-                    .flex_col()
-                    .child(
-                        row()
-                            .child(label(column))
-                            .child(
-                                div()
-                                    .text_size(crate::theme::text(11.))
-                                    .text_color(theme.t3)
-                                    .child(if json { "JSON" } else { "Text" }),
-                            )
-                            .child(div().flex_1())
-                            .child(set_null)
-                            .child(cancel)
-                            .child(done("⌘↵")),
-                    )
-                    .child(
-                        div().h(px(200.)).mx(px(8.)).mb(px(8.)).child(
+                body.child(
+                    div()
+                        .h(px(220.))
+                        .rounded(px(widgets::RADIUS_CONTROL))
+                        .border_1()
+                        .border_color(theme.acc)
+                        .bg(theme.field)
+                        .p(px(4.))
+                        .child(
                             Editor::new(area)
                                 .h_full()
                                 .font_family(crate::theme::mono_font())
                                 .text_size(crate::theme::text(12.)),
                         ),
-                    )
-            }
-            // A pick from the values the column allows.
-            ValueKind::Choice(options) => {
-                let current = editor.input.read(cx).value().to_string();
-                bar.child(
-                    row()
-                        .child(label(column))
-                        .child(div().flex_1().flex().flex_wrap().gap(px(4.)).children(
-                            options.iter().enumerate().map(|(ix, option)| {
-                                let pick = option.clone();
-                                small(widgets::button(
-                                    theme,
-                                    ("cell-option", ix),
-                                    option.clone(),
-                                    if *option == current {
-                                        ButtonKind::Primary
-                                    } else {
-                                        ButtonKind::Secondary
-                                    },
-                                    true,
-                                ))
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        this.commit_text(pick.clone(), window, cx)
-                                    },
-                                ))
-                            }),
-                        ))
-                        .child(set_null)
-                        .child(cancel),
                 )
+                .child(buttons(Some("⌘↵")))
             }
+            ValueKind::Choice(options) => body
+                .child(div().flex().flex_wrap().gap(px(4.)).children(
+                    options.iter().enumerate().map(|(ix, option)| {
+                        choice(
+                            ("cell-option", ix),
+                            option.clone().into(),
+                            option.clone(),
+                            *option == current,
+                        )
+                    }),
+                ))
+                .child(buttons(None)),
             ValueKind::Bool { numeric } => {
-                let current = editor.input.read(cx).value().to_string();
-                let choice = |id: &'static str, shown: &'static str, stored: &'static str| {
-                    let on = current == stored || current == shown;
-                    small(widgets::button(
-                        theme,
-                        id,
-                        shown,
-                        if on {
-                            ButtonKind::Primary
-                        } else {
-                            ButtonKind::Secondary
-                        },
-                        true,
-                    ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.commit_text(stored.to_string(), window, cx)
-                    }))
-                };
                 let (yes, no) = if *numeric {
                     ("1", "0")
                 } else {
                     ("true", "false")
                 };
-                bar.child(
-                    row()
-                        .child(label(column))
-                        .child(choice("cell-true", "true", yes))
-                        .child(choice("cell-false", "false", no))
-                        .child(div().flex_1())
-                        .child(set_null)
-                        .child(cancel),
+                body.child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .child(choice(
+                            ("cell-true", 0),
+                            "true".into(),
+                            yes.into(),
+                            current == yes || current == "true",
+                        ))
+                        .child(choice(
+                            ("cell-false", 0),
+                            "false".into(),
+                            no.into(),
+                            current == no || current == "false",
+                        )),
                 )
+                .child(buttons(None))
             }
-            // A line, with how dates are written and a Now button.
+            // Typed into its cell; here, how it's written (dates) and the buttons.
             ValueKind::Line | ValueKind::Date(_) => {
                 let date = match &editor.kind {
                     ValueKind::Date(kind) => Some(*kind),
                     _ => None,
                 };
-                // The value is typed into its cell; the bar keeps the buttons.
-                bar.child(
-                    row()
-                        .child(
-                            div()
-                                .text_size(crate::theme::text(11.5))
-                                .text_color(theme.t3)
-                                .child("Editing"),
-                        )
-                        .child(label(column))
-                        .child(div().flex_1())
-                        .when_some(date, |el, kind| {
-                            el.child(
+                body.when_some(date, |el, kind| {
+                    el.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
                                 div()
                                     .font_family(crate::theme::mono_font())
                                     .text_size(crate::theme::text(10.5))
@@ -5424,15 +5430,13 @@ impl Workspace {
                                         this.fill_cell(kind.now(), window, cx)
                                     },
                                 )),
-                            )
-                        })
-                        .child(set_null)
-                        .child(cancel)
-                        .child(done("↵")),
-                )
+                            ),
+                    )
+                })
+                .child(buttons(Some("↵")))
             }
         };
-        Some(element.into_any_element())
+        Some(body.into_any_element())
     }
 
     /// The cell being typed into in place (single-line values): its display row
@@ -5850,7 +5854,7 @@ impl Workspace {
             }
             match tab.view {
                 crate::views::ResultView::Records => return self.render_records(grid, theme),
-                crate::views::ResultView::Json => return self.render_json(theme),
+                crate::views::ResultView::Json => return self.render_json(theme, cx),
                 crate::views::ResultView::Grid => {}
             }
             let widths = results::layout(&grid.natural, &tab.manual_widths(grid));
@@ -6178,6 +6182,20 @@ impl Workspace {
             RowRef::Existing(_) => format!("Row {}", ix + 1),
         };
         panel = panel.child(panel_label(theme, &label));
+        // The cell being edited is edited here, in its field (or typed into its
+        // cell, with the buttons here).
+        let editing = tab.editing.as_ref().map(|e| {
+            (
+                e.column,
+                e.row,
+                matches!(
+                    e.kind,
+                    crate::value_editor::ValueKind::Line | crate::value_editor::ValueKind::Date(_)
+                ),
+                e.input.read(cx).value().to_string(),
+            )
+        });
+        let mut field_editor = self.render_field_editor(theme, cx);
         let fields = div()
             .id("inspector-fields")
             .flex_1()
@@ -6192,6 +6210,9 @@ impl Workspace {
                         .filter(|_| matches!(row_ref, RowRef::Existing(_)))
                         .filter(|_| matches!(&value, Some(v) if !v.is_null()))
                         .map(|key| key.ref_table.clone());
+                    let here = editing
+                        .as_ref()
+                        .filter(|(c, r, _, _)| *c == col && *r == row_ref);
                     div()
                         .px(px(12.))
                         .py(px(8.))
@@ -6200,6 +6221,9 @@ impl Workspace {
                         .gap(px(3.))
                         .border_b_1()
                         .border_color(theme.line_2)
+                        .when(here.is_some(), |el| {
+                            el.bg(theme.acc_wash).border_l_2().border_color(theme.acc)
+                        })
                         .font_family(crate::theme::mono_font())
                         .text_size(crate::theme::text(11.5))
                         .child(
@@ -6234,21 +6258,37 @@ impl Workspace {
                                     )
                                 }),
                         )
-                        .child(
-                            match value {
-                                None => div().italic().text_color(theme.t3).child("default"),
-                                Some(Value::Null) => {
-                                    div().italic().text_color(theme.t3).child("NULL")
-                                }
-                                Some(value) => {
-                                    let text = value.display();
-                                    let shown =
-                                        pretty_json(&text).unwrap_or_else(|| text.into_owned());
-                                    div().child(SharedString::from(shown))
-                                }
+                        .children(here.map(|(_, _, inline, typed)| {
+                            let mut el = div().flex().flex_col().gap(px(6.));
+                            if *inline {
+                                // What's being typed in the cell, as it goes.
+                                el = el.child(div().text_color(theme.text).child(
+                                    if typed.is_empty() {
+                                        SharedString::new_static("(empty)")
+                                    } else {
+                                        SharedString::from(typed.clone())
+                                    },
+                                ));
                             }
-                            .when(edited, |el| el.text_color(theme.warn)),
-                        )
+                            el.children(field_editor.take())
+                        }))
+                        .when(here.is_none(), |el| {
+                            el.child(
+                                match value {
+                                    None => div().italic().text_color(theme.t3).child("default"),
+                                    Some(Value::Null) => {
+                                        div().italic().text_color(theme.t3).child("NULL")
+                                    }
+                                    Some(value) => {
+                                        let text = value.display();
+                                        let shown =
+                                            pretty_json(&text).unwrap_or_else(|| text.into_owned());
+                                        div().child(SharedString::from(shown))
+                                    }
+                                }
+                                .when(edited, |el| el.text_color(theme.warn)),
+                            )
+                        })
                 },
             ));
         panel.child(fields)
@@ -6541,4 +6581,17 @@ pub(crate) fn icon_button(
                 .size(px(14.))
                 .text_color(if active { theme.text } else { theme.t2 }),
         )
+}
+
+/// How far open a sliding panel is, from 0 to 1: eased, over
+/// [`SIDE_PANEL_SLIDE`] from `since`, towards `open`.
+fn slide(since: Option<std::time::Instant>, open: bool, window: &Window) -> f32 {
+    let progress = since.map_or(1., |since| {
+        (since.elapsed().as_secs_f32() / SIDE_PANEL_SLIDE).min(1.)
+    });
+    if progress < 1. {
+        window.request_animation_frame();
+    }
+    let eased = 1. - (1. - progress).powi(3);
+    if open { eased } else { 1. - eased }
 }

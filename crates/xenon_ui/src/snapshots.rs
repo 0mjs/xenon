@@ -1189,7 +1189,7 @@ fn snapshots() {
         shot.save(&format!("16-amber-{suffix}"));
         shot.act(|w, window, cx| {
             let prefs = crate::settings::Prefs {
-                accent: crate::theme::Accent::Xenon,
+                accent: crate::theme::Accent::default(),
                 ..w.prefs
             };
             w.set_prefs(prefs, window, cx)

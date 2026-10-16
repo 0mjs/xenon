@@ -121,7 +121,7 @@ impl Default for Prefs {
             code_font: CodeFont::default(),
             code_theme: Default::default(),
             zoom: 1.,
-            frosted: true,
+            frosted: false,
             row_limit: 100_000,
             browse_limit: 1_000,
             editor_font: 12.5,

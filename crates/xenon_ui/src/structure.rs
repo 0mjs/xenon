@@ -286,7 +286,11 @@ pub fn render(view: View<'_>, theme: &Theme) -> AnyElement {
                 .child(match &view.editor {
                     // Highlighted, selectable, searchable: a read-only editor.
                     Some(editor) => div()
-                        .h(px((definition.lines().count().min(40) as f32) * 18. + 20.))
+                        // Sized to the statement, up to a point; past it, it scrolls
+                        // inside (lines don't wrap, so the count is exact).
+                        .h(crate::theme::text(
+                            (definition.lines().count().min(20) as f32) * 19. + 24.,
+                        ))
                         .py(px(6.))
                         .rounded(px(6.))
                         .bg(theme.s1)

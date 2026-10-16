@@ -776,7 +776,7 @@ fn render_row(
                         .size_full()
                         .flex()
                         .items_center()
-                        .px(px(6.))
+                        .px(px(2.))
                         .rounded(px(3.))
                         .border_1()
                         .border_color(theme.acc)

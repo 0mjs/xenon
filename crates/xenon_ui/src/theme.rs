@@ -7,10 +7,10 @@ use gpui::{App, Global, Rgba, WindowAppearance, rgb, rgba};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UiFont {
     System,
-    #[default]
     Archivo,
     Inter,
     Geist,
+    #[default]
     IbmPlexSans,
 }
 
@@ -126,7 +126,7 @@ struct Type {
 }
 
 static TYPE: std::sync::RwLock<Type> = std::sync::RwLock::new(Type {
-    ui: UiFont::Archivo,
+    ui: UiFont::IbmPlexSans,
     code: CodeFont::IbmPlexMono,
     zoom: 1.,
     editor: 12.5,
@@ -150,7 +150,7 @@ pub fn set_type(ui: UiFont, code: CodeFont, zoom: f32, editor: f32) {
 }
 
 static CODE_THEME: std::sync::RwLock<crate::code_themes::CodeTheme> =
-    std::sync::RwLock::new(crate::code_themes::CodeTheme::Xenon);
+    std::sync::RwLock::new(crate::code_themes::CodeTheme::GitHub);
 
 /// The code theme; [`apply`] then colours the editor with it.
 pub fn set_code_theme(theme: crate::code_themes::CodeTheme) {
@@ -191,13 +191,13 @@ impl Mode {
     }
 }
 
-/// The colour for focus and the main action. Picked in Settings; Xenon by default.
+/// The colour for focus and the main action. Picked in Settings; Amber by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Accent {
     Steel,
     Graphite,
-    #[default]
     Xenon,
+    #[default]
     Amber,
     Teal,
     Ember,

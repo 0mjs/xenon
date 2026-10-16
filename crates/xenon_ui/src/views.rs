@@ -40,7 +40,7 @@ const JSON_ROWS: usize = 5_000;
 
 /// The JSON view's editor, and which rows (and order) it shows.
 pub(crate) struct JsonView {
-    key: (usize, usize),
+    key: (usize, usize, bool),
     pub editor: Entity<EditorState>,
     pub truncated: bool,
 }
@@ -50,6 +50,67 @@ fn key(grid: &Grid) -> (usize, usize) {
         Arc::as_ptr(&grid.data) as usize,
         Arc::as_ptr(&grid.order()) as usize,
     )
+}
+
+/// JSON laid out with two-space indents, one value per line, without parsing
+/// it: numbers stay exactly as written (a `numeric` with 30 digits, say).
+pub(crate) fn pretty(json: &str) -> String {
+    let mut out = String::with_capacity(json.len() * 2);
+    let mut depth = 0usize;
+    let (mut in_string, mut escaped) = (false, false);
+    let mut chars = json.chars().peekable();
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.push_str(&"  ".repeat(depth));
+    };
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                // Empty stays on one line: `{}`, `[]`.
+                let close = if c == '{' { '}' } else { ']' };
+                while chars.peek().is_some_and(|n| n.is_whitespace()) {
+                    chars.next();
+                }
+                if chars.peek() == Some(&close) {
+                    chars.next();
+                    out.push(c);
+                    out.push(close);
+                } else {
+                    out.push(c);
+                    depth += 1;
+                    newline(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    out.push('\n');
+    out
 }
 
 /// `grid` as JSON, at most [`JSON_ROWS`] rows, in the order it's shown.
@@ -84,11 +145,17 @@ impl Workspace {
         let Some(grid) = &tab.grid else {
             return;
         };
-        let key = key(grid);
+        let (data, order) = key(grid);
+        let key = (data, order, tab.json_compact);
         if tab.json.as_ref().is_some_and(|j| j.key == key) {
             return;
         }
         let (text, truncated) = json(grid);
+        let text = if tab.json_compact {
+            text
+        } else {
+            pretty(&text)
+        };
         let editor = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
                 .language("json")
@@ -200,29 +267,55 @@ impl Workspace {
         .into_any_element()
     }
 
-    pub(crate) fn render_json(&self, theme: &Theme) -> AnyElement {
-        let Some(json) = &self.active_tab().json else {
+    pub(crate) fn render_json(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let tab = self.active_tab();
+        let Some(json) = &tab.json else {
             return div().into_any_element();
         };
+        let compact = tab.json_compact;
+        let this = cx.entity().downgrade();
         div()
             .size_full()
             .flex()
             .flex_col()
-            .when(json.truncated, |el| {
-                el.child(
-                    div()
-                        .px(px(14.))
-                        .py(px(6.))
-                        .text_size(crate::theme::text(11.))
-                        .text_color(theme.t3)
-                        .border_b_1()
-                        .border_color(theme.line_2)
-                        .child(format!(
-                            "The first {} rows. Export writes them all.",
-                            widgets::group_digits(JSON_ROWS)
-                        )),
-                )
-            })
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .py(px(5.))
+                    .border_b_1()
+                    .border_color(theme.line_2)
+                    .child(
+                        widgets::segmented(
+                            theme,
+                            "json-layout",
+                            vec![("Pretty", !compact), ("Compact", compact)],
+                            move |ix, _, cx| {
+                                let compact = *ix == 1;
+                                this.update(cx, |this, cx| {
+                                    this.tabs[this.active].json_compact = compact;
+                                    cx.notify();
+                                })
+                                .ok();
+                            },
+                        )
+                        .w(px(150.)),
+                    )
+                    .when(json.truncated, |el| {
+                        el.child(
+                            div()
+                                .text_size(crate::theme::text(11.))
+                                .text_color(theme.t3)
+                                .child(format!(
+                                    "The first {} rows. Export writes them all.",
+                                    widgets::group_digits(JSON_ROWS)
+                                )),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .flex_1()
@@ -233,5 +326,26 @@ impl Workspace {
                     .child(Editor::new(&json.editor).h_full().appearance(false)),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pretty_json_keeps_every_character_of_every_value() {
+        let compact = r#"[{"id": 1, "total": 12345678901234567890.123456789, "note": "a, {b}: [c]", "tags": [], "meta": {}},
+{"id": 2, "total": null, "note": "say \"hi\"", "tags": ["x", "y"], "meta": {"k": true}}]"#;
+        let laid_out = pretty(compact);
+        assert!(laid_out.contains("\"total\": 12345678901234567890.123456789,"));
+        assert!(laid_out.contains("\"note\": \"a, {b}: [c]\","));
+        assert!(laid_out.contains("\"tags\": [],"));
+        assert!(laid_out.contains("\"note\": \"say \\\"hi\\\"\","));
+        assert!(laid_out.starts_with("[\n  {\n    \"id\": 1,"));
+        // Still the same JSON.
+        let a: serde_json::Value = serde_json::from_str(compact).unwrap();
+        let b: serde_json::Value = serde_json::from_str(&laid_out).unwrap();
+        assert_eq!(a, b);
     }
 }
