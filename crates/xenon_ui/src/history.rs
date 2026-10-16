@@ -35,9 +35,10 @@ impl Workspace {
         .detach();
     }
 
-    fn use_history_entry(
+    pub(crate) fn use_history_entry(
         &mut self,
         sql: String,
+        connection: &str,
         run: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -47,7 +48,18 @@ impl Workspace {
             editor.set_value(sql, window, cx);
             editor.focus(window, cx);
         });
-        if run {
+        // Run only where it ran before: the panel can still show a closed
+        // tab's connection's history for a moment.
+        let here = self
+            .active_session()
+            .is_some_and(|s| s.conn.id() == connection);
+        if run && !here {
+            self.flash(
+                "That ran on another connection: loaded here, not run.",
+                true,
+                cx,
+            );
+        } else if run {
             self.run(RunScope::All, window, cx);
         }
     }
@@ -111,6 +123,7 @@ impl Workspace {
             (None, None) => "".into(),
         };
         let sql = entry.sql.clone();
+        let connection = entry.connection.clone();
 
         div()
             .id(SharedString::from(format!("history-{}", entry.id)))
@@ -132,7 +145,13 @@ impl Workspace {
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     // Click loads the query; double-click runs it.
-                    this.use_history_entry(sql.clone(), event.click_count() >= 2, window, cx);
+                    this.use_history_entry(
+                        sql.clone(),
+                        &connection,
+                        event.click_count() >= 2,
+                        window,
+                        cx,
+                    );
                 }),
             )
             .child(

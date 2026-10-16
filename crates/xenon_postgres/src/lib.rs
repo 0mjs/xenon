@@ -484,6 +484,26 @@ impl Connection for PostgresConnection {
             }
             .into());
         }
+        // The server keeps the session read-only, but a `do` block or
+        // `set_config` can switch that off and a `commit` start a writable
+        // transaction, all before Xenon could check: refuse what's recognised as
+        // a write here too, and scripts that end transactions part-way.
+        if self.read_only {
+            let refused = xenon_driver::sql::assess(sql)
+                .map(|(_, what)| what)
+                .or_else(|| {
+                    (xenon_driver::sql::several_statements(sql)
+                        && xenon_driver::sql::controls_transaction(sql))
+                    .then(|| "a script that ends transactions part-way".to_string())
+                });
+            if let Some(what) = refused {
+                return Err(QueryError {
+                    message: format!("This is a read-only connection, so {what} isn't allowed."),
+                    position: None,
+                }
+                .into());
+            }
+        }
         let result = runtime().block_on(self.run(sql, row_limit, progress));
         if self.read_only {
             // However it was done (a `do` block building the statement, say),
@@ -1122,23 +1142,32 @@ mod tests {
             .execute("create table xenon_ro_probe (x int)", 10)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("25006"), "{err}");
+        assert!(err.contains("read-only connection"), "{err}");
         // And it can't be switched back on from the editor, however it's written.
         for lift in [
             "set default_transaction_read_only = off",
             "begin read write; create table xenon_ro_probe (x int); commit",
             "select set_config('default_transaction_read_only', 'off', false)",
-            // Built at run time, so no check of the text can see it: caught after.
+            // Built at run time, so no check of the text can see it.
             "do $$ begin execute 'set default_transaction_' || 'read_only = off'; end $$",
+            "select set_config(concat('default_transaction', '_read_only'), 'off', false); \
+             commit; select 1",
+            "do $$ begin execute 'set default_transaction_' || 'read_only = off'; commit; \
+             execute 'create table xenon_ro_probe (x int)'; end $$",
         ] {
             let err = db.execute(lift, 10).unwrap_err().to_string();
             assert!(err.contains("read-only connection"), "{lift}: {err}");
         }
-        let err = db
-            .execute("create table xenon_ro_probe (x int)", 10)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("25006"), "still read-only: {err}");
+        // The server still keeps it read-only.
+        let mode = match db
+            .execute("show default_transaction_read_only", 1)
+            .unwrap()
+            .outcome
+        {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(mode, Value::Text("on".into()), "no longer read-only");
     }
 
     #[test]

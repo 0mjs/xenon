@@ -81,6 +81,16 @@ impl Shot {
         self.cx.run_until_parked();
     }
 
+    /// Press `keys` (`"cmd-enter"`) in whatever has focus, as a user would.
+    pub(crate) fn keys(&mut self, keys: &str) {
+        self.cx
+            .update_window(self.window, |_, window, cx| {
+                window.dispatch_keystroke(gpui::Keystroke::parse(keys).unwrap(), cx);
+            })
+            .expect("update window");
+        self.cx.run_until_parked();
+    }
+
     /// Let background work and timers run until `done`, for up to `seconds`.
     pub(crate) fn settle(&mut self, seconds: u64, done: impl Fn(&Workspace) -> bool) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);

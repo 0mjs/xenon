@@ -163,7 +163,7 @@ pub(crate) struct Profile {
 }
 
 impl Profile {
-    fn from_saved(saved: &SavedConnection) -> Self {
+    pub(crate) fn from_saved(saved: &SavedConnection) -> Self {
         let target = match &saved.target {
             Target::Sqlite { path } => RequestTarget::Sqlite(path.clone()),
             Target::Server {
@@ -1065,12 +1065,17 @@ impl Workspace {
         {
             cancel.cancel();
         }
+        let showing = self.active_tab().session;
         let session = self.tabs.remove(index).session;
         if self.tabs.is_empty() {
             // There's always one tab; closing the last gives a clean "Query 1".
             self.add_tab(None, session, window, cx);
         } else if self.active >= self.tabs.len() || index < self.active {
             self.active = self.active.saturating_sub(1).min(self.tabs.len() - 1);
+        }
+        // History follows the connection now in front.
+        if self.active_tab().session != showing {
+            self.reload_history(cx);
         }
         self.focus_editor(window, cx);
         cx.notify();
@@ -1083,6 +1088,10 @@ impl Workspace {
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        // Typed inside a dialog, it's not for the tab behind it.
+        if self.modal_open() {
+            return;
+        }
         self.close_tab_at(self.active, window, cx);
     }
 
@@ -1263,6 +1272,44 @@ impl Workspace {
                             })
                             .map(|s| s.id)
                         {
+                            this.attach(id, true, window, cx);
+                            return;
+                        }
+                        // The same saved connection, edited while open (marked
+                        // Production, made read-only, renamed): its open session
+                        // takes the new settings now, not at the next reconnect.
+                        if let Some(saved) = saved_id
+                            && let Some(index) = this
+                                .sessions
+                                .iter()
+                                .position(|s| s.saved_id == Some(saved) && s.conn.id() == conn.id())
+                        {
+                            let busy = this.sessions[index].in_transaction
+                                || this.tabs.iter().any(|t| {
+                                    t.session == Some(this.sessions[index].id)
+                                        && (matches!(t.query, Query::Running { .. }) || t.saving)
+                                });
+                            let session = &mut this.sessions[index];
+                            session.name = profile.name.clone();
+                            session.environment = profile.environment;
+                            if busy {
+                                // Swapping the connection now would end what's
+                                // running or roll back the open transaction.
+                                if session.read_only != profile.read_only {
+                                    this.notice = Some(
+                                        "Read-only applies once the open transaction or running \
+                                         query ends: disconnect and connect again then."
+                                            .into(),
+                                    );
+                                }
+                            } else {
+                                // The new connection carries the settings the
+                                // server enforces (read-only); use it.
+                                session.read_only = profile.read_only;
+                                session.conn = conn;
+                                session.profile = profile;
+                            }
+                            let id = this.sessions[index].id;
                             this.attach(id, true, window, cx);
                             return;
                         }
@@ -1470,6 +1517,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Typed inside a dialog, it's not for the tab behind it.
+        if self.modal_open() {
+            return;
+        }
         if let Some(id) = self.active_tab().session {
             self.close_session(id, window, cx);
         }
@@ -1609,32 +1660,76 @@ impl Workspace {
 
     /// Save edits to a connection that's already open. A new name applies at once;
     /// anything else waits until it reconnects.
-    fn update_open(&mut self, session_id: usize, profile: Profile, cx: &mut Context<Self>) {
+    /// A saved connection edited while it's open. Its name and environment
+    /// (Production's prompts) apply at once. Read-only, or a new address, takes
+    /// a new connection (the server keeps a session read-only): opened now when
+    /// nothing is running and no transaction is open, else at the next reconnect.
+    pub(crate) fn update_open(
+        &mut self,
+        session_id: usize,
+        profile: Profile,
+        cx: &mut Context<Self>,
+    ) {
         let reconnect = self
             .saved
             .iter()
             .find(|saved| Some(saved.id) == profile.saved_id)
             .is_none_or(|saved| {
-                saved.target != profile.saved_target()
-                    || saved.environment != profile.environment
-                    || saved.read_only != profile.read_only
+                saved.target != profile.saved_target() || saved.read_only != profile.read_only
+            });
+        let busy = self
+            .sessions
+            .iter()
+            .any(|s| s.id == session_id && s.in_transaction)
+            || self.tabs.iter().any(|t| {
+                t.session == Some(session_id)
+                    && (matches!(t.query, Query::Running { .. }) || t.saving)
             });
         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == session_id) {
             session.name = profile.name.clone();
+            session.environment = profile.environment;
         }
         let store = self.store.clone();
-        let task = cx.background_spawn(async move { profile.remember(store.as_deref()) });
+        let swap = reconnect && !busy;
+        let task = cx.background_spawn(async move {
+            profile.remember(store.as_deref())?;
+            // Read-only (or the address) changed: a connection with it.
+            let fresh = if swap {
+                Some(profile.connect().map(|conn| (conn, profile)))
+            } else {
+                None
+            };
+            anyhow::Ok(fresh)
+        });
         cx.spawn(async move |this, cx| {
             let saved = task.await;
             this.update(cx, |this, cx| {
                 this.reload_saved();
                 match saved {
                     Err(err) => this.notice = Some(format!("{err:#}").into()),
-                    Ok(_) if reconnect => {
-                        this.notice =
-                            Some("Saved. Disconnect and reconnect to use the new settings.".into())
+                    Ok(Some(Ok((conn, profile)))) => {
+                        if let Some(session) = this.sessions.iter_mut().find(|s| s.id == session_id)
+                        {
+                            session.read_only = profile.read_only;
+                            session.conn = conn;
+                            session.in_transaction = false;
+                            session.profile = profile;
+                        }
                     }
-                    Ok(_) => {}
+                    Ok(Some(Err(err))) => {
+                        this.notice = Some(
+                            format!("Saved, but couldn't reconnect with the new settings: {err:#}")
+                                .into(),
+                        )
+                    }
+                    Ok(None) if reconnect => {
+                        this.notice = Some(
+                            "Saved. A query or transaction is open: disconnect and reconnect when \
+                             it's done to use the new settings."
+                                .into(),
+                        )
+                    }
+                    Ok(None) => {}
                 }
                 cx.notify();
             })
@@ -1876,18 +1971,30 @@ impl Workspace {
     // ------------------------------------------------------------- running
 
     fn run_statement(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
+        // Typed inside a dialog, it's not for the tab behind it.
+        if self.modal_open() {
+            return;
+        }
         if !self.apply_pending_filter(window, cx) {
             self.run(RunScope::Statement, window, cx);
         }
     }
 
     fn run_all(&mut self, _: &RunAll, window: &mut Window, cx: &mut Context<Self>) {
+        // Typed inside a dialog, it's not for the tab behind it.
+        if self.modal_open() {
+            return;
+        }
         if !self.apply_pending_filter(window, cx) {
             self.run(RunScope::All, window, cx);
         }
     }
 
     fn explain(&mut self, _: &Explain, window: &mut Window, cx: &mut Context<Self>) {
+        // Typed inside a dialog, it's not for the tab behind it.
+        if self.modal_open() {
+            return;
+        }
         self.run(RunScope::Explain, window, cx);
     }
 
@@ -2055,6 +2162,18 @@ impl Workspace {
     /// Why a query can't start on a tab now: a confirmation is waiting, or a
     /// query is already running on its connection (statements on one session
     /// must not interleave, or one's transaction swallows another's).
+    /// A dialog, prompt or the palette is open: keys belong to it.
+    pub(crate) fn modal_open(&self) -> bool {
+        self.confirm.is_some()
+            || self.connect_dialog.is_some()
+            || self.settings.is_some()
+            || self.palette.is_some()
+            || self.parameters.is_some()
+            || self.naming.is_some()
+            || self.import.is_some()
+            || self.switcher
+    }
+
     pub(crate) fn busy(&self, tab_id: usize) -> Option<&'static str> {
         if self.confirm.is_some() {
             return Some("Answer the open prompt first.");
@@ -3431,6 +3550,10 @@ impl Workspace {
     /// Mark the selected rows for deletion (or, if they all are, unmark them);
     /// rows being added are simply removed.
     pub(crate) fn delete_rows(&mut self, _: &DeleteRows, _: &mut Window, cx: &mut Context<Self>) {
+        // Typed inside a dialog, it's not for the tab behind it.
+        if self.modal_open() {
+            return;
+        }
         if let Err(why) = self.edit_target() {
             self.flash(why, false, cx);
             return;
@@ -3538,6 +3661,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Typed inside a dialog, it's not for the tab behind it.
+        if self.modal_open() {
+            return;
+        }
         let tab = self.active_tab();
         if tab.edits.is_empty() && tab.editing.is_none() {
             self.save_query(false, window, cx);

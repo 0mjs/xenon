@@ -295,3 +295,151 @@ fn hardening_a_url_for_a_saved_database_opens_it_as_saved() {
         assert!(target.ssh.is_some(), "the saved tunnel was dropped");
     });
 }
+
+/// W3: shortcuts typed inside a dialog don't act on the tab behind it.
+#[test]
+#[ignore]
+fn hardening_shortcuts_in_a_dialog_stay_in_it() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("w3");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        set_sql(
+            w,
+            "update orders set status = 'from-the-dialog' where id = 4",
+            window,
+            cx,
+        );
+        w.new_server_connection(xenon_store::ServerEngine::Postgres, window, cx);
+        assert!(w.connect_dialog.is_some());
+    });
+    // Typed as keys, from the dialog's focused field.
+    for keys in ["cmd-shift-enter", "cmd-enter", "cmd-w"] {
+        shot.keys(keys);
+    }
+    assert!(shot.settle(5, |w| !w.is_running()));
+    shot.act(|w, _, _| {
+        assert_eq!(w.tabs().len(), 1, "⌘W closed the tab behind the dialog");
+        let status = match w.sessions[0]
+            .conn
+            .execute("select status from orders where id = 4", 1)
+            .unwrap()
+            .outcome
+        {
+            xenon_driver::QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(status, xenon_driver::Value::Text("from-the-dialog".into()));
+    });
+}
+
+/// W5: marking an open connection Production takes effect at once, on the
+/// session already open, not at the next reconnect.
+#[test]
+#[ignore]
+fn hardening_marking_an_open_connection_production_applies_now() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, data, shop) = setup("w5");
+    let store = Store::open(&data.join("xenon.db")).unwrap();
+    let id = store
+        .save_connection(&saved("shop", Environment::Development, &shop))
+        .unwrap();
+    let dev = store
+        .connections()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .unwrap();
+    let mut shot = Shot::new(Mode::Dark, None, &root);
+    shot.act(|w, window, cx| w.connect_to_saved(&dev, window, cx));
+    assert!(shot.settle(10, |w| w.sessions.len() == 1));
+    // Edited in the connection form and saved: now Production.
+    let production = SavedConnection {
+        environment: Environment::Production,
+        name: "shop PRODUCTION".into(),
+        ..dev.clone()
+    };
+    store.save_connection(&production).unwrap();
+    shot.act(|w, _, cx| {
+        let session = w.sessions[0].id;
+        w.update_open(
+            session,
+            crate::workspace::Profile::from_saved(&production),
+            cx,
+        );
+    });
+    assert!(shot.settle(5, |w| {
+        w.active_session()
+            .is_some_and(|s| s.name == "shop PRODUCTION")
+    }));
+    shot.act(|w, window, cx| {
+        assert_eq!(w.sessions.len(), 1, "a second session was opened");
+        let session = w.active_session().unwrap();
+        assert_eq!(session.environment, Environment::Production);
+        assert_eq!(session.name, "shop PRODUCTION");
+        set_sql(w, "delete from orders where id = 1", window, cx);
+        w.run(RunScope::All, window, cx);
+        assert!(
+            w.confirm.is_some(),
+            "a delete ran without the production prompt"
+        );
+        w.confirm = None;
+    });
+    // Made read-only too: with nothing running, the session's connection is
+    // swapped for a read-only one at once.
+    let read_only = SavedConnection {
+        read_only: true,
+        ..production.clone()
+    };
+    store.save_connection(&read_only).unwrap();
+    shot.act(|w, _, cx| {
+        let session = w.sessions[0].id;
+        w.update_open(
+            session,
+            crate::workspace::Profile::from_saved(&read_only),
+            cx,
+        );
+    });
+    assert!(shot.settle(5, |w| w.active_session().is_some_and(|s| s.read_only)));
+    shot.act(|w, _, _| {
+        assert!(
+            w.sessions[0]
+                .conn
+                .execute("delete from orders where id = 1", 1)
+                .is_err(),
+            "the open session still writes"
+        );
+    });
+}
+
+/// W7: a history entry from another connection is loaded, not run, here.
+#[test]
+#[ignore]
+fn hardening_history_runs_only_on_its_own_connection() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("w7");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        w.use_history_entry(
+            "update orders set status = 'from-history' where id = 5".into(),
+            "postgres:someone@elsewhere:5432/prod",
+            true,
+            window,
+            cx,
+        );
+        assert!(!w.is_running(), "ran another connection's statement here");
+    });
+    assert!(shot.settle(3, |w| !w.is_running()));
+    shot.act(|w, _, _| {
+        let status = match w.sessions[0]
+            .conn
+            .execute("select status from orders where id = 5", 1)
+            .unwrap()
+            .outcome
+        {
+            xenon_driver::QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_ne!(status, xenon_driver::Value::Text("from-history".into()));
+    });
+}
