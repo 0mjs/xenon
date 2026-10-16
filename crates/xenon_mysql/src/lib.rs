@@ -445,11 +445,17 @@ impl Connection for MysqlConnection {
         let mut outcome = None;
         let mut earlier = Vec::new();
         let mut cancelled_for_limit = false;
-        while let Some(set) = result.iter() {
+        while let Some(mut set) = result.iter() {
             statements += 1;
             let columns: Vec<mysql::Column> = set.columns().as_ref().to_vec();
             let affected = set.affected_rows();
             if columns.is_empty() {
+                // A statement after the first that failed arrives as an empty
+                // set holding the error: read it, or the error is lost (and a
+                // production script's earlier statements committed).
+                if let Some(Err(err)) = set.next() {
+                    return Err(locate(describe_error(err), sql));
+                }
                 earlier.extend(outcome.replace(QueryOutcome::Affected(affected)));
                 continue;
             }
@@ -1300,6 +1306,15 @@ mod live {
             .unwrap()
             .outcome;
         assert!(matches!(affected, QueryOutcome::Affected(_)));
+
+        // A later statement's error is reported, after a write or after rows,
+        // not lost (a production script would be committed).
+        for script in [
+            "update customers set city = city where id = 1; insert into no_such_table values (1)",
+            "select 1; delete from no_such_table",
+        ] {
+            assert!(conn.execute(script, 10).is_err(), "{script}");
+        }
     }
 
     #[test]

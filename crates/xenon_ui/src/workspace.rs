@@ -2178,6 +2178,18 @@ impl Workspace {
             };
             let result = match (wrap, begun) {
                 (Some(wrap), true) => match result {
+                    // Stopped part-way (⌘., the time limit, closing the tab): a
+                    // script is all or nothing, so what ran is rolled back. A
+                    // read keeps the rows it got.
+                    Ok(done) if done.cancelled => {
+                        let _ = conn.execute("rollback", 1);
+                        match wrap {
+                            Wrap::Atomic(_) => Err(wrap.explain(anyhow::anyhow!(
+                                "Stopped before the end of the script"
+                            ))),
+                            Wrap::ReadOnly(_) => Ok(done),
+                        }
+                    }
                     Ok(done) => conn.execute("commit", 1).map(|_| done),
                     Err(err) => {
                         let _ = conn.execute("rollback", 1);
@@ -2432,9 +2444,15 @@ impl Workspace {
                     self.bench_schedule(cx);
                 }
             }
-            Err(_) if tab.timed_out.is_some() => {
+            Err(err) if tab.timed_out.is_some() => {
                 tab.grid = None;
-                tab.query = Query::Failed(time_limit_note(tab.timed_out).into());
+                let mut note = time_limit_note(tab.timed_out);
+                if err.chain().any(|e| e.to_string() == ATOMIC_ROLLED_BACK) {
+                    note.push_str(
+                        " The script ran as one transaction, so nothing it did was kept.",
+                    );
+                }
+                tab.query = Query::Failed(note.into());
             }
             Err(err) => {
                 tab.grid = None;
@@ -6493,6 +6511,9 @@ fn time_limit_note(limit: Option<std::time::Duration>) -> String {
     )
 }
 
+const ATOMIC_ROLLED_BACK: &str =
+    "The script ran as one transaction (production), so nothing it did was kept";
+
 /// How a production statement is wrapped in a transaction.
 #[derive(Clone, Copy)]
 enum Wrap {
@@ -6512,9 +6533,7 @@ impl Wrap {
     /// The error, with what the wrapping did about it.
     fn explain(self, err: anyhow::Error) -> anyhow::Error {
         match self {
-            Wrap::Atomic(_) => err.context(
-                "The script ran as one transaction (production), so nothing it did was kept",
-            ),
+            Wrap::Atomic(_) => err.context(ATOMIC_ROLLED_BACK),
             Wrap::ReadOnly(_) if refused_in_read_only(&err) => err.context(
                 "Production reads run in a read-only transaction, and this one tried to write, so \
                  the server refused it. To run it anyway, wrap it in begin … commit",

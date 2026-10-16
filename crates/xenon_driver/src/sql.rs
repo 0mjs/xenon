@@ -6,20 +6,122 @@
 
 use std::ops::Range;
 
-/// How to read quotes and comments. Standard SQL (and Postgres, SQL Server,
-/// SQLite, DuckDB) or MySQL's: `#` comments, backslash escapes in strings,
-/// `--` only as a comment when a space follows, and `/*! … */` run as code.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lexing {
-    Standard,
-    Mysql,
+/// How to read quotes and comments. Engines differ, and a safety check has to
+/// read a script the way the server will: where a comment ends decides what's
+/// code. See [`READINGS`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Lexing {
+    /// MySQL's rules: `#` comments, `--` a comment only when whitespace
+    /// follows, and `/*! … */` run as code.
+    mysql: bool,
+    /// A lone `\r` ends a `--` comment too (Postgres, DuckDB).
+    cr_ends_line: bool,
+    /// `/* /* */ */` nests (Postgres, DuckDB, SQL Server; not MySQL or SQLite).
+    nested_comments: bool,
+    /// Where a backslash escapes the next character inside `'…'`.
+    backslash: Backslash,
+    /// `"…"` is a string taking backslash escapes like `'…'` (MySQL without
+    /// `ANSI_QUOTES`); otherwise it quotes a name.
+    double_quote_string: bool,
+    /// `[…]` quotes a name (SQL Server, SQLite).
+    brackets: bool,
+    /// `$tag$ … $tag$` bodies (Postgres, DuckDB).
+    dollar_quotes: bool,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Backslash {
+    Never,
+    /// Only in Postgres `E'…'` strings.
+    EscapeStrings,
+    /// In every string (MySQL by default; Postgres with
+    /// `standard_conforming_strings` off).
+    Always,
+}
+
+/// Standard SQL as Xenon splits and formats it.
+const STANDARD: Lexing = Lexing {
+    mysql: false,
+    cr_ends_line: false,
+    nested_comments: true,
+    backslash: Backslash::EscapeStrings,
+    double_quote_string: false,
+    brackets: false,
+    dollar_quotes: true,
+};
+
+/// MySQL and MariaDB with their default `sql_mode`.
+const MYSQL: Lexing = Lexing {
+    mysql: true,
+    cr_ends_line: false,
+    nested_comments: false,
+    backslash: Backslash::Always,
+    double_quote_string: true,
+    brackets: false,
+    dollar_quotes: false,
+};
+
+const POSTGRES: Lexing = Lexing {
+    cr_ends_line: true,
+    ..STANDARD
+};
+
+const SQL_SERVER: Lexing = Lexing {
+    cr_ends_line: true,
+    backslash: Backslash::Never,
+    brackets: true,
+    dollar_quotes: false,
+    ..STANDARD
+};
+
+const SQLITE: Lexing = Lexing {
+    nested_comments: false,
+    backslash: Backslash::Never,
+    brackets: true,
+    dollar_quotes: false,
+    ..STANDARD
+};
+
+/// Every way an engine Xenon connects to might read a script: Postgres and
+/// DuckDB (also with `standard_conforming_strings` off), SQL Server (whether or
+/// not a lone `\r` ends a line), SQLite, and MySQL with and without
+/// `NO_BACKSLASH_ESCAPES` and `ANSI_QUOTES`. The safety checks read a script
+/// every one of these ways and take the worst, so a write can't hide in a
+/// comment or string that only Xenon thinks is one.
+const READINGS: [Lexing; 10] = [
+    STANDARD,
+    POSTGRES,
+    Lexing {
+        backslash: Backslash::Always,
+        ..POSTGRES
+    },
+    SQL_SERVER,
+    Lexing {
+        cr_ends_line: false,
+        ..SQL_SERVER
+    },
+    SQLITE,
+    MYSQL,
+    Lexing {
+        backslash: Backslash::Never,
+        ..MYSQL
+    },
+    Lexing {
+        double_quote_string: false,
+        ..MYSQL
+    },
+    Lexing {
+        backslash: Backslash::Never,
+        double_quote_string: false,
+        ..MYSQL
+    },
+];
 
 /// Byte ranges of each statement in `sql`, trimmed of surrounding whitespace and
 /// excluding the terminating `;`. Statements containing only comments or
 /// whitespace are dropped.
 pub fn split_statements(sql: &str) -> Vec<Range<usize>> {
-    split_as(sql, Lexing::Standard)
+    split_as(sql, STANDARD)
 }
 
 fn split_as(sql: &str, lexing: Lexing) -> Vec<Range<usize>> {
@@ -36,25 +138,23 @@ fn comment_end(bytes: &[u8], i: usize, lexing: Lexing) -> Option<usize> {
     let line_end = |from: usize| {
         bytes[from..]
             .iter()
-            .position(|&b| b == b'\n')
+            .position(|&b| b == b'\n' || (lexing.cr_ends_line && b == b'\r'))
             .map_or(bytes.len(), |p| from + p + 1)
     };
-    match (bytes[i], bytes.get(i + 1), lexing) {
+    match (bytes[i], bytes.get(i + 1), lexing.mysql) {
         // MySQL needs whitespace after `--`; `1--1` is arithmetic there.
-        (b'-', Some(b'-'), Lexing::Standard) => Some(line_end(i)),
-        (b'-', Some(b'-'), Lexing::Mysql)
-            if bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace()) =>
-        {
+        (b'-', Some(b'-'), false) => Some(line_end(i)),
+        (b'-', Some(b'-'), true) if bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace()) => {
             Some(line_end(i))
         }
-        (b'#', _, Lexing::Mysql) => Some(line_end(i)),
+        (b'#', _, true) => Some(line_end(i)),
         // MySQL runs what's inside `/*! … */`: it's code, not a comment.
-        (b'/', Some(b'*'), Lexing::Mysql)
+        (b'/', Some(b'*'), true)
             if bytes.get(i + 2) == Some(&b'!') || bytes[i..].starts_with(b"/*M!") =>
         {
             None
         }
-        (b'/', Some(b'*'), _) => Some(skip_block_comment(bytes, i)),
+        (b'/', Some(b'*'), _) => Some(skip_block_comment(bytes, i, lexing.nested_comments)),
         _ => None,
     }
 }
@@ -70,7 +170,7 @@ fn executable_comment_start(bytes: &[u8], i: usize, lexing: Lexing) -> Option<us
     } else {
         return None;
     };
-    if lexing != Lexing::Mysql {
+    if !lexing.mysql {
         return None;
     }
     let mut j = i + opening;
@@ -83,10 +183,12 @@ fn executable_comment_start(bytes: &[u8], i: usize, lexing: Lexing) -> Option<us
 /// Whether a quote at `i` takes backslash escapes, as `lexing` reads it.
 fn backslash_escapes(sql: &str, i: usize, lexing: Lexing) -> bool {
     let quote = sql.as_bytes()[i];
-    match lexing {
-        Lexing::Mysql => quote == b'\'' || quote == b'"',
-        Lexing::Standard => quote == b'\'' && is_escape_string(sql, i),
-    }
+    let strings = match lexing.backslash {
+        Backslash::Never => false,
+        Backslash::EscapeStrings => quote == b'\'' && is_escape_string(sql, i),
+        Backslash::Always => true,
+    };
+    strings && (quote == b'\'' || (quote == b'"' && lexing.double_quote_string))
 }
 
 /// The statement to run for a cursor at byte `offset`: the one the cursor is in,
@@ -130,7 +232,8 @@ fn segments(sql: &str, lexing: Lexing) -> Vec<Range<usize>> {
         }
         match bytes[i] {
             b'\'' | b'"' | b'`' => i = skip_quoted(bytes, i, backslash_escapes(sql, i, lexing)),
-            b'$' if lexing == Lexing::Standard => i = skip_dollar_quoted(sql, i),
+            b'[' if lexing.brackets => i = skip_bracketed(bytes, i),
+            b'$' if lexing.dollar_quotes => i = skip_dollar_quoted(sql, i),
             b';' => {
                 segments.push(start..i);
                 i += 1;
@@ -165,7 +268,31 @@ fn skip_quoted(bytes: &[u8], i: usize, backslash_escapes: bool) -> usize {
     bytes.len()
 }
 
-fn skip_block_comment(bytes: &[u8], i: usize) -> usize {
+/// Skip a `[bracketed name]` starting at `i`; `]]` inside is an escaped `]`.
+fn skip_bracketed(bytes: &[u8], i: usize) -> usize {
+    let mut j = i + 1;
+    while j < bytes.len() {
+        if bytes[j] == b']' {
+            if bytes.get(j + 1) == Some(&b']') {
+                j += 2;
+                continue;
+            }
+            return j + 1;
+        }
+        j += 1;
+    }
+    bytes.len()
+}
+
+/// Skip a `/* … */` comment starting at `i`: to the first `*/`, or the matching
+/// one when comments nest.
+fn skip_block_comment(bytes: &[u8], i: usize, nested: bool) -> usize {
+    if !nested {
+        return bytes[i + 2..]
+            .windows(2)
+            .position(|w| w == b"*/")
+            .map_or(bytes.len(), |p| i + 2 + p + 2);
+    }
     let mut depth = 0;
     let mut j = i;
     while j + 1 < bytes.len() {
@@ -265,11 +392,12 @@ pub enum Risk {
 ///
 /// Deny by default: only statements known to read (`select`, `show`,
 /// `explain`, transaction control…) pass, and only when no data-changing verb
-/// appears in them. The script is read both as standard SQL and as MySQL reads
-/// it (where `#`, backslashes and `/*! … */` mean something else), and the
-/// worse reading counts, so quoting tricks can't hide a write.
+/// appears in them. The script is read every way an engine might read it (see
+/// [`READINGS`]: where comments end, whether they nest, backslashes, `[names]`,
+/// MySQL's `#` and `/*! … */`), and the worst reading counts, so quoting tricks
+/// can't hide a write.
 pub fn assess(sql: &str) -> Option<(Risk, String)> {
-    [Lexing::Standard, Lexing::Mysql]
+    READINGS
         .into_iter()
         .flat_map(|lexing| {
             split_as(sql, lexing)
@@ -437,7 +565,7 @@ pub fn writes(sql: &str) -> bool {
 /// True when `sql` manages a transaction itself (`begin`, `commit`,
 /// `savepoint`…), so it shouldn't be wrapped in another.
 pub fn controls_transaction(sql: &str) -> bool {
-    statements_both_ways(sql).any(|words| match words.first().map(String::as_str) {
+    statements_every_way(sql).any(|words| match words.first().map(String::as_str) {
         Some(
             "begin" | "start" | "commit" | "rollback" | "end" | "savepoint" | "release" | "abort"
             | "prepare",
@@ -453,7 +581,7 @@ pub fn controls_transaction(sql: &str) -> bool {
 /// say themselves.
 pub fn transaction_effect(sql: &str) -> Option<bool> {
     split_statements(sql).into_iter().rev().find_map(|range| {
-        let words = words_outside_literals(&sql[range], Lexing::Standard);
+        let words = words_outside_literals(&sql[range], STANDARD);
         let second = words.get(1).map(String::as_str);
         match words.first().map(String::as_str)? {
             // Not T-SQL's `begin … end` block, which is no transaction.
@@ -496,7 +624,7 @@ pub fn lifts_read_only(sql: &str) -> bool {
     {
         return true;
     }
-    statements_both_ways(sql).any(|words| {
+    statements_every_way(sql).any(|words| {
         words
             .windows(2)
             .any(|pair| pair[0] == "read" && pair[1] == "write")
@@ -512,15 +640,13 @@ pub fn lifts_read_only(sql: &str) -> bool {
     })
 }
 
-/// Each statement's words, read as standard SQL and again as MySQL reads it.
-fn statements_both_ways(sql: &str) -> impl Iterator<Item = Vec<String>> + '_ {
-    [Lexing::Standard, Lexing::Mysql]
-        .into_iter()
-        .flat_map(move |lexing| {
-            split_as(sql, lexing)
-                .into_iter()
-                .map(move |range| words_outside_literals(&sql[range], lexing))
-        })
+/// Each statement's words, read every way in [`READINGS`].
+fn statements_every_way(sql: &str) -> impl Iterator<Item = Vec<String>> + '_ {
+    READINGS.into_iter().flat_map(move |lexing| {
+        split_as(sql, lexing)
+            .into_iter()
+            .map(move |range| words_outside_literals(&sql[range], lexing))
+    })
 }
 
 /// Lowercased words of a statement, skipping comments, string literals and
@@ -546,7 +672,12 @@ fn words_outside_literals(statement: &str, lexing: Lexing) -> Vec<String> {
                 words.push(statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase());
                 i = end;
             }
-            b'$' if lexing == Lexing::Standard => i = skip_dollar_quoted(statement, i),
+            b'[' if lexing.brackets => {
+                let end = skip_bracketed(bytes, i);
+                words.push(statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase());
+                i = end;
+            }
+            b'$' if lexing.dollar_quotes => i = skip_dollar_quoted(statement, i),
             b if b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80 => {
                 let start = i;
                 while i < bytes.len()
@@ -832,11 +963,7 @@ pub struct Param {
 /// The placeholders in `sql`, in order, skipping strings, quoted names,
 /// comments, dollar-quoted bodies, `::casts`, `:=` and slices like `a[1:n]`.
 pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
-    let lexing = if style.mysql {
-        Lexing::Mysql
-    } else {
-        Lexing::Standard
-    };
+    let lexing = if style.mysql { MYSQL } else { STANDARD };
     let bytes = sql.as_bytes();
     let mut params = Vec::new();
     let mut questions = 0;
@@ -867,7 +994,7 @@ pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
                 });
                 i = end;
             }
-            b'$' if lexing == Lexing::Standard => i = skip_dollar_quoted(sql, i),
+            b'$' if lexing.dollar_quotes => i = skip_dollar_quoted(sql, i),
             // `::cast` and `:=` aren't placeholders.
             b':' if bytes.get(i + 1) == Some(&b':') => i += 2,
             b':' if !after_word
@@ -912,11 +1039,7 @@ pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> Stri
 /// exactly. A formatter's output is used only when this holds, so it can't, say,
 /// join a line onto a `-- comment` and comment out the code after it.
 pub fn same_code(a: &str, b: &str, mysql: bool) -> bool {
-    let lexing = if mysql {
-        Lexing::Mysql
-    } else {
-        Lexing::Standard
-    };
+    let lexing = if mysql { MYSQL } else { STANDARD };
     tokens(a, lexing) == tokens(b, lexing)
 }
 
@@ -940,7 +1063,7 @@ fn tokens(sql: &str, lexing: Lexing) -> Vec<&str> {
         }
         let end = match bytes[i] {
             b'\'' | b'"' | b'`' => skip_quoted(bytes, i, backslash_escapes(sql, i, lexing)),
-            b'$' if lexing == Lexing::Standard => skip_dollar_quoted(sql, i),
+            b'$' if lexing.dollar_quotes => skip_dollar_quoted(sql, i),
             b if b.is_ascii_whitespace() => {
                 i += 1;
                 continue;
@@ -1112,6 +1235,41 @@ mod tests {
                 "{sql}: {:?}",
                 assess(sql)
             );
+        }
+    }
+
+    #[test]
+    fn comments_and_quotes_read_as_each_engine_does_cant_hide_a_write() {
+        for sql in [
+            // Postgres and DuckDB end a `--` comment at a lone carriage return.
+            "select 1 -- x\rdelete from orders",
+            "select 1 -- x\r; delete from orders",
+            // SQLite and MySQL don't nest comments: the delete is code to them.
+            "select 1; /* a /* */ delete from orders; /* */",
+            // A quote inside a `[name]` (SQL Server, SQLite) isn't a quote.
+            "select [it's] from t; delete from orders; select 'x'",
+            "select [a]]--] from t; delete from orders",
+            // MySQL with NO_BACKSLASH_ESCAPES: the backslash doesn't escape.
+            r"select 'a\'; delete from orders; -- '",
+            // MySQL with ANSI_QUOTES: `"…"` is a name, with no backslash escapes.
+            r#"select "a\"; delete from orders; -- ""#,
+            // Postgres with standard_conforming_strings off: backslashes escape.
+            r"select 'a\'; delete from orders; -- '",
+        ] {
+            assert!(
+                assess(sql).is_some_and(|(risk, _)| risk >= Risk::EveryRow),
+                "{sql:?}: {:?}",
+                assess(sql)
+            );
+            assert!(writes(sql), "{sql:?}");
+        }
+        // Still reads.
+        for sql in [
+            "select 1 -- a comment\r\n",
+            "select [order], \"group\" from [my table] /* c /* d */ */",
+            "select 'it''s' from t where a = $1",
+        ] {
+            assert_eq!(assess(sql), None, "{sql:?}");
         }
     }
 

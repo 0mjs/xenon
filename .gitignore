@@ -7,4 +7,5 @@ xcuserdata/
 
 # Private notes (pricing, competitors): never committed
 /.private
+/HARDENING.md
 /dev/fleet/tls

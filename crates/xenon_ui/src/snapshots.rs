@@ -1078,6 +1078,38 @@ fn snapshots() {
             };
             assert_ne!(rows.rows[0][0], xenon_driver::Value::Text("lost".into()));
         });
+        // …and so does one stopped part-way (here by the time limit, while the
+        // second statement is still returning rows).
+        shot.act(|w, _, cx| {
+            w.prefs.query_limit = 1;
+            let tab = w.active_tab().id;
+            w.execute(
+                tab,
+                "update orders set status = 'stopped' where id = 2;\n\
+                 with recursive n(x) as (select 1 union all select x + 1 from n where x < 1000000000)\n\
+                 select x from n"
+                    .into(),
+                None,
+                cx,
+            );
+        });
+        assert!(
+            shot.settle(20, |w| w.error_text().is_some()),
+            "the time limit didn't stop the script"
+        );
+        shot.act(|w, _, _| {
+            let error = w.error_text().unwrap_or_default();
+            assert!(error.contains("nothing it did was kept"), "{error}");
+            let status = w.sessions[0]
+                .conn
+                .execute("select status from orders where id = 2", 1)
+                .unwrap();
+            let xenon_driver::QueryOutcome::Rows(rows) = status.outcome else {
+                panic!("no rows")
+            };
+            assert_ne!(rows.rows[0][0], xenon_driver::Value::Text("stopped".into()));
+            w.prefs.query_limit = 60;
+        });
         // On production a write asks first, and so does Fetch all re-running one.
         shot.act(|w, window, cx| {
             let editor = w.active_tab().editor.clone();
