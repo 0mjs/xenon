@@ -312,9 +312,14 @@ fn seed_saved(store: &Store, shop: &Path) {
         .unwrap();
 }
 
+/// The screenshot tests share a data folder (and the environment variable
+/// naming it): one at a time.
+static HARNESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 #[ignore]
 fn snapshots() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
     let data = root.join("data");
     std::fs::create_dir_all(&data).unwrap();
@@ -766,6 +771,8 @@ fn snapshots() {
                 notice.contains("Imported 2 connections") && notice.contains("Line 2"),
                 "{notice}"
             );
+            // Not in later screenshots.
+            w.notice = None;
         });
         shot.act(|w, window, cx| {
             w.fix_error(window, cx);
@@ -1336,4 +1343,123 @@ fn snapshots() {
             assert!(w.tabs().iter().all(|tab| tab.session != Some(first)));
         });
     }
+}
+
+/// The README's screenshots, each from a clean start: `cargo test -p xenon_ui
+/// readme_screenshots -- --ignored`, then `scripts/readme-screenshots.sh`.
+#[test]
+#[ignore]
+fn readme_screenshots() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/readme");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let _ = std::fs::remove_file(data.join("xenon.db"));
+    // SAFETY: set before any other thread reads the environment.
+    unsafe { std::env::set_var("XENON_DATA_DIR", &data) };
+    let shop = fixture(&data);
+    seed_saved(&Store::open(&data.join("xenon.db")).unwrap(), &shop);
+    let browse = |w: &mut Workspace, window: &mut Window, cx: &mut gpui::Context<Workspace>| {
+        let id = w.sessions[0].id;
+        w.browse(id, "main", "orders", window, cx)
+    };
+
+    // Connect, light.
+    let mut shot = Shot::new(Mode::Light, None, &root);
+    shot.save("connect");
+
+    // A table, dark: a row picked, its fields in the inspector.
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(browse);
+    shot.act(|w, window, cx| w.select_cell(3, 4, false, window, cx));
+    shot.save("browse");
+
+    // Editing in place.
+    shot.act(|w, window, cx| {
+        w.begin_edit(1, 5, window, cx);
+        w.type_into_cell("left at the door", window, cx);
+    });
+    shot.save("edit");
+    // While typing, the arrows move the text cursor, not the grid's selection.
+    let before = shot
+        .cx
+        .read_entity(&shot.workspace, |w, _| w.active_tab().selection);
+    shot.cx
+        .update_window(shot.window, |_, window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("left").unwrap(), cx);
+        })
+        .expect("press left");
+    shot.act(|w, _, _| {
+        assert!(w.inline_edit().is_some(), "an arrow ended the edit");
+        assert_eq!(
+            w.active_tab().selection,
+            before,
+            "an arrow moved the grid selection"
+        );
+    });
+    // A real Enter in the cell keeps what was typed.
+    shot.cx
+        .update_window(shot.window, |_, window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+        })
+        .expect("press enter");
+    shot.act(|w, window, cx| {
+        assert_eq!(
+            w.staged_changes(),
+            1,
+            "Enter in the cell didn't stage the edit"
+        );
+        assert!(w.inline_edit().is_none(), "still editing after Enter");
+        w.discard_edits(&crate::DiscardEdits, window, cx);
+    });
+
+    // The command palette.
+    shot.act(|w, window, cx| w.open_palette(&crate::OpenPalette, window, cx));
+    shot.save("palette");
+
+    // Settings.
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(browse);
+    shot.act(|w, window, cx| w.open_settings(&crate::OpenSettings, window, cx));
+    shot.save("settings");
+
+    // A misspelt column: pointed at, with a fix.
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let editor = w.active_tab().editor.clone();
+        editor.update(cx, |e, cx| {
+            e.set_value(
+                "select id, name, emial\nfrom customers\norder by name;",
+                window,
+                cx,
+            )
+        });
+        w.run(RunScope::All, window, cx);
+    });
+    assert!(shot.settle(10, |w| !w.is_running()));
+    shot.save("errors");
+
+    // A script of two queries, light: a tab for each result.
+    let mut shot = Shot::new(Mode::Light, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let editor = w.active_tab().editor.clone();
+        editor.update(cx, |e, cx| {
+            e.set_value(
+                "select status, count(*) as orders, sum(total) as revenue\nfrom orders group by status order by revenue desc;\n\nselect id, customer_id, total from orders order by total desc limit 20;",
+                window,
+                cx,
+            )
+        });
+        w.run(RunScope::All, window, cx);
+    });
+    assert!(shot.settle(10, |w| !w.is_running()));
+    shot.act(|w, _, cx| w.show_set(0, cx));
+    shot.save("results");
+
+    // The rows as pretty JSON, light.
+    let mut shot = Shot::new(Mode::Light, Some(&shop), &root);
+    shot.act(browse);
+    assert!(shot.settle(10, |w| !w.is_running()));
+    shot.act(|w, _, cx| w.set_view(crate::views::ResultView::Json, cx));
+    shot.save("json");
 }

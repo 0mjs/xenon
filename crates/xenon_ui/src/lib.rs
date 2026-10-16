@@ -103,8 +103,9 @@ actions!(
     ]
 );
 
-/// Key context of the focused results grid.
-const GRID_CONTEXT: &str = "ResultsGrid";
+/// The grid's own keys (arrows, Enter to edit, copy), but not while a cell is
+/// being typed into: then they're the field's.
+const GRID_CONTEXT: &str = "ResultsGrid && !editing";
 
 /// The editor's key context. Bindings here must be registered after
 /// `gpui_component::init` so they win over the editor's own (`cmd-enter`

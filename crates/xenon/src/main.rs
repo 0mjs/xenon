@@ -36,7 +36,9 @@ fn main() {
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             cx.open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Opens filling the screen (as a double-click on the title bar
+                    // does); `bounds` is the size it returns to when un-zoomed.
+                    window_bounds: Some(WindowBounds::Maximized(bounds)),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Xenon".into()),
                         appears_transparent: true,

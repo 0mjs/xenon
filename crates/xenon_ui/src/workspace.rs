@@ -4104,7 +4104,8 @@ impl Workspace {
     fn set_side_panel(&mut self, show: bool) {
         if show != self.show_side_panel {
             self.show_side_panel = show;
-            self.side_panel_since = Some(std::time::Instant::now());
+            // Tests see panels where they end up, unless one asks for a slide.
+            self.side_panel_since = (!cfg!(test)).then(std::time::Instant::now);
         }
     }
 
@@ -4129,7 +4130,7 @@ impl Workspace {
     pub(crate) fn set_inspector(&mut self, show: bool) {
         if show != self.show_inspector {
             self.show_inspector = show;
-            self.inspector_since = Some(std::time::Instant::now());
+            self.inspector_since = (!cfg!(test)).then(std::time::Instant::now);
         }
     }
 
@@ -5355,6 +5356,7 @@ impl Workspace {
                         .child(
                             Editor::new(area)
                                 .h_full()
+                                .appearance(false)
                                 .font_family(crate::theme::mono_font())
                                 .text_size(crate::theme::text(12.)),
                         ),
@@ -5974,7 +5976,11 @@ impl Workspace {
             };
             return div()
                 .id("results")
-                .key_context("ResultsGrid")
+                .key_context(if self.inline_edit().is_some() {
+                    "ResultsGrid editing"
+                } else {
+                    "ResultsGrid"
+                })
                 .track_focus(&self.grid_focus)
                 // Typing into a cell: Escape cancels, Tab saves it and moves on.
                 .on_action(
@@ -6221,9 +6227,8 @@ impl Workspace {
                         .gap(px(3.))
                         .border_b_1()
                         .border_color(theme.line_2)
-                        .when(here.is_some(), |el| {
-                            el.bg(theme.acc_wash).border_l_2().border_color(theme.acc)
-                        })
+                        // The field being edited: its tint is the only mark.
+                        .when(here.is_some(), |el| el.bg(theme.acc_wash))
                         .font_family(crate::theme::mono_font())
                         .text_size(crate::theme::text(11.5))
                         .child(
