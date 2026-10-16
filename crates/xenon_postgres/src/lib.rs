@@ -73,6 +73,9 @@ pub struct PostgresConnection {
     client: Client,
     cancel: Arc<PgCancel>,
     read_only: bool,
+    /// A transaction was open when last asked (`in_transaction`): the row
+    /// limit then never cancels a query, which would abort it.
+    transaction_open: std::sync::atomic::AtomicBool,
 }
 
 struct PgCancel {
@@ -241,6 +244,7 @@ impl PostgresConnection {
 
             Ok(Self {
                 read_only,
+                transaction_open: Default::default(),
                 name,
                 id,
                 local,
@@ -270,13 +274,40 @@ impl PostgresConnection {
             .user
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut feed = Feed::new(progress);
-        // Prepare only to learn column types; multi-statement scripts can't be prepared.
-        let types: Option<Vec<Type>> = self
-            .client
-            .prepare(sql)
-            .await
-            .ok()
-            .map(|stmt| stmt.columns().iter().map(|c| c.type_().clone()).collect());
+        // Committing a transaction a failed statement aborted only rolls it back:
+        // say so, rather than "committed".
+        let statement = sql.trim().trim_end_matches(';').trim();
+        if ["commit", "end", "commit work", "commit transaction"]
+            .iter()
+            .any(|c| statement.eq_ignore_ascii_case(c))
+            && let Err(err) = self.client.simple_query("select 1").await
+            && err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION)
+        {
+            let _ = self.client.simple_query("rollback").await;
+            self.transaction_open
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(anyhow!(
+                "The transaction had already failed, so nothing was committed: it was rolled back."
+            ));
+        }
+        // Prepare only to learn column types. A script of several statements
+        // can't be prepared, and the failed attempt would abort an open
+        // transaction: only single statements are.
+        let types: Option<Vec<Type>> = if xenon_driver::sql::several_statements(sql) {
+            None
+        } else {
+            self.client
+                .prepare(sql)
+                .await
+                .ok()
+                .map(|stmt| stmt.columns().iter().map(|c| c.type_().clone()).collect())
+        };
+        // Inside a transaction a cancel aborts it: the row limit reads and drops
+        // the extra rows instead.
+        let in_transaction = self
+            .transaction_open
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || xenon_driver::sql::controls_transaction(sql);
 
         let stream = self
             .client
@@ -346,6 +377,7 @@ impl PostgresConnection {
                         let (since, dropped) = over_limit.get_or_insert((Instant::now(), 0));
                         *dropped += 1;
                         if !writes
+                            && !in_transaction
                             && limit_stop.is_none()
                             && (*dropped >= LIMIT_GRACE_ROWS || since.elapsed() >= LIMIT_GRACE)
                         {
@@ -721,6 +753,10 @@ impl Connection for PostgresConnection {
             }
             Err(_) => None,
         }
+        .inspect(|open| {
+            self.transaction_open
+                .store(*open, std::sync::atomic::Ordering::SeqCst)
+        })
     }
 
     fn is_local(&self) -> bool {
@@ -1224,6 +1260,35 @@ mod tests {
         );
         // The connection is still usable afterwards.
         assert!(db.execute("select 1", 10).is_ok());
+    }
+
+    /// Inside the user's transaction, nothing Xenon does aborts it: a script
+    /// isn't prepared, and the row limit doesn't cancel. A commit of one a
+    /// failed statement aborted says it rolled back.
+    #[test]
+    fn live_open_transactions_survive_scripts_and_the_row_limit() {
+        let Some(db) = live() else { return };
+        db.execute("begin", 1).unwrap();
+        assert_eq!(db.in_transaction(), Some(true));
+        db.execute("select 1; select 2", 10).unwrap();
+        assert_eq!(db.in_transaction(), Some(true));
+        let big = rows(
+            db.execute("select g from generate_series(1, 300000) g", 1000)
+                .unwrap(),
+        );
+        assert!(big.truncated);
+        assert!(
+            db.execute("select 1", 1).is_ok(),
+            "the transaction was aborted"
+        );
+        db.execute("commit", 1).unwrap();
+
+        db.execute("begin", 1).unwrap();
+        assert_eq!(db.in_transaction(), Some(true));
+        assert!(db.execute("select 1 / 0", 1).is_err());
+        let err = db.execute("commit", 1).unwrap_err().to_string();
+        assert!(err.contains("nothing was committed"), "{err}");
+        assert_eq!(db.in_transaction(), Some(false));
     }
 
     #[test]

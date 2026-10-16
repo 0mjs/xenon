@@ -203,6 +203,9 @@ pub struct MysqlConnection {
     read_only: bool,
     conn: Mutex<Conn>,
     cancel: Arc<MyCancel>,
+    /// Whether a transaction is open, and whether autocommit is off, as
+    /// followed from what ran (see `in_transaction`).
+    transaction: Mutex<(bool, bool)>,
 }
 
 /// Cancels by asking the server, over a second connection, to kill the query
@@ -341,6 +344,11 @@ impl MysqlConnection {
             .map_err(describe_error)?
             .unwrap_or_default();
         let mariadb = raw_version.to_ascii_lowercase().contains("mariadb");
+        let autocommit_off = conn
+            .query_first::<i64, _>("select @@autocommit")
+            .ok()
+            .flatten()
+            == Some(0);
         let plain_backslashes = conn
             .query_first::<String, _>("select @@session.sql_mode")
             .ok()
@@ -372,6 +380,7 @@ impl MysqlConnection {
                 user: Default::default(),
             }),
             conn: Mutex::new(conn),
+            transaction: Mutex::new((autocommit_off, autocommit_off)),
             name,
         })
     }
@@ -407,146 +416,159 @@ impl Connection for MysqlConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
-        // MySQL's read-only session stops DML but not DDL (which commits on its
-        // own), nor DDL run by `prepare … execute` or a procedure: refuse
-        // anything recognised as a write here, so read-only means read-only.
-        if self.read_only
-            && let Some((_, what)) = xenon_driver::sql::assess(sql)
-        {
-            return Err(QueryError {
-                message: format!("This is a read-only connection, so {what} isn't allowed."),
-                position: None,
-            }
-            .into());
-        }
-
-        if self.read_only && xenon_driver::sql::lifts_read_only(sql) {
-            return Err(QueryError {
-                message:
-                    "This is a read-only connection, so switching it to read-write isn't allowed."
-                        .into(),
-                position: None,
-            }
-            .into());
-        }
-        let writes = xenon_driver::sql::writes(sql);
-        let started = Instant::now();
-        let mut feed = Feed::new(progress);
-        let mut cancelled = false;
-        self.cancel
-            .user
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        let mut conn = self.lock();
-        let mut result = conn
-            .query_iter(sql)
-            .map_err(|err| locate(describe_error(err), sql))?;
-
-        let mut statements = 0;
-        let mut outcome = None;
-        let mut earlier = Vec::new();
-        let mut cancelled_for_limit = false;
-        while let Some(mut set) = result.iter() {
-            statements += 1;
-            let columns: Vec<mysql::Column> = set.columns().as_ref().to_vec();
-            let affected = set.affected_rows();
-            if columns.is_empty() {
-                // A statement after the first that failed arrives as an empty
-                // set holding the error: read it, or the error is lost (and a
-                // production script's earlier statements committed).
-                if let Some(Err(err)) = set.next() {
-                    return Err(locate(describe_error(err), sql));
+        let result = (|| -> Result<QueryResult> {
+            // MySQL's read-only session stops DML but not DDL (which commits on its
+            // own), nor DDL run by `prepare … execute` or a procedure: refuse
+            // anything recognised as a write here, so read-only means read-only.
+            if self.read_only
+                && let Some((_, what)) = xenon_driver::sql::assess(sql)
+            {
+                return Err(QueryError {
+                    message: format!("This is a read-only connection, so {what} isn't allowed."),
+                    position: None,
                 }
-                earlier.extend(outcome.replace(QueryOutcome::Affected(affected)));
-                continue;
+                .into());
             }
-            let mut rows = ResultSet {
-                columns: columns
-                    .iter()
-                    .map(|c| Column {
-                        name: c.name_str().into_owned(),
-                        type_name: Some(type_label(c)),
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            feed.next_set();
-            for row in set {
-                let row = match row {
-                    Ok(row) => row,
-                    Err(mysql::Error::MySqlError(err))
-                        if cancelled_for_limit && err.code == ER_QUERY_INTERRUPTED =>
-                    {
-                        break;
+
+            if self.read_only && xenon_driver::sql::lifts_read_only(sql) {
+                return Err(QueryError {
+                    message:
+                        "This is a read-only connection, so switching it to read-write isn't allowed."
+                            .into(),
+                    position: None,
+                }
+                .into());
+            }
+            let writes = xenon_driver::sql::writes(sql);
+            let started = Instant::now();
+            let mut feed = Feed::new(progress);
+            let mut cancelled = false;
+            self.cancel
+                .user
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            let mut conn = self.lock();
+            let mut result = conn
+                .query_iter(sql)
+                .map_err(|err| locate(describe_error(err), sql))?;
+
+            let mut statements = 0;
+            let mut outcome = None;
+            let mut earlier = Vec::new();
+            let mut cancelled_for_limit = false;
+            while let Some(mut set) = result.iter() {
+                statements += 1;
+                let columns: Vec<mysql::Column> = set.columns().as_ref().to_vec();
+                let affected = set.affected_rows();
+                if columns.is_empty() {
+                    // A statement after the first that failed arrives as an empty
+                    // set holding the error: read it, or the error is lost (and a
+                    // production script's earlier statements committed).
+                    if let Some(Err(err)) = set.next() {
+                        return Err(locate(describe_error(err), sql));
                     }
-                    // Stopped by the user while reading rows: keep what arrived.
-                    Err(mysql::Error::MySqlError(err))
-                        if err.code == ER_QUERY_INTERRUPTED
-                            && self.cancel.user.load(std::sync::atomic::Ordering::SeqCst)
-                            && !rows.rows.is_empty() =>
-                    {
-                        cancelled = true;
-                        rows.truncated = true;
-                        break;
-                    }
-                    Err(err) => return Err(locate(describe_error(err), sql)),
-                };
-                if rows.rows.len() == row_limit {
-                    if !rows.truncated {
-                        // Stop the server instead of reading rows we'd discard.
-                        rows.truncated = true;
-                        // A write must finish (a kill would roll it back), so its
-                        // extra rows are read and dropped instead.
-                        if !writes {
-                            cancelled_for_limit = true;
-                            self.cancel.stop_now();
-                        }
-                    }
+                    earlier.extend(outcome.replace(QueryOutcome::Affected(affected)));
                     continue;
                 }
-                rows.rows.push(
-                    row.unwrap()
-                        .into_iter()
-                        .zip(&columns)
-                        .map(|(value, column)| convert(value, column))
+                let mut rows = ResultSet {
+                    columns: columns
+                        .iter()
+                        .map(|c| Column {
+                            name: c.name_str().into_owned(),
+                            type_name: Some(type_label(c)),
+                        })
                         .collect(),
-                );
-                feed.read(&rows, |_| {});
+                    ..Default::default()
+                };
+                feed.next_set();
+                for row in set {
+                    let row = match row {
+                        Ok(row) => row,
+                        Err(mysql::Error::MySqlError(err))
+                            if cancelled_for_limit && err.code == ER_QUERY_INTERRUPTED =>
+                        {
+                            break;
+                        }
+                        // Stopped by the user while reading rows: keep what arrived.
+                        Err(mysql::Error::MySqlError(err))
+                            if err.code == ER_QUERY_INTERRUPTED
+                                && self.cancel.user.load(std::sync::atomic::Ordering::SeqCst)
+                                && !rows.rows.is_empty() =>
+                        {
+                            cancelled = true;
+                            rows.truncated = true;
+                            break;
+                        }
+                        Err(err) => return Err(locate(describe_error(err), sql)),
+                    };
+                    if rows.rows.len() == row_limit {
+                        if !rows.truncated {
+                            // Stop the server instead of reading rows we'd discard.
+                            rows.truncated = true;
+                            // A write must finish (a kill would roll it back), so its
+                            // extra rows are read and dropped instead.
+                            if !writes {
+                                cancelled_for_limit = true;
+                                self.cancel.stop_now();
+                            }
+                        }
+                        continue;
+                    }
+                    rows.rows.push(
+                        row.unwrap()
+                            .into_iter()
+                            .zip(&columns)
+                            .map(|(value, column)| convert(value, column))
+                            .collect(),
+                    );
+                    feed.read(&rows, |_| {});
+                }
+                earlier.extend(outcome.replace(QueryOutcome::Rows(rows)));
+                if cancelled {
+                    break;
+                }
             }
-            earlier.extend(outcome.replace(QueryOutcome::Rows(rows)));
-            if cancelled {
-                break;
+            drop(result);
+            // However it was done, a read-only session switched to read-write goes
+            // straight back.
+            if self.read_only
+                && conn
+                    .query_first::<i64, _>("select @@session.transaction_read_only")
+                    .ok()
+                    .flatten()
+                    == Some(0)
+            {
+                let _ = conn.query_drop("set session transaction read only");
+                return Err(QueryError {
+                    message:
+                        "This read-only connection was switched to read-write; Xenon switched it \
+                              back."
+                            .into(),
+                    position: None,
+                }
+                .into());
             }
-        }
-        drop(result);
-        // However it was done, a read-only session switched to read-write goes
-        // straight back.
-        if self.read_only
-            && conn
-                .query_first::<i64, _>("select @@session.transaction_read_only")
-                .ok()
-                .flatten()
-                == Some(0)
-        {
-            let _ = conn.query_drop("set session transaction read only");
-            return Err(QueryError {
-                message: "This read-only connection was switched to read-write; Xenon switched it \
-                          back."
-                    .into(),
-                position: None,
-            }
-            .into());
-        }
-        let outcome = outcome.ok_or_else(|| anyhow!("nothing to run"))?;
-        // Some killed statements (`sleep()`, `benchmark()`) return a value instead
-        // of failing; after a cancel, that value isn't the answer.
-        let cancelled = cancelled || self.cancel.user.load(std::sync::atomic::Ordering::SeqCst);
-        Ok(QueryResult {
-            outcome,
-            earlier,
-            statements,
-            elapsed: started.elapsed(),
-            cancelled,
-        })
+            let outcome = outcome.ok_or_else(|| anyhow!("nothing to run"))?;
+            // Some killed statements (`sleep()`, `benchmark()`) return a value instead
+            // of failing; after a cancel, that value isn't the answer.
+            let cancelled = cancelled || self.cancel.user.load(std::sync::atomic::Ordering::SeqCst);
+            Ok(QueryResult {
+                outcome,
+                earlier,
+                statements,
+                elapsed: started.elapsed(),
+                cancelled,
+            })
+        })();
+        // Follow the transaction: MySQL can't be asked. A failed script may have
+        // opened one before failing, so then it counts as open.
+        let mut state = self.transaction.lock().unwrap_or_else(|e| e.into_inner());
+        let (open, autocommit_off) =
+            xenon_driver::sql::mysql_transaction_state(sql, state.0, state.1);
+        *state = match &result {
+            Ok(_) => (open, autocommit_off),
+            Err(_) => (state.0 || open, state.1 || autocommit_off),
+        };
+        result
     }
 
     fn introspect(&self) -> Result<Vec<Schema>> {
@@ -775,10 +797,10 @@ impl Connection for MysqlConnection {
 
     fn in_transaction(&self) -> Option<bool> {
         // MySQL has no reliable way to ask (`information_schema.innodb_trx` is a
-        // snapshot refreshed every 100 ms, and needs PROCESS): Xenon follows
-        // `begin` / `commit` in what ran instead. MariaDB can say.
+        // snapshot refreshed every 100 ms, and needs PROCESS): the driver follows
+        // what ran instead, autocommit and implicit commits included. MariaDB can say.
         if !self.mariadb {
-            return None;
+            return Some(self.transaction.lock().unwrap_or_else(|e| e.into_inner()).0);
         }
         self.lock()
             .query_first::<i64, _>("select @@in_transaction")
@@ -1315,6 +1337,20 @@ mod live {
         ] {
             assert!(conn.execute(script, 10).is_err(), "{script}");
         }
+
+        // An open transaction is known: after `begin`, ended by a schema change
+        // (MySQL commits it), and with autocommit off.
+        conn.execute("begin", 1).unwrap();
+        assert_eq!(conn.in_transaction(), Some(true));
+        conn.execute("create table xenon_implicit_commit (a int)", 1)
+            .unwrap();
+        assert_eq!(conn.in_transaction(), Some(false));
+        conn.execute("drop table xenon_implicit_commit", 1).unwrap();
+        conn.execute("set autocommit = 0", 1).unwrap();
+        conn.execute("select * from customers limit 1", 1).unwrap();
+        assert_eq!(conn.in_transaction(), Some(true));
+        conn.execute("set autocommit = 1", 1).unwrap();
+        assert_eq!(conn.in_transaction(), Some(false));
     }
 
     #[test]

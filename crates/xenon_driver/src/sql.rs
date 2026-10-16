@@ -735,7 +735,11 @@ pub fn controls_transaction(sql: &str) -> bool {
             "begin" | "start" | "commit" | "rollback" | "end" | "savepoint" | "release" | "abort"
             | "prepare",
         ) => true,
-        Some("set") => words.get(1).is_some_and(|w| w == "transaction"),
+        Some("set") => {
+            words.get(1).is_some_and(|w| w == "transaction")
+                // `set autocommit = 0` leaves every statement in a transaction.
+                || words.iter().any(|w| w.rsplit('.').next() == Some("autocommit"))
+        }
         _ => false,
     })
 }
@@ -791,6 +795,80 @@ pub fn transaction_effect(sql: &str) -> Option<bool> {
             _ => None,
         }
     })
+}
+
+/// Statements MySQL and MariaDB end a transaction before (and commit after):
+/// schema changes, grants, `lock tables`… An "all or nothing" script holding
+/// one can't be undone as a whole there.
+fn mysql_commits_implicitly(words: &[String]) -> bool {
+    let second = words.get(1).map(String::as_str);
+    match words.first().map(String::as_str) {
+        Some(
+            "create" | "alter" | "drop" | "truncate" | "rename" | "grant" | "revoke" | "install"
+            | "uninstall" | "flush" | "analyze" | "optimize" | "repair" | "cache" | "load",
+        ) => !matches!(
+            (words.first().map(String::as_str), second),
+            (Some("create" | "drop"), Some("temporary"))
+        ),
+        Some("lock" | "unlock") => matches!(second, Some("table" | "tables" | "instance")),
+        Some("set") => second == Some("password"),
+        _ => false,
+    }
+}
+
+/// True when MySQL would commit part of `sql` implicitly (see
+/// [`mysql_commits_implicitly`]).
+pub fn mysql_has_implicit_commit(sql: &str) -> bool {
+    split_as(sql, MYSQL)
+        .into_iter()
+        .any(|range| mysql_commits_implicitly(&words_outside_literals(&sql[range], MYSQL)))
+}
+
+/// MySQL's transaction state after running `sql`, statement by statement,
+/// from `(open, autocommit_off)` before it: `begin` / `start transaction` /
+/// `xa start` open one, `commit` / `rollback` end it, schema changes commit
+/// it, and with `autocommit = 0` any other statement opens one. MySQL can't be
+/// asked (MariaDB can), so its driver follows what ran.
+pub fn mysql_transaction_state(
+    sql: &str,
+    mut open: bool,
+    mut autocommit_off: bool,
+) -> (bool, bool) {
+    for range in split_as(sql, MYSQL) {
+        let words = words_outside_literals(&sql[range], MYSQL);
+        let second = words.get(1).map(String::as_str);
+        match words.first().map(String::as_str) {
+            Some("begin") if !matches!(second, Some("not")) => open = true,
+            Some("start") if second == Some("transaction") => open = true,
+            Some("xa") if matches!(second, Some("start" | "begin")) => open = true,
+            Some("xa") if matches!(second, Some("commit" | "rollback")) => open = false,
+            Some("commit" | "rollback") => open = false,
+            Some("set")
+                if words
+                    .iter()
+                    .any(|w| w.rsplit('.').next() == Some("autocommit")) =>
+            {
+                let value = words
+                    .iter()
+                    .skip_while(|w| w.rsplit('.').next() != Some("autocommit"))
+                    .nth(1)
+                    .map(String::as_str);
+                match value {
+                    Some("0" | "off" | "false") => autocommit_off = true,
+                    // Turning it back on commits.
+                    Some(_) => {
+                        autocommit_off = false;
+                        open = false;
+                    }
+                    None => {}
+                }
+            }
+            _ if mysql_commits_implicitly(&words) => open = false,
+            Some(_) if autocommit_off => open = true,
+            _ => {}
+        }
+    }
+    (open, autocommit_off)
 }
 
 /// True when `sql` tries to turn a read-only session back into a read-write
@@ -1202,10 +1280,26 @@ pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
 }
 
 /// `sql` with each placeholder replaced by the SQL literal `value` gives for its key.
+///
+/// A literal that would run into an operator next to it is set apart by a
+/// space: `0 -:n` with `n = -1` becomes `0 - -1`, not `0 --1`, which would
+/// comment out the rest of the line.
 pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> String {
     let mut out = sql.to_string();
+    let operator =
+        |c: Option<char>| c.is_some_and(|c| c.is_ascii() && OPERATOR.contains(&(c as u8)));
     for param in params.iter().rev() {
-        out.replace_range(param.range.clone(), &value(&param.key));
+        let mut literal = value(&param.key);
+        if operator(out[..param.range.start].chars().next_back())
+            && operator(literal.chars().next())
+        {
+            literal.insert(0, ' ');
+        }
+        if operator(out[param.range.end..].chars().next()) && operator(literal.chars().next_back())
+        {
+            literal.push(' ');
+        }
+        out.replace_range(param.range.clone(), &literal);
     }
     out
 }
@@ -1524,6 +1618,54 @@ mod tests {
         for sql in ["commit", "rollback", "end", "select 1", "commit; rollback"] {
             assert!(!opens_unguarded_transaction(sql), "{sql}");
         }
+    }
+
+    #[test]
+    fn a_bound_value_never_joins_an_operator_into_a_comment() {
+        let sql = "delete from accounts where balance > 0 -:n and id = :id";
+        let bound = bind(sql, &parameters(sql, ParamStyle::default()), |key| {
+            if key == ":n" { "-1" } else { "7" }.to_string()
+        });
+        assert_eq!(
+            bound,
+            "delete from accounts where balance > 0 - -1 and id = 7"
+        );
+        assert!(assess(&bound).is_some_and(|(risk, _)| risk == Risk::Write));
+        let sql = "select 1 /:n";
+        assert_eq!(
+            bind(sql, &parameters(sql, ParamStyle::default()), |_| "*2"
+                .into()),
+            "select 1 / *2"
+        );
+    }
+
+    #[test]
+    fn mysql_transactions_are_followed_statement_by_statement() {
+        let state = mysql_transaction_state;
+        assert_eq!(
+            state("begin; update t set a = 1", false, false),
+            (true, false)
+        );
+        assert_eq!(
+            state("begin; create table x (a int)", false, false),
+            (false, false)
+        );
+        assert_eq!(state("commit", true, false), (false, false));
+        // With autocommit off, any statement opens one; turning it on commits.
+        assert_eq!(state("set autocommit = 0", false, false), (false, true));
+        assert_eq!(state("insert into t values (1)", false, true), (true, true));
+        assert_eq!(
+            state("set @@session.autocommit = 1", true, true),
+            (false, false)
+        );
+        assert_eq!(state("select 1", false, false), (false, false));
+        assert_eq!(state("xa start 'x'", false, false), (true, false));
+        assert!(mysql_has_implicit_commit(
+            "insert into t values (1); alter table t add b int"
+        ));
+        assert!(!mysql_has_implicit_commit(
+            "insert into t values (1); create temporary table x (a int)"
+        ));
     }
 
     #[test]

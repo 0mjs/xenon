@@ -467,7 +467,7 @@ pub(crate) struct Tab {
     editing: Option<CellEditor>,
     /// A short note in the results bar (saved, or why something can't happen), and whether it's an error.
     pub(crate) flash: Option<(SharedString, bool)>,
-    saving: bool,
+    pub(crate) saving: bool,
     /// Rows read so far by the running query.
     fetched: usize,
     /// The grid shows the running query's first rows.
@@ -1990,13 +1990,26 @@ impl Workspace {
         if self.confirm.is_some() {
             return Some("Answer the open prompt first.");
         }
-        let session = self.tabs.iter().find(|t| t.id == tab_id)?.session?;
-        self.tabs
+        self.connection_busy(tab_id).then_some(
+            "A query or a save is already running on this connection: wait for it, or cancel it (⌘.).",
+        )
+    }
+
+    /// A query or a save is running on `tab_id`'s connection. A save is a
+    /// transaction: anything else run meanwhile would land inside it (and a
+    /// `commit` would keep half of it).
+    fn connection_busy(&self, tab_id: usize) -> bool {
+        let Some(session) = self
+            .tabs
             .iter()
-            .any(|t| t.session == Some(session) && matches!(t.query, Query::Running { .. }))
-            .then_some(
-                "A query is already running on this connection: wait for it, or cancel it (⌘.).",
-            )
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.session)
+        else {
+            return false;
+        };
+        self.tabs.iter().any(|t| {
+            t.session == Some(session) && (matches!(t.query, Query::Running { .. }) || t.saving)
+        })
     }
 
     /// The one way SQL from the editor reaches a connection: risky statements
@@ -2048,6 +2061,17 @@ impl Workspace {
             };
             let body = if production {
                 format!("{body} {} is a production connection.", session.name)
+            } else {
+                body
+            };
+            let body = if matches!(session.engine, Engine::MySql | Engine::MariaDb)
+                && xenon_driver::sql::several_statements(&sql)
+                && xenon_driver::sql::mysql_has_implicit_commit(&sql)
+            {
+                format!(
+                    "{body} MySQL commits each schema change as it runs, so if a later statement \
+                     fails, what ran before it stays."
+                )
             } else {
                 body
             };
@@ -2154,9 +2178,13 @@ impl Workspace {
         let production = session.environment == Environment::Production
             && !session.in_transaction
             && !xenon_driver::sql::controls_transaction(&sql);
+        // MySQL commits a schema change as it runs: such a script can't be all or
+        // nothing there, so it isn't wrapped as if it could (the prompt said so).
+        let mysql = matches!(session.engine, Engine::MySql | Engine::MariaDb);
         let atomic = production
             && xenon_driver::sql::several_statements(&sql)
-            && xenon_driver::sql::writes(&sql);
+            && xenon_driver::sql::writes(&sql)
+            && !(mysql && xenon_driver::sql::mysql_has_implicit_commit(&sql));
         // On production, what looks like a read runs in a transaction the server
         // keeps read-only, so a hidden write (a function that writes) is refused.
         let guarded = production && !xenon_driver::sql::writes(&sql);
@@ -3454,6 +3482,10 @@ impl Workspace {
         if self.active_tab().edits.is_empty() || self.active_tab().saving {
             return;
         }
+        if let Some(why) = self.busy(self.active_tab().id) {
+            self.flash(why, true, cx);
+            return;
+        }
         let statements = match self.pending_statements() {
             Ok(statements) => statements,
             Err(why) => {
@@ -3510,6 +3542,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Confirmed while something else started on the connection: not now.
+        if self.connection_busy(tab_id) {
+            self.flash(
+                "A query or a save is already running on this connection: save again when it's done.",
+                true,
+                cx,
+            );
+            return;
+        }
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return;
         };

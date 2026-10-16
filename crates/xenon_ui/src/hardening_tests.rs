@@ -112,3 +112,33 @@ fn hardening_other_sql_in_a_table_tab_isnt_editable() {
         )
     });
 }
+
+/// E3/R3: while a save runs on a connection (a transaction), nothing else
+/// runs on it, so another tab's statement can't land inside the save.
+#[test]
+#[ignore]
+fn hardening_nothing_runs_on_a_connection_while_it_saves() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("e3");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let saving = w.active_tab().id;
+        w.new_tab(&crate::NewTab, window, cx);
+        // The first tab's save is in flight.
+        w.tabs.iter_mut().find(|t| t.id == saving).unwrap().saving = true;
+        set_sql(w, "commit", window, cx);
+        w.run(RunScope::All, window, cx);
+        assert!(!w.is_running(), "ran on a connection that's saving");
+        let flash = w
+            .active_tab()
+            .flash
+            .clone()
+            .map(|(text, _)| text.to_string());
+        assert!(
+            flash
+                .as_deref()
+                .is_some_and(|f| f.contains("already running")),
+            "{flash:?}"
+        );
+    });
+}
