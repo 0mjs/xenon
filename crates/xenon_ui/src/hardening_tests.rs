@@ -443,3 +443,85 @@ fn hardening_history_runs_only_on_its_own_connection() {
         assert_ne!(status, xenon_driver::Value::Text("from-history".into()));
     });
 }
+
+/// E13: while a table saves, it can't be edited (the changes would be thrown
+/// away when the save finishes).
+#[test]
+#[ignore]
+fn hardening_no_edits_while_saving() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("e13");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let id = w.sessions[0].id;
+        w.browse(id, "main", "orders", window, cx)
+    });
+    assert!(shot.settle(10, |w| !w.is_running() && w.active_tab().grid.is_some()));
+    shot.act(|w, window, cx| {
+        let active = w.active;
+        w.tabs[active].saving = true;
+        assert!(w.edit_target().is_err());
+        w.begin_edit(0, 1, window, cx);
+        w.add_row(&crate::AddRow, window, cx);
+        assert!(
+            w.active_tab().edits.is_empty(),
+            "an edit was staged during a save"
+        );
+        w.tabs[active].saving = false;
+    });
+}
+
+/// W15: ⌘↵ while typing in a cell keeps what was typed.
+#[test]
+#[ignore]
+fn hardening_run_while_editing_a_cell_keeps_the_edit() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("w15");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let id = w.sessions[0].id;
+        w.browse(id, "main", "orders", window, cx)
+    });
+    assert!(shot.settle(10, |w| !w.is_running() && w.active_tab().grid.is_some()));
+    shot.act(|w, window, cx| {
+        let status = w
+            .active_tab()
+            .grid
+            .as_ref()
+            .unwrap()
+            .data
+            .columns
+            .iter()
+            .position(|c| c.name == "status")
+            .unwrap();
+        w.begin_edit(0, status, window, cx);
+        w.type_into_cell("typed", window, cx);
+    });
+    shot.keys("cmd-enter");
+    assert!(shot.settle(5, |w| !w.is_running()));
+    shot.act(|w, _, _| assert!(!w.active_tab().edits.is_empty(), "what was typed was lost"));
+}
+
+/// W14: paging with staged changes stays on the page they're on.
+#[test]
+#[ignore]
+fn hardening_paging_keeps_the_page_with_changes() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("w14");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let id = w.sessions[0].id;
+        w.browse(id, "main", "orders", window, cx)
+    });
+    assert!(shot.settle(10, |w| !w.is_running() && w.active_tab().grid.is_some()));
+    shot.act(|w, window, cx| {
+        w.add_row(&crate::AddRow, window, cx);
+        assert!(!w.active_tab().edits.is_empty());
+        w.turn_page(true, window, cx);
+        assert_eq!(
+            w.active_tab().browse.as_ref().unwrap().page,
+            0,
+            "moved off the changes"
+        );
+    });
+}

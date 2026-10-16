@@ -166,7 +166,14 @@ pub fn statements(
             .filter_map(|(ix, value)| value.as_ref().map(|v| (ix, v)))
             .collect();
         let sql = if given.is_empty() {
-            format!("insert into {name} default values")
+            // MySQL and MariaDB have no `default values`.
+            if conn.server_version().starts_with("mysql")
+                || conn.server_version().starts_with("mariadb")
+            {
+                format!("insert into {name} () values ()")
+            } else {
+                format!("insert into {name} default values")
+            }
         } else {
             format!(
                 "insert into {name} ({}) values ({})",
@@ -977,6 +984,27 @@ mod live {
         );
 
         conn.execute(&format!("drop table {table}"), 0).unwrap();
+
+        // A new row left entirely to its defaults is valid SQL on every engine
+        // (MySQL has no `default values`).
+        let defaults = format!("{table}_defaults");
+        let _ = conn.execute(&format!("drop table {defaults}"), 0);
+        conn.execute(&format!("create table {defaults} (n int default 7)"), 0)
+            .unwrap();
+        let mut edits = Edits::default();
+        edits.inserted.push(vec![None]);
+        let data = rows(conn, &format!("select * from {defaults}"));
+        let target = TableRef {
+            schema: None,
+            table: defaults.clone(),
+            key: vec![],
+        };
+        assert_eq!(
+            save(conn, &statements(conn, &target, &data, &edits)).unwrap(),
+            1,
+            "{engine:?}"
+        );
+        conn.execute(&format!("drop table {defaults}"), 0).unwrap();
     }
 
     /// The live tests share the fleet: run them one at a time.

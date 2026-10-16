@@ -46,6 +46,11 @@ pub(crate) fn count_sql(name: &str, filter: &str) -> String {
 
 impl Workspace {
     pub(crate) fn turn_page(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Staged changes are on this page: keep it, rather than move and then
+        // refuse to load the next.
+        if self.guard_edits(cx) {
+            return;
+        }
         let Some(browse) = &mut self.tabs[self.active].browse else {
             return;
         };

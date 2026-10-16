@@ -589,12 +589,20 @@ pub fn group_digits(n: usize) -> String {
     out
 }
 
+/// Indentation stops growing past this depth: laid out in full, JSON nested
+/// thousands deep would be quadratically large (40 KB of it, about 800 MB).
+pub(crate) const MAX_INDENT: usize = 32;
+
+/// Longest text the inspector lays out as JSON.
+const MAX_PRETTY_JSON: usize = 256 * 1024;
+
 /// Re-indent JSON text for reading. Returns `None` unless `text` is an object or
 /// array with balanced brackets (strings are respected), so ordinary text is
 /// never mangled.
 pub fn pretty_json(text: &str) -> Option<String> {
     let trimmed = text.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+    // Laid out on every render of the inspector: past this, shown as it is.
+    if trimmed.len() > MAX_PRETTY_JSON || !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
         return None;
     }
     let mut out = String::with_capacity(trimmed.len() * 2);
@@ -603,7 +611,7 @@ pub fn pretty_json(text: &str) -> Option<String> {
     let mut escaped = false;
     let newline = |out: &mut String, depth: usize| {
         out.push('\n');
-        out.push_str(&"  ".repeat(depth));
+        out.push_str(&"  ".repeat(depth.min(MAX_INDENT)));
     };
     let mut chars = trimmed.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -673,6 +681,16 @@ pub fn connection_color(name: &str) -> Option<Rgba> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_json_lays_out_in_linear_size() {
+        let depth = 20_000;
+        let deep = format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+        let shown = pretty_json(&deep).unwrap();
+        // About one short line per bracket, not 2·depth² characters.
+        assert!(shown.len() < 3_000_000, "{} bytes", shown.len());
+        assert!(shown.contains('1'));
+    }
 
     #[test]
     fn pretty_prints_json() {

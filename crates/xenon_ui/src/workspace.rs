@@ -1975,6 +1975,17 @@ impl Workspace {
         if self.modal_open() {
             return;
         }
+        // Typed while editing a cell: keep the edit, rather than re-run the
+        // query and lose it.
+        if self.active_tab().editing.is_some() {
+            self.commit_edit(false, window, cx);
+            self.flash(
+                "Kept your edit: save it (⌘S) or discard it before running again.",
+                false,
+                cx,
+            );
+            return;
+        }
         if !self.apply_pending_filter(window, cx) {
             self.run(RunScope::Statement, window, cx);
         }
@@ -1983,6 +1994,17 @@ impl Workspace {
     fn run_all(&mut self, _: &RunAll, window: &mut Window, cx: &mut Context<Self>) {
         // Typed inside a dialog, it's not for the tab behind it.
         if self.modal_open() {
+            return;
+        }
+        // Typed while editing a cell: keep the edit, rather than re-run the
+        // query and lose it.
+        if self.active_tab().editing.is_some() {
+            self.commit_edit(false, window, cx);
+            self.flash(
+                "Kept your edit: save it (⌘S) or discard it before running again.",
+                false,
+                cx,
+            );
             return;
         }
         if !self.apply_pending_filter(window, cx) {
@@ -3008,6 +3030,11 @@ impl Workspace {
             ),
         }
         self.reload_history(cx);
+        // Its tab has changes staged: show it as it is, rather than change its
+        // filter and then refuse to reload it.
+        if filter.is_some() && self.guard_edits(cx) {
+            return;
+        }
         let mut needs_info = false;
         if let Some(browse) = &mut self.tabs[self.active].browse {
             browse.structure = false;
@@ -3269,6 +3296,10 @@ impl Workspace {
         if matches!(tab.query, Query::Running { .. }) {
             return Err("Still loading.");
         }
+        // Changes made now would be thrown away when the save finishes.
+        if tab.saving {
+            return Err("Saving: wait for it to finish.");
+        }
         let ran = tab.last_run.as_ref().map(|(sql, _)| sql.trim());
         if ran.is_none() || ran != browse.loaded_with.as_deref().map(str::trim) {
             return Err(
@@ -3329,7 +3360,7 @@ impl Workspace {
     }
 
     /// Changes are pending: say so instead of throwing them away.
-    fn guard_edits(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn guard_edits(&mut self, cx: &mut Context<Self>) -> bool {
         if self.active_tab().edits.is_empty() {
             return false;
         }
@@ -3590,6 +3621,14 @@ impl Workspace {
             })
             .collect();
         new.sort_unstable_by(|a, b| b.cmp(a));
+        // An open edit on a new row would land on another once the rows after a
+        // removed one move up: close it.
+        if let Some(open) = &tab.editing
+            && let RowRef::New(k) = open.row
+            && new.iter().any(|&n| n <= k)
+        {
+            tab.editing = None;
+        }
         for n in new {
             edits.inserted.remove(n);
         }

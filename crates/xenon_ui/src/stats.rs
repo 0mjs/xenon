@@ -120,10 +120,13 @@ pub(crate) fn of<'a>(values: impl IntoIterator<Item = &'a Value>) -> Option<Stat
         for e in &exact {
             sum = sum.checked_add(e.rescale(scale)?)?;
         }
-        let cmp = |a: &&Exact, b: &&Exact| {
-            a.to_f64()
+        // Exactly, as the sum is: a float can't tell big integers apart.
+        let cmp = |a: &&Exact, b: &&Exact| match (a.rescale(scale), b.rescale(scale)) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            _ => a
+                .to_f64()
                 .partial_cmp(&b.to_f64())
-                .unwrap_or(Ordering::Equal)
+                .unwrap_or(Ordering::Equal),
         };
         let min = exact.iter().min_by(cmp)?;
         let max = exact.iter().max_by(cmp)?;
@@ -158,6 +161,17 @@ fn format_average(average: f64, scale: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn min_and_max_are_exact_for_big_integers() {
+        let (a, b) = (
+            Value::Integer(9_007_199_254_740_993),
+            Value::Integer(9_007_199_254_740_992),
+        );
+        let numbers = of([&a, &b]).unwrap().numbers.unwrap();
+        assert_eq!(numbers.min, "9,007,199,254,740,992");
+        assert_eq!(numbers.max, "9,007,199,254,740,993");
+    }
 
     #[test]
     fn numbers_add_up_exactly() {

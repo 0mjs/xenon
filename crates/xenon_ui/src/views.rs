@@ -61,7 +61,7 @@ pub(crate) fn pretty(json: &str) -> String {
     let mut chars = json.chars().peekable();
     let newline = |out: &mut String, depth: usize| {
         out.push('\n');
-        out.push_str(&"  ".repeat(depth));
+        out.push_str(&"  ".repeat(depth.min(crate::widgets::MAX_INDENT)));
     };
     while let Some(c) = chars.next() {
         if in_string {
