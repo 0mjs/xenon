@@ -19,16 +19,20 @@ A fast, minimal database client for Postgres, MySQL, MariaDB, SQL Server, SQLite
 - **Several connections at once**, side by side: every tab says which database it runs on.
 - **SSH tunnels** through a bastion, using your own `ssh`: `~/.ssh/config` aliases, `ProxyJump`, the
   agent (1Password, Secretive) and `known_hosts` all just work.
+- **Stays connected** through sleep and network drops, and never re-runs a query by itself.
+- **Yours to arrange:** light or dark, six accents, ten code themes, five interface and five code
+  fonts, any text size.
 
-Version 0.3.0, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
+Version 0.5.1, early. See [ROADMAP.md](ROADMAP.md) for the road to 1.0 and [PLAN.md](PLAN.md) for design and architecture.
 
 ## Install
 
-Download `Xenon-0.3.0.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
+Download `Xenon-0.5.1.dmg` from [Releases](https://github.com/0mjs/xenon/releases), open it and
 drag Xenon to Applications. It's signed with Carbon Software's Developer ID and notarized by
 Apple.
 
-Requires macOS 12 or later.
+Requires macOS 12 or later on Apple silicon. There's no automatic updating yet: **Xenon → Check
+for Updates…** says when a newer version is out.
 
 ## Use
 
@@ -45,7 +49,7 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 | Shortcut | Action |
 |---|---|
 | `⌘K` / `⌘P` | Command palette: jump to a table or run any command |
-| `⌘,` | Settings: theme, accent colour, row limits, editor size, safety, history |
+| `⌘,` | Settings: theme, layout, fonts, text size, accent, code theme, row limits, safety, history |
 | `⌘O` | Open a database file (SQLite, DuckDB) or a CSV / Parquet / JSON file |
 | `⌘N` | New server connection (Postgres, MySQL / MariaDB, SQL Server) |
 | `⇧⌘N` | Connections: open another database alongside |
@@ -53,6 +57,10 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 | `⌘↵` | Run the statement under the cursor (or the selection) |
 | `⇧⌘↵` | Run everything in the editor (or the selection) |
 | `⌘E` | Explain the statement under the cursor |
+| `⌥⇧F` | Format SQL (only the layout changes; anything it doesn't understand is left alone) |
+| `⌘/` | Toggle comment |
+| `⌘F` / `⇧⌘F` | Find / find and replace in the editor |
+| `⌘+` / `⌘−` / `⌘0` | Bigger / smaller / actual-size text, everywhere |
 | `⌘.` | Cancel the running query |
 | `⌘S` | Save the query (or a table's staged changes) |
 | `⇧⌘S` | Export results: CSV, Excel, JSON, SQL inserts, Markdown, TSV |
@@ -66,25 +74,55 @@ back Connect to open another, and `⇧⌘W` closes the current tab's connection.
 **Results grid:** click a cell, shift-click or `⇧`+arrows to select a block, arrows to move, `⌘A`
 for everything. `⌘C` copies as TSV (pastes into spreadsheets), `⇧⌘C` as CSV, `⌥⌘C` as JSON. Click
 a header to sort; drag a header's edge to resize, double-click it to fit. `Esc` returns to the
-editor.
+editor. Right-click a header to hide, pin or move a column; tables remember their arrangement.
+Select numbers to see their count, sum, average, min and max in the results bar.
+
+**Grid, Records or JSON:** the switch above the results shows rows as a grid, as cards of field and
+value (handy for one wide row), or as JSON, pretty or compact. A script's statements each get
+their own result tab.
+
+![Two result sets from one script](docs/screenshots/results.png)
 
 **Browsing a table** (click it in the explorer) opens it in its own tab with a `WHERE` filter;
-sorting there runs on the server, so you see the true top rows.
+sorting there runs on the server, so you see the true top rows. Large tables page, with a row
+count (exact when that's cheap, estimated when not).
 
 **Autocomplete** suggests tables after `FROM` / `JOIN`, columns of the tables in your statement
 (through their aliases: `o.` lists `orders`' columns), other schemas' tables, functions and
 keywords, as you type; `⌃Space` opens it anywhere.
 
-**Editing a table:** double-click a cell (or select it and press `↵`), type, and press `↵`; **Set
-NULL** is next to the field. **+ Row** adds a row (empty cells take the column's default), `⌘⌫`
+**Editing a table:** double-click a cell (or select it and press `↵`) and type straight into it: `↵`
+keeps the change, `Esc` drops it, `Tab` moves to the next cell. The inspector shows the field
+being edited, with **Set NULL**; long text and JSON open there in a bigger editor. **+ Row** adds a row (empty cells take the column's default), `⌘⌫`
 marks the selected rows for deletion. Changes stay staged, tinted in the grid, until you press
 `⌘S`: they're saved in one transaction, and if any row changed or vanished since it was loaded,
 nothing is saved. **Review SQL** shows exactly what will run; production connections always ask,
 with their name typed. Tables need a primary key to be edited.
 
+![Editing a cell in place](docs/screenshots/edit.png)
+
+**Parameters:** `:name` everywhere, `$1` on Postgres and DuckDB, `?` on MySQL, SQLite and DuckDB.
+Xenon asks for the values and writes them in as quoted literals, so the production prompt shows
+exactly what will run.
+
+**Errors where they happen:** the mistake is underlined in the editor, and a misspelt table or
+column gets "Did you mean…?" with a **Fix** button.
+
+![A misspelt column, with a fix](docs/screenshots/errors.png)
+
+**Connections** can be coloured and filed in folders: a slash in a name files it
+(`Clients/Acme production`). **File → Import Connections…** takes URLs or file paths, one per line.
+Mutual TLS: a private CA and client certificates for Postgres and MySQL / MariaDB, a CA for SQL
+Server.
+
+**Settings** (`⌘,`) change things as you go: theme, a classic or floating layout, interface and
+code fonts, text size, accent, code theme, row limits and safety.
+
+![Settings](docs/screenshots/settings.png)
+
 **Also:** drag the line under the editor to resize it (double-click to reset); when the database
-says where a query failed, the cursor jumps there; View → Theme picks System, Light or Dark; double-click
-the title bar to zoom.
+says where a query failed, the cursor jumps there; View → Theme picks System, Light or Dark; Xenon opens
+filling the screen, and double-clicking the title bar returns it to its window size.
 
 ## Build from source
 
@@ -131,5 +169,6 @@ Software Ltd. See [CONTRIBUTING.md](CONTRIBUTING.md) before sending code.
 
 ## Credits
 
-Fonts: Archivo and IBM Plex Mono, under the SIL Open Font License (`assets/fonts`). UI built on
+Fonts: Archivo, Inter, Geist, IBM Plex Sans, IBM Plex Mono, JetBrains Mono, Fira Code and Geist
+Mono, under the SIL Open Font License (`assets/fonts`). UI built on
 [GPUI](https://gpui.rs) and [gpui-component](https://github.com/longbridge/gpui-kit).
