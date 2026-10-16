@@ -623,6 +623,28 @@ pub trait Connection: Send + Sync {
     fn default_schema(&self) -> Option<String> {
         None
     }
+
+    /// The database (catalog) the session opened on, where a `USE` could
+    /// switch it (SQL Server, DuckDB): named in generated SQL so a browse or a
+    /// save can't land on another database's table of the same name.
+    fn catalog(&self) -> Option<String> {
+        None
+    }
+}
+
+/// `table` in `schema` (the connection's default schema when `None`), named in
+/// full, with its catalog where the engine has one that can change: the name
+/// browses, counts and saves use, so `USE other` or a changed `search_path` in
+/// some tab can't send them to another table of the same name.
+pub fn qualified_name(conn: &dyn Connection, schema: Option<&str>, table: &str) -> String {
+    let schema = schema.map(str::to_string).or_else(|| conn.default_schema());
+    conn.catalog()
+        .into_iter()
+        .chain(schema)
+        .map(|part| conn.ident(&part))
+        .chain([conn.ident(table)])
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 #[cfg(test)]

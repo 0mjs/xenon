@@ -740,6 +740,23 @@ pub fn controls_transaction(sql: &str) -> bool {
     })
 }
 
+/// True when `sql` manages a transaction in a way that takes it out of
+/// Xenon's read-only wrapping on production: it starts one, or runs other
+/// statements alongside `begin`/`commit`. Ending one on its own (`commit`,
+/// `rollback`) doesn't count.
+pub fn opens_unguarded_transaction(sql: &str) -> bool {
+    if !controls_transaction(sql) {
+        return false;
+    }
+    let ends_only = statements_every_way(sql).all(|words| {
+        matches!(
+            words.first().map(String::as_str),
+            Some("commit" | "rollback" | "abort" | "end" | "release")
+        )
+    });
+    !ends_only
+}
+
 /// Whether running `sql` leaves a transaction open (`Some(true)` after
 /// `begin`, `Some(false)` after `commit` / `rollback`), by its last such
 /// statement; `None` when it neither begins nor ends one. For engines that can't
@@ -1033,18 +1050,17 @@ pub fn is_plain_ident(ident: &str) -> bool {
 }
 
 /// The query behind "browse a table": `select *` with an optional raw `where`
-/// condition and sort column, capped at `limit` rows. `schema` is left out when
-/// it's `None` (the connection's default).
+/// condition and sort column, capped at `limit` rows. `name` is the table's
+/// name as SQL, already quoted (see [`crate::qualified_name`]).
 pub fn browse_table(
     quote: impl Fn(&str) -> String,
-    schema: Option<&str>,
-    table: &str,
+    name: &str,
     filter: &str,
     order: Option<(&str, SortDirection)>,
     limit: usize,
     top: bool,
 ) -> String {
-    browse_page(quote, schema, table, filter, order, limit, 0, top)
+    browse_page(quote, name, filter, order, limit, 0, top)
 }
 
 /// [`browse_table`] from row `offset` on: `limit … offset …`, or on SQL Server
@@ -1052,18 +1068,13 @@ pub fn browse_table(
 #[allow(clippy::too_many_arguments)]
 pub fn browse_page(
     quote: impl Fn(&str) -> String,
-    schema: Option<&str>,
-    table: &str,
+    name: &str,
     filter: &str,
     order: Option<(&str, SortDirection)>,
     limit: usize,
     offset: usize,
     top: bool,
 ) -> String {
-    let name = match schema {
-        Some(schema) => format!("{}.{}", quote(schema), quote(table)),
-        None => quote(table),
-    };
     let fetch = top && offset > 0;
     let mut sql = if top && !fetch {
         format!("select top ({limit}) * from {name}")
@@ -1260,17 +1271,16 @@ mod tests {
     fn later_pages_skip_the_earlier_rows() {
         let quote = |i: &str| i.to_string();
         assert_eq!(
-            browse_page(quote, None, "orders", "", None, 100, 200, false),
+            browse_page(quote, "orders", "", None, 100, 200, false),
             "select * from orders\nlimit 100 offset 200;"
         );
         assert_eq!(
-            browse_page(quote, None, "orders", "id > 5", None, 100, 200, true),
+            browse_page(quote, "orders", "id > 5", None, 100, 200, true),
             "select * from orders\nwhere id > 5\norder by (select null)\noffset 200 rows fetch next 100 rows only;"
         );
         assert_eq!(
             browse_page(
                 quote,
-                None,
                 "orders",
                 "",
                 Some(("total", SortDirection::Ascending)),
@@ -1282,7 +1292,7 @@ mod tests {
         );
         // The first page on SQL Server keeps `top`.
         assert_eq!(
-            browse_page(quote, None, "orders", "", None, 100, 0, true),
+            browse_page(quote, "orders", "", None, 100, 0, true),
             "select top (100) * from orders;"
         );
     }
@@ -1502,6 +1512,21 @@ mod tests {
     }
 
     #[test]
+    fn transactions_that_escape_the_read_only_wrap() {
+        for sql in [
+            "begin",
+            "start transaction",
+            "begin; select 1; commit",
+            "select 1; commit",
+        ] {
+            assert!(opens_unguarded_transaction(sql), "{sql}");
+        }
+        for sql in ["commit", "rollback", "end", "select 1", "commit; rollback"] {
+            assert!(!opens_unguarded_transaction(sql), "{sql}");
+        }
+    }
+
+    #[test]
     fn several_statements_counts_every_engines_reading() {
         assert!(!several_statements("select 1"));
         assert!(!several_statements("select 1; -- done"));
@@ -1686,8 +1711,7 @@ mod tests {
         assert_eq!(
             browse_table(
                 |i: &str| format!("[{i}]"),
-                None,
-                "orders",
+                "[orders]",
                 "id > 5",
                 None,
                 1000,
@@ -1707,14 +1731,13 @@ mod tests {
             }
         };
         assert_eq!(
-            browse_table(quote, None, "orders", "", None, 1000, false),
+            browse_table(quote, "orders", "", None, 1000, false),
             "select * from orders\nlimit 1000;"
         );
         assert_eq!(
             browse_table(
                 quote,
-                Some("Analytics"),
-                "order",
+                "\"Analytics\".\"order\"",
                 "total > 5",
                 Some(("created_at", SortDirection::Descending)),
                 50,
@@ -1821,14 +1844,13 @@ mod tests {
     fn browse_table_builds_filter_and_order() {
         let quote = |s: &str| format!("\"{s}\"");
         assert_eq!(
-            browse_table(quote, Some("public"), "orders", "", None, 1000, false),
+            browse_table(quote, "\"public\".\"orders\"", "", None, 1000, false),
             "select * from \"public\".\"orders\"\nlimit 1000;"
         );
         assert_eq!(
             browse_table(
                 quote,
-                Some("public"),
-                "orders",
+                "\"public\".\"orders\"",
                 "  status = 'paid';  ",
                 Some(("total", SortDirection::Descending)),
                 50,

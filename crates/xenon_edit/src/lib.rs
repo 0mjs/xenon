@@ -99,10 +99,8 @@ pub fn statements(
     data: &ResultSet,
     edits: &Edits,
 ) -> Vec<Statement> {
-    let name = match &target.schema {
-        Some(schema) => format!("{}.{}", conn.ident(schema), conn.ident(&target.table)),
-        None => conn.ident(&target.table),
-    };
+    // Named in full: a `USE` or `search_path` change can't redirect it.
+    let name = xenon_driver::qualified_name(conn, target.schema.as_deref(), &target.table);
     let column = |ix: usize| conn.ident(&data.columns[ix].name);
     // Rows are found by their key as fetched, even when the key itself is edited.
     let key_of = |row: usize| {
@@ -409,6 +407,66 @@ mod tests {
         assert_eq!(edits.cells.len(), 1);
     }
 
+    /// A table of the same name made or switched to later (a SQLite temp
+    /// table, DuckDB's `use other`) doesn't take the save.
+    #[test]
+    fn saves_go_to_the_table_that_was_loaded() {
+        let rows = |conn: &dyn Connection, sql: &str| match conn.execute(sql, 10).unwrap().outcome {
+            QueryOutcome::Rows(rows) => rows.rows,
+            other => panic!("{other:?}"),
+        };
+        let edit = || {
+            let mut edits = Edits::default();
+            edits.set(RowRef::Existing(0), 1, Value::Text("saved".into()), None);
+            edits
+        };
+
+        let (conn, path) = shop();
+        let data = fetch(&conn);
+        conn.execute(
+            "create temp table orders (id integer primary key, status text, total numeric, note text);
+             insert into temp.orders select * from main.orders",
+            0,
+        )
+        .unwrap();
+        save(&conn, &statements(&conn, &target(), &data, &edit())).unwrap();
+        assert_eq!(
+            rows(&conn, "select status from main.orders where id = 1")[0][0],
+            Value::Text("saved".into())
+        );
+        assert_eq!(
+            rows(&conn, "select status from temp.orders where id = 1")[0][0],
+            Value::Text("paid".into())
+        );
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+
+        let duck = xenon_duckdb::DuckDbConnection::open_in_memory().unwrap();
+        duck.execute(
+            "create table orders (id integer primary key, status text);
+             insert into orders values (1, 'paid');
+             attach ':memory:' as other;
+             create table other.main.orders (id integer primary key, status text);
+             insert into other.main.orders values (1, 'paid')",
+            0,
+        )
+        .unwrap();
+        let QueryOutcome::Rows(data) = duck.execute("select * from orders", 10).unwrap().outcome
+        else {
+            panic!("no rows")
+        };
+        duck.execute("use other", 0).unwrap();
+        save(&duck, &statements(&duck, &target(), &data, &edit())).unwrap();
+        assert_eq!(
+            rows(&duck, "select status from memory.main.orders")[0][0],
+            Value::Text("saved".into())
+        );
+        assert_eq!(
+            rows(&duck, "select status from other.main.orders")[0][0],
+            Value::Text("paid".into())
+        );
+    }
+
     #[test]
     fn statements_read_like_sql() {
         let (conn, path) = shop();
@@ -427,12 +485,12 @@ mod tests {
         assert_eq!(
             sql,
             [
-                // Only if the row is as it was loaded.
-                "delete from orders where id = 1 and status = 'paid' and abs(total - 10.5) <= 0.0001 and note is null",
+                // Named in full; only if the row is as it was loaded.
+                "delete from main.orders where id = 1 and status = 'paid' and abs(total - 10.5) <= 0.0001 and note is null",
                 // Saved only if the edited cells still hold what was loaded.
-                "update orders set status = 'o''clock', note = NULL \
+                "update main.orders set status = 'o''clock', note = NULL \
                  where id = 2 and status = 'pending' and note = 'it''s'",
-                "insert into orders (status) values ('pending')",
+                "insert into main.orders (status) values ('pending')",
             ]
         );
         std::fs::remove_file(path).ok();

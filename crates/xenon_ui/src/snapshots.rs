@@ -22,7 +22,7 @@ use crate::workspace::{RunScope, Workspace};
 const WIDTH: f32 = 1440.;
 const HEIGHT: f32 = 900.;
 
-struct Shot {
+pub(crate) struct Shot {
     cx: HeadlessAppContext,
     window: AnyWindowHandle,
     workspace: Entity<Workspace>,
@@ -30,7 +30,7 @@ struct Shot {
 }
 
 impl Shot {
-    fn new(mode: Mode, open: Option<&Path>, out: &Path) -> Self {
+    pub(crate) fn new(mode: Mode, open: Option<&Path>, out: &Path) -> Self {
         let data = out.join("data/xenon.db");
         let value = if mode == Mode::Dark { "dark" } else { "light" };
         Store::open(&data)
@@ -68,7 +68,10 @@ impl Shot {
         }
     }
 
-    fn act(&mut self, f: impl FnOnce(&mut Workspace, &mut Window, &mut gpui::Context<Workspace>)) {
+    pub(crate) fn act(
+        &mut self,
+        f: impl FnOnce(&mut Workspace, &mut Window, &mut gpui::Context<Workspace>),
+    ) {
         let workspace = self.workspace.clone();
         self.cx
             .update_window(self.window, |_, window, cx| {
@@ -79,7 +82,7 @@ impl Shot {
     }
 
     /// Let background work and timers run until `done`, for up to `seconds`.
-    fn settle(&mut self, seconds: u64, done: impl Fn(&Workspace) -> bool) -> bool {
+    pub(crate) fn settle(&mut self, seconds: u64, done: impl Fn(&Workspace) -> bool) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
         while std::time::Instant::now() < deadline {
             self.cx.run_until_parked();
@@ -118,7 +121,7 @@ fn analytics(dir: &Path) -> PathBuf {
 }
 
 /// A small, realistic database for the screens that show data.
-fn fixture(dir: &Path) -> PathBuf {
+pub(crate) fn fixture(dir: &Path) -> PathBuf {
     let path = dir.join("shop.db");
     let _ = std::fs::remove_file(&path);
     let db = rusqlite::Connection::open(&path).unwrap();
@@ -314,7 +317,7 @@ fn seed_saved(store: &Store, shop: &Path) {
 
 /// The screenshot tests share a data folder (and the environment variable
 /// naming it): one at a time.
-static HARNESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static HARNESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 #[ignore]
@@ -1198,6 +1201,22 @@ fn snapshots() {
             w.confirm = None;
             w.prefs.row_limit = 100_000;
         });
+        // A transaction the script starts can't be kept read-only, so on
+        // production it asks, as a write does; ending one doesn't.
+        for (sql, asks) in [
+            ("begin", true),
+            ("begin; select 1; commit", true),
+            ("commit", false),
+        ] {
+            shot.act(move |w, window, cx| {
+                let editor = w.active_tab().editor.clone();
+                editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));
+                w.run(crate::workspace::RunScope::All, window, cx);
+                assert_eq!(w.confirm.is_some(), asks, "{sql}");
+                w.confirm = None;
+            });
+            assert!(shot.settle(10, |w| !w.is_running()));
+        }
         shot.save(&format!("29-script-rolled-back-{suffix}"));
         shot.act(|w, _, _| w.sessions[0].environment = xenon_store::Environment::None);
 

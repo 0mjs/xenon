@@ -231,4 +231,6 @@ pub fn init(cx: &mut App) {
 }
 
 #[cfg(test)]
+mod hardening_tests;
+#[cfg(test)]
 mod snapshots;

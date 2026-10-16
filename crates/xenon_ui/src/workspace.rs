@@ -403,6 +403,10 @@ pub(crate) struct Browse {
     _filter_enter: Subscription,
     /// The filter the rows were last loaded with.
     pub(crate) applied: String,
+    /// The SQL the table was last loaded with. Rows are saved to the table only
+    /// while they come from it: other SQL run in the tab (typed, or from
+    /// History) shows rows that aren't this table's.
+    pub(crate) loaded_with: Option<String>,
     /// Which page of rows is shown, from 0, and the filter and sort it's a page
     /// of (a new one starts again at the first).
     pub(crate) page: usize,
@@ -884,6 +888,7 @@ impl Workspace {
                         order: None,
                         _filter_enter: filter_enter,
                         applied: String::new(),
+                        loaded_with: None,
                         page: 0,
                         paged_for: None,
                         total: None,
@@ -1206,11 +1211,18 @@ impl Workspace {
                         this.connect_dialog = None;
                         this.reload_saved();
                         // The same database reached another way (a pasted URL for a
-                        // saved connection, say): use the one already open.
+                        // saved connection, say): use the one already open, but only
+                        // when it's the same saved connection with the same guards. A
+                        // production connection never lands on a development session.
                         if let Some(id) = this
                             .sessions
                             .iter()
-                            .find(|s| s.conn.id() == conn.id())
+                            .find(|s| {
+                                s.conn.id() == conn.id()
+                                    && s.saved_id == saved_id
+                                    && s.environment == profile.environment
+                                    && s.read_only == profile.read_only
+                            })
                             .map(|s| s.id)
                         {
                             this.attach(id, true, window, cx);
@@ -2013,13 +2025,23 @@ impl Workspace {
         else {
             return;
         };
+        let production = session.environment == Environment::Production;
+        // A transaction the script manages can't be kept read-only, so on
+        // production its reads could write unseen (a function that writes):
+        // ask, as for a write.
+        let unguarded = production
+            && assess(&sql).is_none()
+            && xenon_driver::sql::opens_unguarded_transaction(&sql);
+        let assessed = assess(&sql).or_else(|| unguarded.then(|| (Risk::Write, String::new())));
         if !session.read_only
-            && let Some((risk, what)) = assess(&sql)
-            && (session.environment == Environment::Production
-                || (self.prefs.confirm_risky && risk >= Risk::EveryRow))
+            && let Some((risk, what)) = assessed
+            && (production || (self.prefs.confirm_risky && risk >= Risk::EveryRow))
         {
-            let production = session.environment == Environment::Production;
             let body = match risk {
+                _ if unguarded => "This starts or manages its own transaction, so what runs in \
+                                   it isn't kept read-only by the server: a function that writes \
+                                   would write."
+                    .to_string(),
                 Risk::Destructive => format!("This runs {what}, which can't be undone."),
                 Risk::EveryRow => format!("This runs {what}, so it changes every row."),
                 Risk::Write => format!("This {what} statement writes to the database."),
@@ -2931,13 +2953,12 @@ impl Workspace {
         let paged_for = Some((filter.trim().to_string(), browse.order.clone()));
         let restart = browse.paged_for != paged_for;
         let page = if restart { 0 } else { browse.page };
-        // Leave out the schema names resolve to anyway: `from orders`, not `from "public"."orders"`.
-        let schema = (conn.default_schema().as_deref() != Some(browse.schema.as_str()))
-            .then_some(browse.schema.as_str());
+        // Named in full, so a `USE` or `search_path` change in some tab can't
+        // point it at another table of the same name.
+        let name = xenon_driver::qualified_name(conn.as_ref(), Some(&browse.schema), &browse.table);
         let sql = xenon_driver::sql::browse_page(
             |ident| conn.ident(ident),
-            schema,
-            &browse.table,
+            &name,
             &filter,
             browse
                 .order
@@ -2957,9 +2978,10 @@ impl Workspace {
             );
             return;
         }
-        editor.update(cx, |editor, cx| editor.set_value(sql, window, cx));
+        editor.update(cx, |editor, cx| editor.set_value(sql.clone(), window, cx));
         if let Some(browse) = &mut self.tabs[self.active].browse {
             browse.applied = filter;
+            browse.loaded_with = Some(sql);
             browse.page = page;
             if restart {
                 browse.paged_for = paged_for;
@@ -3014,6 +3036,12 @@ impl Workspace {
         if matches!(tab.query, Query::Running { .. }) {
             return Err("Still loading.");
         }
+        let ran = tab.last_run.as_ref().map(|(sql, _)| sql.trim());
+        if ran.is_none() || ran != browse.loaded_with.as_deref().map(str::trim) {
+            return Err(
+                "These rows come from other SQL, not this table: reopen the table to edit it.",
+            );
+        }
         let object = session
             .schemas
             .iter()
@@ -3034,8 +3062,7 @@ impl Workspace {
             .collect();
         match key {
             Some(key) if !key.is_empty() => Ok(TableRef {
-                schema: (session.conn.default_schema().as_deref() != Some(browse.schema.as_str()))
-                    .then(|| browse.schema.clone()),
+                schema: Some(browse.schema.clone()),
                 table: browse.table.clone(),
                 key,
             }),
@@ -3708,12 +3735,7 @@ impl Workspace {
         let conn = self.active_session()?.conn.clone();
         let table = match &self.active_tab().browse {
             Some(browse) => {
-                let table = conn.ident(&browse.table);
-                if conn.default_schema().as_deref() == Some(browse.schema.as_str()) {
-                    table
-                } else {
-                    format!("{}.{table}", conn.ident(&browse.schema))
-                }
+                xenon_driver::qualified_name(conn.as_ref(), Some(&browse.schema), &browse.table)
             }
             None => "results".to_string(),
         };

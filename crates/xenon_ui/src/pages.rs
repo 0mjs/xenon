@@ -90,12 +90,7 @@ impl Workspace {
             return;
         }
         let conn = session.conn.clone();
-        let schema = (conn.default_schema().as_deref() != Some(browse.schema.as_str()))
-            .then(|| conn.ident(&browse.schema));
-        let name = match schema {
-            Some(schema) => format!("{schema}.{}", conn.ident(&browse.table)),
-            None => conn.ident(&browse.table),
-        };
+        let name = xenon_driver::qualified_name(conn.as_ref(), Some(&browse.schema), &browse.table);
         let sql = count_sql(&name, &filter);
         if xenon_driver::sql::writes(&sql) {
             return;

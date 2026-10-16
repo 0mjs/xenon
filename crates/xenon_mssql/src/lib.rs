@@ -170,6 +170,8 @@ pub struct MssqlConnection {
     local: bool,
     version: String,
     schema: Option<String>,
+    /// The database it opened on (`db_name()`), named in generated SQL.
+    catalog: Option<String>,
     options: ConnectOptions,
     /// `None` after a cancel killed the session; the next query reconnects.
     client: Mutex<Option<Tds>>,
@@ -316,12 +318,12 @@ impl MssqlConnection {
         } else {
             &options.user
         };
-        let (client, spid, version, schema) = runtime().block_on(async {
+        let (client, spid, version, schema, catalog) = runtime().block_on(async {
             let mut client = open(options).await?;
             let row = client
                 .simple_query(
                     "select @@spid, cast(serverproperty('ProductVersion') as nvarchar(64)), \
-                     cast(serverproperty('EngineEdition') as int), schema_name()",
+                     cast(serverproperty('EngineEdition') as int), schema_name(), db_name()",
                 )
                 .await
                 .map_err(describe)?
@@ -333,8 +335,9 @@ impl MssqlConnection {
             let version: String = row.get::<&str, _>(1).unwrap_or_default().to_string();
             let azure = row.get::<i32, _>(2) == Some(5);
             let schema = row.get::<&str, _>(3).map(str::to_string);
+            let catalog = row.get::<&str, _>(4).map(str::to_string);
             let label = if azure { "azure sql" } else { "sqlserver" };
-            anyhow::Ok((client, spid, format!("{label} {version}"), schema))
+            anyhow::Ok((client, spid, format!("{label} {version}"), schema, catalog))
         })?;
         let database = &options.database;
         Ok(Self {
@@ -347,6 +350,7 @@ impl MssqlConnection {
             local: matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"),
             version,
             schema,
+            catalog,
             cancel: Arc::new(MsCancel {
                 options: options.clone(),
                 spid: Mutex::new(spid),
@@ -873,6 +877,10 @@ impl Connection for MssqlConnection {
 
     fn default_schema(&self) -> Option<String> {
         self.schema.clone()
+    }
+
+    fn catalog(&self) -> Option<String> {
+        self.catalog.clone()
     }
 
     fn uses_top(&self) -> bool {

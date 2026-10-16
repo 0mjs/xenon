@@ -65,6 +65,8 @@ pub struct DuckDbConnection {
     name: String,
     path: PathBuf,
     version: String,
+    /// The database it opened on (`current_database()`), named in generated SQL.
+    catalog: Option<String>,
     cancel: Arc<Interrupt>,
 }
 
@@ -142,6 +144,9 @@ impl DuckDbConnection {
         let version: String = conn
             .query_row("select version()", [], |row| row.get(0))
             .unwrap_or_default();
+        let catalog: Option<String> = conn
+            .query_row("select current_database()", [], |row| row.get(0))
+            .ok();
         let cancel = Arc::new(Interrupt {
             handle: conn.interrupt_handle(),
             user: AtomicBool::new(false),
@@ -152,6 +157,7 @@ impl DuckDbConnection {
             name,
             path,
             version: format!("duckdb {}", version.trim_start_matches('v')),
+            catalog,
             cancel,
         })
     }
@@ -551,6 +557,10 @@ impl Connection for DuckDbConnection {
 
     fn default_schema(&self) -> Option<String> {
         Some("main".into())
+    }
+
+    fn catalog(&self) -> Option<String> {
+        self.catalog.clone()
     }
 
     fn literal(&self, value: &Value) -> String {

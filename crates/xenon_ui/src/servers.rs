@@ -137,6 +137,9 @@ impl Connection for Tunneled {
     fn default_schema(&self) -> Option<String> {
         self.inner.default_schema()
     }
+    fn catalog(&self) -> Option<String> {
+        self.inner.catalog()
+    }
     fn uses_top(&self) -> bool {
         self.inner.uses_top()
     }
