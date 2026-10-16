@@ -13,10 +13,16 @@ use crate::workspace::Workspace;
 /// the estimate is shown instead.
 const COUNT_UP_TO: u64 = 100_000;
 
+/// How many counts have started, for tests.
+#[cfg(test)]
+pub(crate) static COUNTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Total {
     Exact(u64),
     About(u64),
+    /// Being counted, so it isn't counted twice.
+    Counting,
 }
 
 /// `1.2M`, `34K`: a rough count, shown as one.
@@ -53,10 +59,18 @@ impl Workspace {
 
     /// After a table tab's rows arrive: how many there are in all, once per
     /// filter and sort.
+    ///
+    /// The count runs the tab's filter again, so it gets the same protection as
+    /// the browse: only after the browse itself succeeded, never when the count
+    /// would write, not while another query uses the connection, and on
+    /// production in a read-only transaction under the time limit.
     pub(crate) fn find_total(&mut self, tab_id: usize, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
             return;
         };
+        if !matches!(tab.query, crate::workspace::Query::Done(_)) || self.busy(tab_id).is_some() {
+            return;
+        }
         let (Some(browse), Some(session)) =
             (&tab.browse, tab.session.and_then(|id| self.session(id)))
         else {
@@ -83,7 +97,37 @@ impl Workspace {
             None => conn.ident(&browse.table),
         };
         let sql = count_sql(&name, &filter);
-        let task = cx.background_spawn(async move { conn.execute(&sql, 1) });
+        if xenon_driver::sql::writes(&sql) {
+            return;
+        }
+        let production = session.environment == xenon_store::Environment::Production;
+        // On production inside the user's own transaction there's no wrapping
+        // it (a rollback would end theirs): skip the count.
+        if production && session.in_transaction {
+            return;
+        }
+        let wrap = production.then(|| conn.begin_read_only()).flatten();
+        let limit = (production && self.prefs.query_limit > 0)
+            .then(|| std::time::Duration::from_secs(self.prefs.query_limit));
+        let live = std::sync::Arc::new(crate::workspace::Live::default());
+        if let Some(limit) = limit {
+            crate::workspace::watchdog(live.clone(), conn.cancel_handle(), limit);
+        }
+        self.set_total(tab_id, Total::Counting, cx);
+        #[cfg(test)]
+        COUNTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let task = cx.background_spawn(async move {
+            let counted = match wrap {
+                Some(begin) => conn.execute(begin, 1).and_then(|_| {
+                    let counted = conn.execute(&sql, 1);
+                    let _ = conn.execute("rollback", 1);
+                    counted
+                }),
+                None => conn.execute(&sql, 1),
+            };
+            live.done.store(true, std::sync::atomic::Ordering::SeqCst);
+            counted
+        });
         cx.spawn(async move |this, cx| {
             let Ok(done) = task.await else { return };
             let count = match done.outcome {
@@ -140,7 +184,7 @@ impl Workspace {
             Some(Total::Exact(n)) => format!(" of {}", group_digits(n as usize)),
             Some(Total::About(n)) if compact => format!(" / ~{}", rough(n)),
             Some(Total::About(n)) => format!(" of about {}", rough(n)),
-            None => String::new(),
+            Some(Total::Counting) | None => String::new(),
         };
         let arrow = |id: &'static str, label: &'static str, enabled: bool, forward: bool| {
             widgets::button(theme, id, label, ButtonKind::Ghost, enabled)

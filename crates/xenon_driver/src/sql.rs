@@ -476,45 +476,201 @@ const WRITE_VERBS: &[&str] = &[
     "lo_export",
     "lo_unlink",
     "pg_file_write",
-    // SQL Server: the shell.
-    "xp_cmdshell",
+    "pg_file_unlink",
+    "pg_file_rename",
+    "dblink",
+    "lo_create",
+    "lo_creat",
+    "lo_put",
+    "lo_from_bytea",
+    "lo_truncate",
+    "lo_truncate64",
+    "lowrite",
+    "pg_notify",
+    "pg_logical_emit_message",
+    "pg_create_logical_replication_slot",
+    "pg_create_physical_replication_slot",
+    "pg_drop_replication_slot",
+    "pg_replication_origin_create",
+    "pg_replication_origin_drop",
+    "pg_stat_reset",
+    "pg_stat_reset_shared",
+    "pg_stat_reset_single_table_counters",
+    "pg_backup_start",
+    "pg_backup_stop",
+    "pg_start_backup",
+    "pg_stop_backup",
+    "pg_wal_replay_pause",
+    "pg_wal_replay_resume",
+    "pg_import_system_collations",
+    // SQL Server: the server, sessions, and other servers' data.
+    "kill",
+    "shutdown",
+    "dbcc",
+    "reconfigure",
+    "deny",
+    "openquery",
+    "openrowset",
+    "opendatasource",
+];
+
+/// Statements of two words that change something, found anywhere in a
+/// statement (a SQL Server batch needs no semicolons): `backup database`,
+/// `waitfor (receive …)`. Two words, so a column named `backup` isn't one.
+const WRITE_PAIRS: &[(&str, &[&str])] = &[
+    (
+        "backup",
+        &["database", "log", "certificate", "master", "service"],
+    ),
+    (
+        "restore",
+        &[
+            "database",
+            "log",
+            "headeronly",
+            "filelistonly",
+            "verifyonly",
+            "labelonly",
+            "master",
+            "service",
+        ],
+    ),
+    ("disable", &["trigger"]),
+    ("enable", &["trigger"]),
+    ("waitfor", &["receive", "get"]),
+    ("send", &["on"]),
+    ("load", &["data", "xml"]),
+    ("lock", &["table", "tables"]),
+    ("unlock", &["tables"]),
+    ("install", &["plugin", "component"]),
+    // `next value for a_sequence` takes the next value.
+    ("next", &["value"]),
+];
+
+/// The write a statement's words hide, if any: a verb from [`WRITE_VERBS`]
+/// (also schema-qualified, `pg_catalog.setval`), an `xp_` procedure, or a
+/// pair from [`WRITE_PAIRS`]. `for update` / `for no key update` and
+/// `on duplicate key update` lock or belong to an insert, not a write.
+fn hidden_write(words: &[String]) -> Option<&str> {
+    words.iter().enumerate().find_map(|(ix, word)| {
+        let name = word.rsplit('.').next().unwrap_or(word);
+        let lock = name == "update" && ix > 0 && matches!(words[ix - 1].as_str(), "for" | "key");
+        if (WRITE_VERBS.contains(&name) || name.starts_with("xp_")) && !lock {
+            return Some(name);
+        }
+        let next = words.get(ix + 1)?;
+        WRITE_PAIRS
+            .iter()
+            .any(|(first, seconds)| name == *first && seconds.contains(&next.as_str()))
+            .then_some(name)
+    })
+}
+
+/// `set` targets that change the server for everyone, or make Xenon or DuckDB
+/// write files or fetch code: writes, even on a read-only connection.
+const WRITING_SETTINGS: &[&str] = &[
+    "global",
+    "persist",
+    "persist_only",
+    "role",
+    "authorization",
+    "password",
+    // DuckDB: profiles, logs and extensions.
+    "enable_profiling",
+    "enable_profile",
+    "profiling_output",
+    "profile_output",
+    "profiling_mode",
+    "log_query_path",
+    "enable_http_logging",
+    "http_logging_output",
+    "enable_external_access",
+    "autoinstall_known_extensions",
+    "autoload_known_extensions",
+    "allow_unsigned_extensions",
+    "allow_community_extensions",
+    "custom_extension_repository",
+    "autoinstall_extension_repository",
+    "extension_directory",
+    "allowed_directories",
+    "allowed_paths",
+    "secret_directory",
+    "temp_directory",
+    "home_directory",
+];
+
+/// `pragma name(arg)` forms that only read; any other pragma with an argument
+/// sets something (`pragma user_version(7)`).
+const READING_PRAGMAS: &[&str] = &[
+    "table_info",
+    "table_xinfo",
+    "table_list",
+    "index_info",
+    "index_xinfo",
+    "index_list",
+    "foreign_key_list",
+    "foreign_key_check",
+    "integrity_check",
+    "quick_check",
+    "storage_info",
+    "show",
+    "metadata_info",
 ];
 
 fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
     let words = words_outside_literals(statement, lexing);
     let first = words.first()?.as_str();
     let has = |word: &str| words.iter().any(|w| w == word);
-    // A write verb somewhere in the statement; `for update` / `for no key update`
-    // and `on duplicate key update` lock or belong to an insert, not a write.
-    let hidden = || {
-        words.iter().enumerate().find_map(|(ix, word)| {
-            let lock =
-                word == "update" && ix > 0 && matches!(words[ix - 1].as_str(), "for" | "key");
-            (WRITE_VERBS.contains(&word.as_str()) && !lock).then_some(word.as_str())
-        })
-    };
+    let second = words.get(1).map(String::as_str);
+    let hidden = || hidden_write(&words);
     let verb = if READS.contains(&first) {
         match first {
             // Plain `explain` only plans; `explain analyze` runs the statement.
             "explain" if !(has("analyze") || has("analyse")) => return None,
-            "select" if has("into") => return Some((Risk::Write, "SELECT INTO".into())),
-            // Changing who you are or the server's settings is a write.
+            // `select … into` makes a table (or a file, on MySQL), after a CTE
+            // or under `explain analyze` too.
+            "select" | "with" | "explain" if has("into") && has("select") => {
+                return Some((Risk::Write, "SELECT INTO".into()));
+            }
+            // MySQL's `reset master`, `reset persist`…; Postgres's `reset name` reads.
+            "reset"
+                if matches!(
+                    second,
+                    Some("master" | "replica" | "slave" | "persist" | "binary" | "query")
+                ) =>
+            {
+                return Some((Risk::Write, "RESET".into()));
+            }
+            // Only `start transaction` starts nothing else (`start replica`).
+            "start" if second != Some("transaction") => {
+                return Some((Risk::Write, "START".into()));
+            }
+            // Changing who you are or the server's settings is a write, also as
+            // `@@global.name`.
             "set"
-                if [
-                    "role",
-                    "authorization",
-                    "global",
-                    "persist",
-                    "persist_only",
-                    "password",
-                ]
-                .iter()
-                .any(|w| has(w)) =>
+                if words.iter().any(|word| {
+                    let scope = word.split('.').next().unwrap_or(word);
+                    let name = word.rsplit('.').next().unwrap_or(word);
+                    WRITING_SETTINGS.contains(&scope) || WRITING_SETTINGS.contains(&name)
+                }) =>
             {
                 return Some((Risk::Write, "SET".into()));
             }
-            // `pragma name = value` writes; `pragma name` / `pragma name(arg)` reads.
-            "pragma" if statement.contains('=') => return Some((Risk::Write, "PRAGMA".into())),
+            // `pragma name = value` and `pragma name(value)` set something
+            // (but `pragma table_info(t)` reads), and some pragmas act.
+            "pragma"
+                if statement.contains('=')
+                    || (statement.contains('(')
+                        && !second.is_some_and(|name| READING_PRAGMAS.contains(&name)))
+                    || second.is_some_and(|name| {
+                        ["enable_", "disable_", "force_", "create_", "drop_"]
+                            .iter()
+                            .any(|prefix| name.starts_with(prefix))
+                            || matches!(name, "optimize" | "wal_checkpoint" | "incremental_vacuum")
+                    }) =>
+            {
+                return Some((Risk::Write, "PRAGMA".into()));
+            }
             _ => hidden()?,
         }
     } else {
@@ -555,6 +711,15 @@ fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
         // Anything else that isn't a known read: a write until shown otherwise.
         _ => Some((Risk::Write, summary)),
     }
+}
+
+/// True when any engine might read `sql` as more than one statement (see
+/// [`READINGS`]). What decides whether a script must run as one transaction:
+/// Xenon's own split can see one statement where the server sees two.
+pub fn several_statements(sql: &str) -> bool {
+    READINGS
+        .into_iter()
+        .any(|lexing| split_as(sql, lexing).len() > 1)
 }
 
 /// True when `sql` changes anything, as far as [`assess`] can tell.
@@ -1271,6 +1436,83 @@ mod tests {
         ] {
             assert_eq!(assess(sql), None, "{sql:?}");
         }
+    }
+
+    #[test]
+    fn statements_that_change_the_server_or_files_are_writes() {
+        for sql in [
+            // MySQL: binary logs, persisted settings, replication.
+            "reset master",
+            "reset persist",
+            "start replica",
+            "set @@global.max_connections = 10",
+            "set @@persist.max_connections = 10",
+            // SQL Server batches without semicolons.
+            "select 1\nkill 55",
+            "select 1 shutdown",
+            "select 1\nbackup database shop to disk = 'x'",
+            "select 1\nrestore database shop from disk = 'x'",
+            "select 1\ndbcc checkdb",
+            "select 1\ndeny select on t to bob",
+            "select 1\ndisable trigger t on orders",
+            "waitfor (receive top (1) * from q)",
+            "select next value for order_ids",
+            "select * from openquery(remote, 'delete from t')",
+            "begin select 1 kill 55 end",
+            "exec xp_dirtree 'c:\\'",
+            // `into` after a CTE, or under explain analyze.
+            "with c as (select 1 as n) select n into made from c",
+            "explain analyze select 1 into made",
+            "select 1 into outfile '/tmp/x'",
+            // Functions, schema-qualified or not on the list before.
+            "select pg_catalog.pg_terminate_backend(42)",
+            "select pg_catalog.setval('s', 1)",
+            "select dblink('dbname=x', 'delete from t')",
+            "select lo_from_bytea(0, 'x')",
+            "select pg_notify('c', 'x')",
+            // SQLite pragmas that set or act; DuckDB settings that write files
+            // or fetch extensions.
+            "pragma user_version(7)",
+            "pragma optimize",
+            "pragma enable_profiling",
+            "set enable_profiling = 'json'",
+            "set profiling_output = '/tmp/p.json'",
+            "set autoinstall_known_extensions = true",
+            "lock tables orders write",
+            "load data infile 'x' into table t",
+        ] {
+            assert!(writes(sql), "{sql:?} read as a read");
+        }
+        for sql in [
+            "reset all",
+            "reset search_path",
+            "start transaction",
+            "start transaction read only",
+            "set search_path = app",
+            "set @@session.sql_mode = ''",
+            "select backup, restore, lock from settings",
+            "pragma table_info(orders)",
+            "pragma table_info('orders')",
+            "pragma user_version",
+            "select next_value from t",
+            "explain select 1",
+        ] {
+            assert!(!writes(sql), "{sql:?} read as a write");
+        }
+    }
+
+    #[test]
+    fn several_statements_counts_every_engines_reading() {
+        assert!(!several_statements("select 1"));
+        assert!(!several_statements("select 1; -- done"));
+        assert!(several_statements("select 1; select 2"));
+        // One statement to Xenon's own split, two to DuckDB or SQLite.
+        assert!(several_statements(
+            "insert into t values (1) -- c\r; insert into u values (2)"
+        ));
+        assert!(several_statements(
+            "insert into t values (1) /* a /* */; insert into u values (2); /* */"
+        ));
     }
 
     #[test]

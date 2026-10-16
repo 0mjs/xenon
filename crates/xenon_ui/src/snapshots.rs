@@ -456,7 +456,11 @@ fn snapshots() {
             w.run_browse(window, cx);
         });
         assert!(shot.settle(10, |w| {
-            !w.is_running() && w.active_tab().browse.as_ref().unwrap().total.is_some()
+            !w.is_running()
+                && matches!(
+                    w.active_tab().browse.as_ref().unwrap().total,
+                    Some(crate::pages::Total::Exact(_))
+                )
         }));
         let mut total = 0;
         shot.act(|w, _, _| {
@@ -470,6 +474,34 @@ fn snapshots() {
             assert_eq!(w.active_tab().grid.as_ref().unwrap().data.rows.len(), 500);
         });
         shot.save(&format!("47-pages-{suffix}"));
+        // A filter the server refuses isn't run again to count rows.
+        let set_filter = |shot: &mut Shot, text: &'static str| {
+            shot.act(move |w, window, cx| {
+                let filter = w.active_tab().browse.as_ref().unwrap().filter.clone();
+                filter.update(cx, |f, cx| f.set_value(text, window, cx));
+                w.run_browse(window, cx);
+            });
+        };
+        let counts = crate::pages::COUNTS.load(std::sync::atomic::Ordering::SeqCst);
+        set_filter(&mut shot, "no_such_column = 1");
+        assert!(shot.settle(10, |w| !w.is_running()));
+        shot.act(|w, _, _| {
+            assert!(w.error_text().is_some());
+            assert_eq!(w.active_tab().browse.as_ref().unwrap().total, None);
+        });
+        assert_eq!(
+            crate::pages::COUNTS.load(std::sync::atomic::Ordering::SeqCst),
+            counts,
+            "counted the rows of a refused filter"
+        );
+        set_filter(&mut shot, "");
+        assert!(shot.settle(10, |w| {
+            !w.is_running()
+                && matches!(
+                    w.active_tab().browse.as_ref().unwrap().total,
+                    Some(crate::pages::Total::Exact(_))
+                )
+        }));
         // The busiest results bar: a long error, a staged change, paging, and a
         // wide inspector. Everything stays in its lane.
         shot.act(|w, window, cx| {
@@ -1109,6 +1141,35 @@ fn snapshots() {
             };
             assert_ne!(rows.rows[0][0], xenon_driver::Value::Text("stopped".into()));
             w.prefs.query_limit = 60;
+        });
+        // …and so does a script SQLite reads as two statements where Xenon's own
+        // split sees one (SQLite's comments don't nest).
+        shot.act(|w, _, cx| {
+            let tab = w.active_tab().id;
+            w.execute(
+                tab,
+                "update orders set status = 'unwrapped' where id = 3 /* a /* */;\n\
+                 insert into no_such_table values (1); /* */"
+                    .into(),
+                None,
+                cx,
+            );
+        });
+        assert!(shot.settle(10, |w| w.error_text().is_some()));
+        shot.act(|w, _, _| {
+            let error = w.error_text().unwrap_or_default();
+            assert!(error.contains("nothing it did was kept"), "{error}");
+            let status = w.sessions[0]
+                .conn
+                .execute("select status from orders where id = 3", 1)
+                .unwrap();
+            let xenon_driver::QueryOutcome::Rows(rows) = status.outcome else {
+                panic!("no rows")
+            };
+            assert_ne!(
+                rows.rows[0][0],
+                xenon_driver::Value::Text("unwrapped".into())
+            );
         });
         // On production a write asks first, and so does Fetch all re-running one.
         shot.act(|w, window, cx| {

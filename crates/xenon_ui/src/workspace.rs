@@ -380,7 +380,7 @@ pub(crate) enum SidePanel {
     Saved,
 }
 
-enum Query {
+pub(crate) enum Query {
     Idle,
     Running {
         /// Which run this is, so a slow poller can't touch a newer one.
@@ -447,7 +447,7 @@ pub(crate) struct Tab {
     /// The saved query this tab holds, so ⌘S updates it.
     pub(crate) saved_query: Option<i64>,
     pub(crate) editor: Entity<EditorState>,
-    query: Query,
+    pub(crate) query: Query,
     pub(crate) grid: Option<Grid>,
     pub(crate) selection: Option<Selection>,
     /// Widths the user dragged, by column name; kept across re-runs.
@@ -488,17 +488,17 @@ pub(crate) struct Tab {
 
 /// What a running query has read so far, shared with the thread running it.
 #[derive(Default)]
-struct Live {
+pub(crate) struct Live {
     preview: std::sync::Mutex<Option<xenon_driver::ResultSet>>,
     rows: std::sync::atomic::AtomicUsize,
-    done: std::sync::atomic::AtomicBool,
+    pub(crate) done: std::sync::atomic::AtomicBool,
     /// The production time limit stopped it.
     timed_out: std::sync::atomic::AtomicBool,
 }
 
 /// Cancel a query that runs past `limit`, from its own thread, so the limit
 /// holds whatever the window is doing. Ends when the query does.
-fn watchdog(live: Arc<Live>, cancel: Arc<dyn CancelHandle>, limit: std::time::Duration) {
+pub(crate) fn watchdog(live: Arc<Live>, cancel: Arc<dyn CancelHandle>, limit: std::time::Duration) {
     std::thread::spawn(move || {
         let deadline = std::time::Instant::now() + limit;
         while !live.done.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1870,7 +1870,7 @@ impl Workspace {
             return;
         };
         // Explaining a script would run everything after its first statement.
-        if scope == RunScope::Explain && xenon_driver::sql::split_statements(&sql).len() > 1 {
+        if scope == RunScope::Explain && xenon_driver::sql::several_statements(&sql) {
             self.flash(
                 "Explain works on one statement at a time: select it first.",
                 true,
@@ -1974,7 +1974,7 @@ impl Workspace {
     /// Why a query can't start on a tab now: a confirmation is waiting, or a
     /// query is already running on its connection (statements on one session
     /// must not interleave, or one's transaction swallows another's).
-    fn busy(&self, tab_id: usize) -> Option<&'static str> {
+    pub(crate) fn busy(&self, tab_id: usize) -> Option<&'static str> {
         if self.confirm.is_some() {
             return Some("Answer the open prompt first.");
         }
@@ -2133,7 +2133,7 @@ impl Workspace {
             && !session.in_transaction
             && !xenon_driver::sql::controls_transaction(&sql);
         let atomic = production
-            && xenon_driver::sql::split_statements(&sql).len() > 1
+            && xenon_driver::sql::several_statements(&sql)
             && xenon_driver::sql::writes(&sql);
         // On production, what looks like a read runs in a transaction the server
         // keeps read-only, so a hidden write (a function that writes) is refused.
