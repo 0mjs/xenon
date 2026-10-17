@@ -138,10 +138,7 @@ impl Connection for SqliteConnection {
         let result = self.run(sql, row_limit, progress).map_err(query_error);
         // A cancel (or some errors) can end the whole transaction you had open,
         // not just the statement: say so, since what follows now autocommits.
-        if result.is_err()
-            && in_transaction
-            && self.lock().is_ok_and(|conn| conn.is_autocommit())
-        {
+        if result.is_err() && in_transaction && self.lock().is_ok_and(|conn| conn.is_autocommit()) {
             return result.context(
                 "That rolled back the whole transaction you had open: nothing in it was kept",
             );
