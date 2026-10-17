@@ -367,7 +367,9 @@ impl PostgresConnection {
         let mut over_limit: Option<(Instant, usize)> = None;
         // The server confirmed the row limit's cancel stopped this query.
         let mut cancel_landed = false;
-        let writes = xenon_driver::sql::writes(sql);
+        // A cancel would stop a script's later statements too, unseen: only a
+        // single read is stopped at the limit; anything else reads on.
+        let writes = xenon_driver::sql::writes(sql) || xenon_driver::sql::several_statements(sql);
         let mut cancelled = false;
 
         while let Some(message) = stream.next().await {

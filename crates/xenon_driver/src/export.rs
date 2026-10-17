@@ -53,6 +53,8 @@ pub fn render_sql(
     rows: &[Vec<&Value>],
     sql: Option<&Sql>,
 ) -> String {
+    // One cell is copied exactly as it is, formula-like or not: it's pasted
+    // into editors far more than into spreadsheets.
     if format == Format::Tsv && columns.len() == 1 && rows.len() == 1 {
         return plain(rows[0][0]);
     }
@@ -163,8 +165,14 @@ where
 /// Text starting with `=`, `+`, `-`, `@`, a tab or a carriage return is run
 /// as a formula by spreadsheets opening a CSV or TSV (`=HYPERLINK(…)`,
 /// `@SUM(…)`): a leading `'` keeps it text, as the spreadsheet's own escape.
+/// A `+` or `-` followed only by digits and punctuation (`+44 20 7946 0958`,
+/// `-`) can call nothing, so it's left as it is.
 fn defused(cell: String) -> String {
-    if cell.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+    let harmless = cell.starts_with(['+', '-'])
+        && cell
+            .chars()
+            .all(|c| c.is_ascii_digit() || " .,()+-/".contains(c));
+    if cell.starts_with(['=', '+', '-', '@', '\t', '\r']) && !harmless {
         format!("'{cell}")
     } else {
         cell
@@ -379,6 +387,23 @@ mod tests {
         assert!(csv.contains("'@SUM(A1),-5"), "{csv}");
         let tsv = render(Format::Tsv, &[&c, &n], &rows);
         assert!(tsv.contains("'@SUM(A1)\t-5"), "{tsv}");
+    }
+
+    #[test]
+    fn signs_before_plain_numbers_arent_formulas() {
+        let c = col("phone");
+        for (text, out) in [
+            ("+44 20 7946 0958", "+44 20 7946 0958"),
+            ("-", "-"),
+            ("-12.5", "-12.5"),
+            ("+1 (555) 010-0199", "+1 (555) 010-0199"),
+            ("-cmd|' /C calc'!A0", "'-cmd|' /C calc'!A0"),
+            ("+A1", "'+A1"),
+        ] {
+            let value = Value::Text(text.into());
+            let csv = render(Format::Csv, &[&c], &[vec![&value]]);
+            assert_eq!(csv.lines().nth(1), Some(out), "{text}");
+        }
     }
 
     #[test]

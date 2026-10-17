@@ -98,12 +98,16 @@ fn clause(conn: &dyn Connection, condition: &Condition) -> Option<String> {
         };
         conn.literal(&value)
     };
-    // `like` with the value's own % and _ escaped, so they match themselves.
+    // `like` with the value's own % and _ escaped, so they match themselves;
+    // also `[`, a pattern on SQL Server.
     let like = |before: &str, after: &str| {
-        let escaped = raw
+        let mut escaped = raw
             .replace('\\', "\\\\")
             .replace('%', "\\%")
             .replace('_', "\\_");
+        if conn.uses_top() {
+            escaped = escaped.replace('[', "\\[");
+        }
         format!(
             "{column} like {} escape {}",
             conn.literal(&Value::Text(format!("{before}{escaped}{after}"))),
@@ -179,6 +183,51 @@ mod tests {
                 false
             ),
             "name like 'O''B%' escape '\\'"
+        );
+    }
+
+    /// SQLite, spelling `like` as for SQL Server, where `[a]` is a pattern.
+    struct Brackets(SqliteConnection);
+
+    impl xenon_driver::Connection for Brackets {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        fn server_version(&self) -> String {
+            self.0.server_version()
+        }
+        fn execute_streaming(
+            &self,
+            sql: &str,
+            row_limit: usize,
+            progress: &mut dyn FnMut(xenon_driver::Progress),
+        ) -> anyhow::Result<xenon_driver::QueryResult> {
+            self.0.execute_streaming(sql, row_limit, progress)
+        }
+        fn introspect(&self) -> anyhow::Result<Vec<xenon_driver::Schema>> {
+            self.0.introspect()
+        }
+        fn describe(&self, schema: &str, table: &str) -> anyhow::Result<xenon_driver::TableInfo> {
+            self.0.describe(schema, table)
+        }
+        fn cancel_handle(&self) -> std::sync::Arc<dyn xenon_driver::CancelHandle> {
+            self.0.cancel_handle()
+        }
+        fn uses_top(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn sql_server_brackets_match_themselves() {
+        let conn = Brackets(SqliteConnection::open_in_memory().unwrap());
+        assert_eq!(
+            where_clause(
+                &conn,
+                &[condition("tag", Op::Contains, "[a]", false)],
+                false
+            ),
+            "tag like '%\\[a]%' escape '\\'"
         );
     }
 

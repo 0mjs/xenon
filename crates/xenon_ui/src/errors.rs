@@ -142,7 +142,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 /// Where in the editor's `text` the error is: the word at the server's
 /// `position` (characters from 1, counted from `ran.start`), or else the one
-/// place in `ran` the unknown name appears as a word.
+/// place in `ran` the unknown name appears as a word in the code (not inside a
+/// string or comment, though it can be a quoted identifier).
 pub(crate) fn locate(
     text: &str,
     ran: Range<usize>,
@@ -178,6 +179,21 @@ pub(crate) fn locate(
     };
     let lower = fold(ran_text);
     let needle = fold(name);
+    // Code as every engine reads it, whatever the error came from.
+    let code = |i: usize| {
+        xenon_driver::sql::in_code(ran_text, i, false)
+            && xenon_driver::sql::in_code(ran_text, i, true)
+    };
+    // A whole quoted identifier: `"emial"`, `` `emial` ``, `[emial]`.
+    let quoted = |i: usize| {
+        let open = ran_text[..i].chars().next_back();
+        let close = ran_text[i + needle.len()..].chars().next();
+        matches!(
+            (open, close),
+            (Some('"'), Some('"')) | (Some('`'), Some('`')) | (Some('['), Some(']'))
+        ) && i > 0
+            && code(i - 1)
+    };
     let mut found = lower.match_indices(&needle).filter(|(i, _)| {
         ran_text
             .get(..*i)
@@ -185,6 +201,7 @@ pub(crate) fn locate(
             && ran_text
                 .get(i + needle.len()..)
                 .is_some_and(|after| !is_word(after.chars().next()))
+            && (code(*i) || quoted(*i))
     });
     let (first, _) = found.next()?;
     // More than once: which one is unclear.
@@ -320,5 +337,25 @@ mod tests {
         // Not inside a longer word, and not when it appears twice.
         assert_eq!(locate("select totals", 0..13, None, Some("total")), None);
         assert_eq!(locate("select a, a", 0..11, None, Some("a")), None);
+        // Never data: a string or comment holding the name is no place to fix.
+        let insert = "insert into users (email, note) values ('a@b.c', 'Emial typo')";
+        assert_eq!(locate(insert, 0..insert.len(), None, Some("emial")), None);
+        let commented = "select 1 -- emial\n";
+        assert_eq!(
+            locate(commented, 0..commented.len(), None, Some("emial")),
+            None
+        );
+        // Once in code beside a string holding it: the code one.
+        let both = "select emial from t where note = 'emial'";
+        assert_eq!(
+            locate(both, 0..both.len(), None, Some("emial")),
+            Some(7..12)
+        );
+        // A quoted identifier is code.
+        let quoted = "select \"emial\" from t";
+        assert_eq!(
+            locate(quoted, 0..quoted.len(), None, Some("emial")),
+            Some(8..13)
+        );
     }
 }

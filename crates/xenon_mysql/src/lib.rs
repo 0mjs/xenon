@@ -483,7 +483,9 @@ impl Connection for MysqlConnection {
             }
             // A write must finish, and so must a transaction (a kill would stop
             // a script before its `commit`): the row limit reads on in both.
+            // So must a script's later statements, which a kill would stop.
             let writes = xenon_driver::sql::writes(sql)
+                || xenon_driver::sql::several_statements(sql)
                 || xenon_driver::sql::controls_transaction(sql)
                 || self.transaction.lock().unwrap_or_else(|e| e.into_inner()).0;
             let started = Instant::now();
@@ -574,25 +576,6 @@ impl Connection for MysqlConnection {
                 }
             }
             drop(result);
-            // However it was done, a read-only session switched to read-write goes
-            // straight back.
-            if self.read_only
-                && conn
-                    .query_first::<i64, _>("select @@session.transaction_read_only")
-                    .ok()
-                    .flatten()
-                    == Some(0)
-            {
-                let _ = conn.query_drop("set session transaction read only");
-                return Err(QueryError {
-                    message:
-                        "This read-only connection was switched to read-write; Xenon switched it \
-                              back."
-                            .into(),
-                    position: None,
-                }
-                .into());
-            }
             let outcome = outcome.ok_or_else(|| anyhow!("nothing to run"))?;
             // Some killed statements (`sleep()`, `benchmark()`) return a value instead
             // of failing; after a cancel, that value isn't the answer.
@@ -608,6 +591,26 @@ impl Connection for MysqlConnection {
         // A kill sent while it ran: wait for it to land (MySQL drops one that
         // finds the connection idle) before anything else runs here.
         self.settle_kill();
+        // However it was done, a read-only session switched to read-write goes
+        // straight back, also when the script then failed.
+        let mut result = result;
+        if self.read_only
+            && self
+                .lock()
+                .query_first::<i64, _>("select @@session.transaction_read_only")
+                .ok()
+                .flatten()
+                == Some(0)
+        {
+            let _ = self.lock().query_drop("set session transaction read only");
+            result = Err(QueryError {
+                message: "This read-only connection was switched to read-write; Xenon switched it \
+                          back."
+                    .into(),
+                position: None,
+            }
+            .into());
+        }
         // Follow the transaction: MySQL can't be asked. A failed script may have
         // opened one before failing, so then it counts as open.
         let mut state = self.transaction.lock().unwrap_or_else(|e| e.into_inner());

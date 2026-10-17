@@ -4228,14 +4228,19 @@ impl Workspace {
     }
 
     /// The table SQL inserts from the active tab go into, quoted for its
-    /// connection, and that connection. Query results go into `results`.
+    /// connection, and that connection. Query results, also other SQL's rows
+    /// shown in a table's tab, go into `results`.
     fn sql_target(&self) -> Option<(String, Arc<dyn xenon_driver::Connection>)> {
         let conn = self.active_session()?.conn.clone();
-        let table = match &self.active_tab().browse {
-            Some(browse) => {
+        let tab = self.active_tab();
+        let ran = tab.last_run.as_ref().map(|(sql, _)| sql.trim());
+        let table = match &tab.browse {
+            Some(browse)
+                if ran.is_some() && ran == browse.loaded_with.as_deref().map(str::trim) =>
+            {
                 xenon_driver::qualified_name(conn.as_ref(), Some(&browse.schema), &browse.table)
             }
-            None => "results".to_string(),
+            _ => "results".to_string(),
         };
         Some((table, conn))
     }

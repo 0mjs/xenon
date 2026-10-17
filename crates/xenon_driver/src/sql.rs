@@ -144,7 +144,12 @@ fn comment_end(bytes: &[u8], i: usize, lexing: Lexing) -> Option<usize> {
     match (bytes[i], bytes.get(i + 1), lexing.mysql) {
         // MySQL needs whitespace after `--`; `1--1` is arithmetic there.
         (b'-', Some(b'-'), false) => Some(line_end(i)),
-        (b'-', Some(b'-'), true) if bytes.get(i + 2).is_none_or(|b| b.is_ascii_whitespace()) => {
+        // …or a control character.
+        (b'-', Some(b'-'), true)
+            if bytes
+                .get(i + 2)
+                .is_none_or(|b| b.is_ascii_whitespace() || b.is_ascii_control()) =>
+        {
             Some(line_end(i))
         }
         (b'#', _, true) => Some(line_end(i)),
@@ -421,8 +426,13 @@ const READS: &[&str] = &[
     "end",
     "explain",
     "fetch",
+    // DuckDB's `from t`, `from t select …`.
+    "from",
     "listen",
+    "move",
     "pragma",
+    "prepare",
+    "pivot",
     "print",
     "release",
     "reset",
@@ -432,8 +442,10 @@ const READS: &[&str] = &[
     "set",
     "show",
     "start",
+    "summarize",
     "table",
     "unlisten",
+    "unpivot",
     "use",
     "values",
     "waitfor",
@@ -561,20 +573,46 @@ const WRITE_PAIRS: &[(&str, &[&str])] = &[
 /// The write a statement's words hide, if any: a verb from [`WRITE_VERBS`]
 /// (also schema-qualified, `pg_catalog.setval`), an `xp_` procedure, or a
 /// pair from [`WRITE_PAIRS`]. `for update` / `for no key update` and
-/// `on duplicate key update` lock or belong to an insert, not a write.
-fn hidden_write(words: &[String]) -> Option<&str> {
+/// `on duplicate key update` lock or belong to an insert, not a write; nor is
+/// a function sharing a statement's name (`replace(name, 'a', 'b')`, MySQL's
+/// `insert(…)`, T-SQL's `update(column)`).
+fn hidden_write(words: &[Word]) -> Option<&str> {
     words.iter().enumerate().find_map(|(ix, word)| {
-        let name = word.rsplit('.').next().unwrap_or(word);
-        let lock = name == "update" && ix > 0 && matches!(words[ix - 1].as_str(), "for" | "key");
-        if (WRITE_VERBS.contains(&name) || name.starts_with("xp_")) && !lock {
+        let name = word.text.rsplit('.').next().unwrap_or(&word.text);
+        let lock =
+            name == "update" && ix > 0 && matches!(words[ix - 1].text.as_str(), "for" | "key");
+        let function = word.call
+            && matches!(
+                name,
+                "insert" | "replace" | "update" | "delete" | "merge" | "upsert"
+            );
+        if (WRITE_VERBS.contains(&name) || name.starts_with("xp_")) && !lock && !function {
             return Some(name);
         }
         let next = words.get(ix + 1)?;
         WRITE_PAIRS
             .iter()
-            .any(|(first, seconds)| name == *first && seconds.contains(&next.as_str()))
+            .any(|(first, seconds)| name == *first && seconds.contains(&next.text.as_str()))
             .then_some(name)
     })
+}
+
+/// True when a `select … into` writes: into a table (Postgres, SQL Server) or
+/// a file (MySQL's `into outfile`), not into MySQL variables (`into @total`).
+fn selects_into_table(words: &[Word]) -> bool {
+    words.windows(2).any(|pair| {
+        pair[0].text == "into"
+            && (!pair[1].variable || matches!(pair[1].text.as_str(), "outfile" | "dumpfile"))
+    })
+}
+
+/// Postgres's `copy … to stdout`: rows sent to Xenon, nothing written.
+fn copies_to_client(words: &[Word]) -> bool {
+    let top = || words.iter().filter(|word| word.depth == 0);
+    !top().any(|word| word.text == "from")
+        && top()
+            .zip(top().skip(1))
+            .any(|(to, target)| to.text == "to" && target.text == "stdout")
 }
 
 /// `set` targets that change the server for everyone, or make Xenon or DuckDB
@@ -629,18 +667,21 @@ const READING_PRAGMAS: &[&str] = &[
 ];
 
 fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
-    let words = words_outside_literals(statement, lexing);
+    let scan = scan(statement, lexing);
+    let words: Vec<String> = scan.words.iter().map(|word| word.text.clone()).collect();
     let first = words.first()?.as_str();
     let has = |word: &str| words.iter().any(|w| w == word);
     let second = words.get(1).map(String::as_str);
-    let hidden = || hidden_write(&words);
-    let verb = if READS.contains(&first) {
+    let copy_out = first == "copy" && copies_to_client(&scan.words);
+    // The `copy` of a `copy … to stdout` isn't the write; what it copies might be.
+    let hidden = || hidden_write(&scan.words[usize::from(copy_out)..]);
+    let verb = if READS.contains(&first) || copy_out {
         match first {
             // Plain `explain` only plans; `explain analyze` runs the statement.
             "explain" if !(has("analyze") || has("analyse")) => return None,
             // `select … into` makes a table (or a file, on MySQL), after a CTE
             // or under `explain analyze` too.
-            "select" | "with" | "explain" if has("into") && has("select") => {
+            "select" | "with" | "explain" if has("select") && selects_into_table(&scan.words) => {
                 return Some((Risk::Write, "SELECT INTO".into()));
             }
             // MySQL's `reset master`, `reset persist`…; Postgres's `reset name` reads.
@@ -671,18 +712,40 @@ fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
             {
                 return Some((Risk::Write, "SET".into()));
             }
+            // `prepare name as …` only plans; what it plans decides.
+            // `prepare transaction` (two-phase commit) and MySQL's
+            // `prepare name from '…'`, whose text can't be seen, are writes.
+            "prepare" => {
+                let body = scan
+                    .words
+                    .iter()
+                    .position(|word| word.depth == 0 && word.text == "as")
+                    .filter(|_| second != Some("transaction"));
+                return match body {
+                    Some(ix) => assess_statement(&statement[scan.words[ix].end..], lexing),
+                    None => Some((Risk::Write, "PREPARE".into())),
+                };
+            }
             // `pragma name = value` and `pragma name(value)` set something
-            // (but `pragma table_info(t)` reads), and some pragmas act.
+            // (but `pragma table_info(t)` reads), and some pragmas act. The
+            // name can come after a schema: `pragma main.table_info(t)`.
             "pragma"
-                if statement.contains('=')
-                    || (statement.contains('(')
-                        && !second.is_some_and(|name| READING_PRAGMAS.contains(&name)))
-                    || second.is_some_and(|name| {
-                        ["enable_", "disable_", "force_", "create_", "drop_"]
-                            .iter()
-                            .any(|prefix| name.starts_with(prefix))
-                            || matches!(name, "optimize" | "wal_checkpoint" | "incremental_vacuum")
-                    }) =>
+                if scan.equals
+                    || (scan.words.get(1).is_some_and(|word| word.call)
+                        && !second.is_some_and(|name| {
+                            READING_PRAGMAS.contains(&name.rsplit('.').next().unwrap_or(name))
+                        }))
+                    || second
+                        .map(|name| name.rsplit('.').next().unwrap_or(name))
+                        .is_some_and(|name| {
+                            ["enable_", "disable_", "force_", "create_", "drop_"]
+                                .iter()
+                                .any(|prefix| name.starts_with(prefix))
+                                || matches!(
+                                    name,
+                                    "optimize" | "wal_checkpoint" | "incremental_vacuum"
+                                )
+                        }) =>
             {
                 return Some((Risk::Write, "PRAGMA".into()));
             }
@@ -746,10 +809,20 @@ pub fn writes(sql: &str) -> bool {
 /// `savepoint`…), so it shouldn't be wrapped in another.
 pub fn controls_transaction(sql: &str) -> bool {
     statements_every_way(sql).any(|words| match words.first().map(String::as_str) {
-        Some(
-            "begin" | "start" | "commit" | "rollback" | "end" | "savepoint" | "release" | "abort"
-            | "prepare",
-        ) => true,
+        Some("start" | "commit" | "rollback" | "end" | "savepoint" | "release" | "abort") => true,
+        // A T-SQL `begin … end` block counts only when it holds transaction
+        // control itself.
+        Some("begin") => {
+            begins_transaction(&words)
+                || words.iter().any(|w| {
+                    matches!(
+                        w.as_str(),
+                        "tran" | "transaction" | "commit" | "rollback" | "save" | "savepoint"
+                    )
+                })
+        }
+        // `prepare transaction`, not a prepared statement.
+        Some("prepare") => words.get(1).is_some_and(|w| w == "transaction"),
         Some("set") => {
             words.get(1).is_some_and(|w| w == "transaction")
                 // `set autocommit = 0` leaves every statement in a transaction.
@@ -785,24 +858,7 @@ pub fn transaction_effect(sql: &str) -> Option<bool> {
         let words = words_outside_literals(&sql[range], STANDARD);
         let second = words.get(1).map(String::as_str);
         match words.first().map(String::as_str)? {
-            // Not T-SQL's `begin … end` block, which is no transaction.
-            "begin"
-                if matches!(
-                    second,
-                    None | Some(
-                        "tran"
-                            | "transaction"
-                            | "work"
-                            | "read"
-                            | "isolation"
-                            | "deferred"
-                            | "immediate"
-                            | "exclusive"
-                    )
-                ) =>
-            {
-                Some(true)
-            }
+            "begin" if begins_transaction(&words) => Some(true),
             "start" if second == Some("transaction") => Some(true),
             "commit" | "rollback" | "abort" => Some(false),
             // Postgres's `end` commits; T-SQL's ends a block.
@@ -810,6 +866,25 @@ pub fn transaction_effect(sql: &str) -> Option<bool> {
             _ => None,
         }
     })
+}
+
+/// `begin` starting a transaction (`begin`, `begin tran`, `begin read write`),
+/// not T-SQL's `begin … end` block.
+fn begins_transaction(words: &[String]) -> bool {
+    words.first().is_some_and(|w| w == "begin")
+        && matches!(
+            words.get(1).map(String::as_str),
+            None | Some(
+                "tran"
+                    | "transaction"
+                    | "work"
+                    | "read"
+                    | "isolation"
+                    | "deferred"
+                    | "immediate"
+                    | "exclusive"
+            )
+        )
 }
 
 /// Statements MySQL and MariaDB end a transaction before (and commit after):
@@ -898,6 +973,10 @@ fn mysql_transaction_walk(
                     None => {}
                 }
             }
+            // A procedure can commit, and begin one where the text can't show
+            // it: count it as open, so a wrap's `start transaction` doesn't
+            // commit it unseen.
+            Some("call") => open = true,
             _ if mysql_commits_implicitly(&words) => open = false,
             Some(_) if autocommit_off => open = true,
             _ => {}
@@ -911,32 +990,28 @@ fn mysql_transaction_walk(
 /// one (`set transaction read write`, `begin read write`,
 /// `set default_transaction_read_only = off`…).
 pub fn lifts_read_only(sql: &str) -> bool {
-    // Named in a string too: Postgres's `set_config('default_transaction_read_only', 'off', …)`.
+    // The setting named anywhere, strings and comments too (Postgres's
+    // `set_config('default_transaction_read_only', 'off', …)`, a `set` in
+    // dynamic SQL), alongside anything that can set it: `set`, `reset`,
+    // `set_config`, `update pg_settings set …`. Only reading it
+    // (`select @@transaction_read_only`, `current_setting(…)`) is fine.
     let lower = sql.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .collect();
     if ["transaction_read_only", "tx_read_only"]
         .iter()
-        .any(|name| lower.contains(name) && !lower.contains(&format!("show {name}")))
-        && (lower.contains("set") || lower.contains("reset"))
+        .any(|name| lower.contains(name))
+        && tokens
+            .iter()
+            .any(|token| matches!(*token, "set" | "reset") || token.ends_with("set_config"))
     {
         return true;
     }
     statements_every_way(sql).any(|words| {
-        // Reading a setting (`show default_transaction_read_only`) changes nothing.
-        if words.first().is_some_and(|first| first == "show") {
-            return false;
-        }
         words
             .windows(2)
             .any(|pair| pair[0] == "read" && pair[1] == "write")
-            // Also as `@@session.transaction_read_only`.
-            || words.iter().any(|word| {
-                word.rsplit('.').next().is_some_and(|name| {
-                    matches!(
-                        name,
-                        "transaction_read_only" | "default_transaction_read_only" | "tx_read_only"
-                    )
-                })
-            })
     })
 }
 
@@ -952,9 +1027,54 @@ fn statements_every_way(sql: &str) -> impl Iterator<Item = Vec<String>> + '_ {
 /// Lowercased words of a statement, skipping comments, string literals and
 /// quoted identifiers (so `where` inside a string doesn't count).
 fn words_outside_literals(statement: &str, lexing: Lexing) -> Vec<String> {
+    scan(statement, lexing)
+        .words
+        .into_iter()
+        .map(|word| word.text)
+        .collect()
+}
+
+/// A word of a statement, as [`scan`] finds it.
+#[derive(Debug)]
+struct Word {
+    text: String,
+    /// Byte offset just past the word.
+    end: usize,
+    /// How many brackets it's inside.
+    depth: usize,
+    /// Followed by `(`: a function call, `replace(name, …)`.
+    call: bool,
+    /// Written after `@`: a variable, `@total`.
+    variable: bool,
+}
+
+/// A statement's code, outside comments and literals.
+struct Scan {
+    words: Vec<Word>,
+    /// An `=` in the code (not in a string).
+    equals: bool,
+}
+
+fn scan(statement: &str, lexing: Lexing) -> Scan {
     let bytes = statement.as_bytes();
     let mut words = Vec::new();
+    let mut equals = false;
+    let mut depth = 0usize;
     let mut i = 0;
+    let mut push = |words: &mut Vec<Word>, text: String, start: usize, end: usize, depth| {
+        let call = bytes[end..]
+            .iter()
+            .find(|b| !b.is_ascii_whitespace())
+            .is_some_and(|&b| b == b'(');
+        let variable = start > 0 && bytes[start - 1] == b'@';
+        words.push(Word {
+            text,
+            end,
+            depth,
+            call,
+            variable,
+        });
+    };
     while i < bytes.len() {
         if let Some(code) = executable_comment_start(bytes, i, lexing) {
             i = code;
@@ -969,12 +1089,14 @@ fn words_outside_literals(statement: &str, lexing: Lexing) -> Vec<String> {
             b'"' | b'`' => {
                 // Keep a quoted identifier as one word, without quotes.
                 let end = skip_quoted(bytes, i, backslash_escapes(statement, i, lexing));
-                words.push(statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase());
+                let text = statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase();
+                push(&mut words, text, i, end, depth);
                 i = end;
             }
             b'[' if lexing.brackets => {
                 let end = skip_bracketed(bytes, i);
-                words.push(statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase());
+                let text = statement[i + 1..end.saturating_sub(1).max(i + 1)].to_lowercase();
+                push(&mut words, text, i, end, depth);
                 i = end;
             }
             b'$' if lexing.dollar_quotes => i = skip_dollar_quoted(statement, i),
@@ -988,12 +1110,30 @@ fn words_outside_literals(statement: &str, lexing: Lexing) -> Vec<String> {
                 {
                     i += 1;
                 }
-                words.push(statement[start..i].to_lowercase());
+                push(
+                    &mut words,
+                    statement[start..i].to_lowercase(),
+                    start,
+                    i,
+                    depth,
+                );
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'=' => {
+                equals = true;
+                i += 1;
             }
             _ => i += 1,
         }
     }
-    words
+    Scan { words, equals }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1017,22 +1157,32 @@ impl SortDirection {
 /// Sorted, for binary search.
 const RESERVED: &[&str] = &[
     "accessible",
+    "add",
     "all",
+    "alter",
     "analyse",
     "analyze",
     "and",
+    "anti",
     "any",
     "array",
     "as",
     "asc",
     "asensitive",
+    "asof",
     "asymmetric",
+    "at",
     "authorization",
+    "autoincrement",
     "backup",
     "before",
+    "begin",
     "between",
+    "bigint",
     "binary",
+    "blob",
     "both",
+    "break",
     "browse",
     "bulk",
     "by",
@@ -1041,14 +1191,20 @@ const RESERVED: &[&str] = &[
     "case",
     "cast",
     "change",
+    "char",
+    "character",
     "check",
     "checkpoint",
+    "close",
     "clustered",
     "coalesce",
     "collate",
+    "collation",
     "column",
     "columns",
     "commit",
+    "compute",
+    "concurrently",
     "condition",
     "constraint",
     "contains",
@@ -1057,7 +1213,9 @@ const RESERVED: &[&str] = &[
     "convert",
     "create",
     "cross",
+    "cube",
     "cume_dist",
+    "current",
     "current_catalog",
     "current_date",
     "current_role",
@@ -1069,8 +1227,14 @@ const RESERVED: &[&str] = &[
     "database",
     "databases",
     "day",
+    "day_hour",
+    "day_microsecond",
+    "day_minute",
+    "day_second",
     "dbcc",
+    "deallocate",
     "dec",
+    "decimal",
     "declare",
     "default",
     "deferrable",
@@ -1081,10 +1245,13 @@ const RESERVED: &[&str] = &[
     "desc",
     "describe",
     "deterministic",
+    "disk",
     "distinct",
     "distinctrow",
+    "distributed",
     "div",
     "do",
+    "double",
     "drop",
     "dual",
     "dump",
@@ -1094,15 +1261,22 @@ const RESERVED: &[&str] = &[
     "empty",
     "enclosed",
     "end",
+    "errlvl",
+    "escape",
     "escaped",
     "except",
+    "exec",
+    "execute",
     "exists",
     "exit",
     "explain",
+    "external",
     "false",
     "fetch",
     "file",
+    "fillfactor",
     "first_value",
+    "float",
     "float4",
     "float8",
     "for",
@@ -1117,14 +1291,21 @@ const RESERVED: &[&str] = &[
     "function",
     "generated",
     "get",
+    "glob",
+    "goto",
     "grant",
     "group",
+    "grouping",
     "groups",
     "having",
     "high_priority",
     "holdlock",
     "hour",
+    "hour_microsecond",
+    "hour_minute",
+    "hour_second",
     "identity",
+    "identity_insert",
     "identitycol",
     "if",
     "ignore",
@@ -1137,6 +1318,7 @@ const RESERVED: &[&str] = &[
     "inout",
     "insensitive",
     "insert",
+    "int",
     "int1",
     "int2",
     "int3",
@@ -1146,6 +1328,8 @@ const RESERVED: &[&str] = &[
     "intersect",
     "interval",
     "into",
+    "io_after_gtids",
+    "io_before_gtids",
     "is",
     "isnull",
     "iterate",
@@ -1156,6 +1340,7 @@ const RESERVED: &[&str] = &[
     "keys",
     "kill",
     "lag",
+    "lambda",
     "last_value",
     "lateral",
     "lead",
@@ -1176,7 +1361,9 @@ const RESERVED: &[&str] = &[
     "longtext",
     "loop",
     "low_priority",
+    "manual",
     "master_bind",
+    "master_ssl_verify_server_cert",
     "match",
     "maxvalue",
     "mediumblob",
@@ -1185,6 +1372,8 @@ const RESERVED: &[&str] = &[
     "merge",
     "middleint",
     "minute",
+    "minute_microsecond",
+    "minute_second",
     "mod",
     "modifies",
     "month",
@@ -1194,19 +1383,26 @@ const RESERVED: &[&str] = &[
     "nocheck",
     "nonclustered",
     "not",
+    "nothing",
     "notnull",
     "nth_value",
     "ntile",
     "null",
     "nullif",
+    "numeric",
+    "of",
+    "off",
     "offset",
     "offsets",
     "on",
     "only",
+    "open",
     "opendatasource",
     "openquery",
     "openrowset",
+    "openxml",
     "optimize",
+    "optimizer_costs",
     "option",
     "optionally",
     "options",
@@ -1217,21 +1413,33 @@ const RESERVED: &[&str] = &[
     "outfile",
     "over",
     "overlaps",
+    "parallel",
     "partition",
     "percent",
     "percent_rank",
     "pivot",
+    "pivot_longer",
+    "pivot_wider",
     "placing",
     "plan",
+    "positional",
+    "precision",
     "primary",
+    "print",
     "proc",
     "procedure",
+    "public",
     "purge",
+    "qualify",
+    "raise",
+    "raiserror",
     "range",
     "rank",
     "read",
     "read_write",
     "reads",
+    "readtext",
+    "real",
     "reconfigure",
     "recursive",
     "references",
@@ -1240,6 +1448,7 @@ const RESERVED: &[&str] = &[
     "rename",
     "repeat",
     "replace",
+    "replication",
     "require",
     "resignal",
     "restore",
@@ -1256,11 +1465,21 @@ const RESERVED: &[&str] = &[
     "rowcount",
     "rowguidcol",
     "rows",
+    "rule",
     "save",
     "savepoint",
     "schema",
+    "schemas",
     "second",
+    "second_microsecond",
+    "securityaudit",
     "select",
+    "semantickeyphrasetable",
+    "semanticsimilaritydetailstable",
+    "semanticsimilaritytable",
+    "semi",
+    "sensitive",
+    "separator",
     "session_user",
     "set",
     "setuser",
@@ -1268,10 +1487,14 @@ const RESERVED: &[&str] = &[
     "shutdown",
     "signal",
     "similar",
+    "smallint",
     "some",
     "spatial",
     "specific",
     "sql",
+    "sql_big_result",
+    "sql_calc_found_rows",
+    "sql_small_result",
     "sqlexception",
     "sqlstate",
     "sqlwarning",
@@ -1280,7 +1503,9 @@ const RESERVED: &[&str] = &[
     "statistics",
     "stored",
     "straight_join",
+    "summarize",
     "symmetric",
+    "system",
     "system_user",
     "table",
     "tables",
@@ -1298,15 +1523,18 @@ const RESERVED: &[&str] = &[
     "transaction",
     "trigger",
     "true",
+    "truncate",
     "try_convert",
     "tsequal",
     "undo",
     "union",
     "unique",
     "unlock",
+    "unpack",
     "unpivot",
     "unsigned",
     "update",
+    "updatetext",
     "usage",
     "use",
     "user",
@@ -1316,18 +1544,22 @@ const RESERVED: &[&str] = &[
     "utc_timestamp",
     "values",
     "varbinary",
+    "varchar",
     "varcharacter",
     "variadic",
     "varying",
     "verbose",
     "view",
     "virtual",
+    "waitfor",
     "when",
     "where",
     "while",
     "window",
     "with",
+    "within",
     "write",
+    "writetext",
     "xor",
     "year",
     "year_month",
@@ -2247,9 +2479,120 @@ mod tests {
             "select 'read write'",
             "select * from read_write_log",
             "begin",
+            // Reading the setting isn't switching it.
+            "select current_setting('transaction_read_only')",
+            "select setting from pg_settings where name = 'default_transaction_read_only'",
+            "select @@transaction_read_only",
+            "select @@session.transaction_read_only, @@global.transaction_read_only",
+            "show transaction_read_only",
+            "select @@transaction_read_only from t limit 1 offset 2",
         ] {
             assert!(!lifts_read_only(sql), "{sql}");
         }
+        for sql in [
+            "update pg_settings set setting = 'off' where name = 'default_transaction_read_only'",
+            "do $$ begin execute 'set default_transaction_read_only = off'; end $$",
+            "alter role me set default_transaction_read_only = off",
+            "show transaction_read_only; set transaction_read_only = 0",
+            "select pg_catalog.set_config('transaction_read_only', 'off', false)",
+            "reset default_transaction_read_only",
+        ] {
+            assert!(lifts_read_only(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn functions_named_like_statements_are_reads() {
+        for sql in [
+            "select replace(name, 'a', 'b') from users",
+            "select insert('abc', 1, 1, 'X')",
+            "select REPLACE (name, 'a', 'b') from users",
+            "select id into @x from t",
+            "select count(*) into @n, @m from t",
+            "move all in cur",
+            "prepare foo as select 1",
+            "prepare foo (int) as select * from t where id = $1",
+            "begin select 1 end",
+            "pragma foreign_key_list('my=table')",
+            "pragma main.table_info('t')",
+            "copy (select * from t) to stdout",
+            "copy t to stdout with (format csv)",
+            "from people",
+            "from people select name",
+            "summarize people",
+            "pivot people on name using count(*)",
+            "unpivot t on a, b into name k value v",
+        ] {
+            assert_eq!(assess(sql), None, "{sql}");
+        }
+        for sql in [
+            "replace into t values (1)",
+            "insert into t select replace(a, 'x', 'y') from s",
+            "update t set a = replace(a, 'x', 'y') where id = 1",
+            "select a into new_table from t",
+            "select a into outfile '/tmp/x' from t",
+            "select a into @x from t; select b into backup_t from t",
+            "prepare foo as delete from t where id = $1",
+            "prepare s from 'delete from t'",
+            "prepare transaction 'gid'",
+            "pragma user_version = 7",
+            "pragma user_version(7)",
+            "pragma main.user_version = 7",
+            "copy t from stdin",
+            "copy t to '/tmp/t.csv'",
+            "copy t to program 'cat'",
+            "copy (delete from t returning *) to stdout",
+            "copy (select * from t) to stdout; copy t from stdin",
+            "from t; delete from t where id = 1",
+        ] {
+            assert!(assess(sql).is_some(), "{sql}");
+        }
+        // Delete without a where still counts as every row.
+        assert!(matches!(
+            assess("copy (delete from t returning *) to stdout"),
+            Some((Risk::EveryRow, _))
+        ));
+    }
+
+    #[test]
+    fn statement_blocks_and_prepared_statements_arent_transactions() {
+        for sql in [
+            "begin select 1 end",
+            "prepare foo as select 1",
+            "begin try select 1 end try",
+        ] {
+            assert!(!controls_transaction(sql), "{sql}");
+            assert!(!opens_unguarded_transaction(sql), "{sql}");
+        }
+        for sql in [
+            "begin",
+            "begin tran",
+            "begin read write",
+            "begin begin tran update t set a = 1 where id = 1 end",
+            "begin try begin transaction; select 1; commit end try",
+            "prepare transaction 'gid'",
+        ] {
+            assert!(controls_transaction(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_mysql_procedure_may_leave_a_transaction_open() {
+        assert_eq!(
+            mysql_transaction_state("call p()", false, false),
+            (true, false)
+        );
+        assert_eq!(
+            mysql_transaction_state("call p(); commit", false, false),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn mysql_dash_dash_before_a_control_character_is_a_comment() {
+        // MySQL comments out the rest; it's the other readings that see code.
+        let sql = "select 1 --\x0b drop table orders";
+        assert!(!words_outside_literals(sql, MYSQL).contains(&"drop".to_string()));
     }
 
     #[test]
