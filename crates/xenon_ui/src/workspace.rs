@@ -1731,7 +1731,10 @@ impl Workspace {
             profile.remember(store.as_deref())?;
             // Read-only (or the address) changed: a connection with it.
             let fresh = if swap {
-                Some(profile.connect().map(|conn| (conn, profile)))
+                Some(profile.connect().and_then(|conn| {
+                    let schemas = conn.introspect()?;
+                    Ok((conn, schemas, profile))
+                }))
             } else {
                 None
             };
@@ -1743,13 +1746,65 @@ impl Workspace {
                 this.reload_saved();
                 match saved {
                     Err(err) => this.notice = Some(format!("{err:#}").into()),
-                    Ok(Some(Ok((conn, profile)))) => {
-                        if let Some(session) = this.sessions.iter_mut().find(|s| s.id == session_id)
+                    Ok(Some(Ok((conn, schemas, profile)))) => {
+                        // Something started meanwhile: swapping now would end
+                        // it (or roll back its transaction).
+                        let busy = this
+                            .sessions
+                            .iter()
+                            .any(|s| s.id == session_id && s.in_transaction)
+                            || this.tabs.iter().any(|t| {
+                                t.session == Some(session_id)
+                                    && (matches!(t.query, Query::Running { .. })
+                                        || t.saving
+                                        || !t.edits.is_empty()
+                                        || t.browse.as_ref().is_some_and(|b| {
+                                            matches!(b.total, Some(crate::pages::Total::Counting))
+                                        }))
+                            });
+                        if busy {
+                            this.notice = Some(
+                                "Saved. Something is running or staged on this connection: \
+                                 disconnect and reconnect when it's done to use the new settings."
+                                    .into(),
+                            );
+                        } else if let Some(session) =
+                            this.sessions.iter_mut().find(|s| s.id == session_id)
                         {
+                            // Everything that came from the old server goes with it.
+                            session.engine = match &profile.target {
+                                RequestTarget::Sqlite(_)
+                                    if conn.server_version().starts_with("duckdb") =>
+                                {
+                                    Engine::DuckDb
+                                }
+                                RequestTarget::Sqlite(_) => Engine::Sqlite,
+                                RequestTarget::Server(engine, _) => {
+                                    servers::logo(*engine, conn.as_ref())
+                                }
+                            };
+                            session.version = conn.server_version();
+                            session.tls_verified = match &profile.target {
+                                RequestTarget::Sqlite(_) => true,
+                                RequestTarget::Server(_, options) => {
+                                    matches!(options.ssl, SslMode::VerifyFull | SslMode::VerifyCa)
+                                }
+                            };
+                            *session.catalog.borrow_mut() =
+                                Some(Rc::new(Catalog::new(schemas.clone(), conn.clone())));
+                            session.schemas = schemas;
                             session.read_only = profile.read_only;
                             session.conn = conn;
                             session.in_transaction = false;
                             session.profile = profile;
+                            for tab in this
+                                .tabs
+                                .iter_mut()
+                                .filter(|t| t.session == Some(session_id))
+                            {
+                                tab.grid = None;
+                                tab.sets.clear();
+                            }
                         }
                     }
                     Ok(Some(Err(err))) => {
@@ -2266,8 +2321,15 @@ impl Workspace {
         else {
             return false;
         };
+        // A table tab's row count runs in its own (read-only, on production)
+        // transaction: nothing else may land inside it.
         self.tabs.iter().any(|t| {
-            t.session == Some(session) && (matches!(t.query, Query::Running { .. }) || t.saving)
+            t.session == Some(session)
+                && (matches!(t.query, Query::Running { .. })
+                    || t.saving
+                    || t.browse
+                        .as_ref()
+                        .is_some_and(|b| matches!(b.total, Some(crate::pages::Total::Counting))))
         })
     }
 

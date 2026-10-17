@@ -580,3 +580,31 @@ fn hardening_a_saved_query_never_runs_on_another_connections_tab() {
     assert_eq!(order_status(&staging, 4), before, "ran on staging");
     assert_eq!(order_status(&shop, 4), "ran-here", "didn't run on dev");
 }
+
+/// 0.5.3 P3/T4/W3: nothing runs on a connection while a table tab counts its
+/// rows (the count's transaction would take it in).
+#[test]
+#[ignore]
+fn hardening_nothing_runs_while_a_count_is_open() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("counting");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let id = w.sessions[0].id;
+        w.browse(id, "main", "orders", window, cx)
+    });
+    assert!(shot.settle(10, |w| !w.is_running() && w.active_tab().grid.is_some()));
+    shot.act(|w, window, cx| {
+        let counting = w.active_tab().id;
+        w.new_tab(&crate::NewTab, window, cx);
+        w.tabs
+            .iter_mut()
+            .find(|t| t.id == counting)
+            .and_then(|t| t.browse.as_mut())
+            .unwrap()
+            .total = Some(crate::pages::Total::Counting);
+        set_sql(w, "select 1", window, cx);
+        w.run(RunScope::All, window, cx);
+        assert!(!w.is_running(), "ran while a count was open");
+    });
+}

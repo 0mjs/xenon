@@ -644,11 +644,15 @@ fn assess_statement(statement: &str, lexing: Lexing) -> Option<(Risk, String)> {
                 return Some((Risk::Write, "SELECT INTO".into()));
             }
             // MySQL's `reset master`, `reset persist`…; Postgres's `reset name` reads.
+            // and resetting a setting that guards files or extensions back to
+            // its default (DuckDB's `reset autoinstall_known_extensions`).
             "reset"
                 if matches!(
                     second,
                     Some("master" | "replica" | "slave" | "persist" | "binary" | "query")
-                ) =>
+                ) || second.is_some_and(|name| {
+                    WRITING_SETTINGS.contains(&name.rsplit('.').next().unwrap_or(name))
+                }) =>
             {
                 return Some((Risk::Write, "RESET".into()));
             }
@@ -816,7 +820,8 @@ fn mysql_commits_implicitly(words: &[String]) -> bool {
     match words.first().map(String::as_str) {
         Some(
             "create" | "alter" | "drop" | "truncate" | "rename" | "grant" | "revoke" | "install"
-            | "uninstall" | "flush" | "analyze" | "optimize" | "repair" | "cache" | "load",
+            | "uninstall" | "flush" | "analyze" | "optimize" | "repair" | "cache" | "check"
+            | "checksum" | "call" | "change" | "stop" | "purge" | "reset",
         ) => !matches!(
             (words.first().map(String::as_str), second),
             (Some("create" | "drop"), Some("temporary"))
@@ -1879,6 +1884,8 @@ mod tests {
             "set enable_profiling = 'json'",
             "set profiling_output = '/tmp/p.json'",
             "set autoinstall_known_extensions = true",
+            "reset autoinstall_known_extensions",
+            "reset autoload_known_extensions",
             "lock tables orders write",
             "load data infile 'x' into table t",
         ] {
@@ -1986,6 +1993,17 @@ mod tests {
         ));
         assert!(mysql_has_implicit_commit(
             "insert into t values (1); alter table t add b int"
+        ));
+        // A procedure may commit; so do table checks and replication commands.
+        assert!(mysql_has_implicit_commit(
+            "insert into t values (1); call tidy()"
+        ));
+        assert!(mysql_has_implicit_commit(
+            "insert into t values (1); check table t"
+        ));
+        // LOAD DATA commits only on NDB: not counted.
+        assert!(!mysql_has_implicit_commit(
+            "insert into t values (1); load data infile 'x' into table t"
         ));
         assert!(!mysql_has_implicit_commit(
             "insert into t values (1); create temporary table x (a int)"

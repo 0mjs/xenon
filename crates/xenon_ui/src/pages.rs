@@ -129,23 +129,35 @@ impl Workspace {
             counted
         });
         cx.spawn(async move |this, cx| {
-            let Ok(done) = task.await else { return };
-            let count = match done.outcome {
+            let count = task.await.ok().and_then(|done| match done.outcome {
                 QueryOutcome::Rows(rows) => match rows.rows.first().and_then(|r| r.first()) {
                     Some(Value::Integer(n)) => u64::try_from(*n).ok(),
                     Some(Value::Decimal(n) | Value::Text(n)) => n.parse().ok(),
                     _ => None,
                 },
                 QueryOutcome::Affected(_) => None,
-            };
-            if let Some(count) = count {
-                this.update(cx, |this, cx| {
-                    this.set_total(tab_id, Total::Exact(count), cx)
-                })
-                .ok();
-            }
+            });
+            this.update(cx, |this, cx| match count {
+                Some(count) => this.set_total(tab_id, Total::Exact(count), cx),
+                // Failed: no total, and the connection is free again.
+                None => this.clear_counting(tab_id, cx),
+            })
+            .ok();
         })
         .detach();
+    }
+
+    fn clear_counting(&mut self, tab_id: usize, cx: &mut Context<Self>) {
+        if let Some(browse) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.browse.as_mut())
+            && matches!(browse.total, Some(Total::Counting))
+        {
+            browse.total = None;
+            cx.notify();
+        }
     }
 
     fn set_total(&mut self, tab_id: usize, total: Total, cx: &mut Context<Self>) {

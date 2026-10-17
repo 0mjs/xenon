@@ -323,6 +323,9 @@ pub fn save_within(
     let saved = save(conn, statements);
     done.store(true, Ordering::SeqCst);
     match saved {
+        // Stopped during the commit itself: it may have landed. Say so, rather
+        // than "nothing was saved" (saving again could apply it twice).
+        Err(err) if err.downcast_ref::<CommitUnknown>().is_some() => Err(err),
         Err(_) if timed_out.load(Ordering::SeqCst) => Err(anyhow!(
             "Nothing was saved: the save was still running after the production time limit \
              ({} s, Settings → Safety), so Xenon stopped it and rolled it back.",
@@ -660,6 +663,61 @@ mod tests {
         assert!(!touches_null_key(&target, &data, &edits));
         edits.deleted.insert(0);
         assert!(touches_null_key(&target, &data, &edits));
+    }
+
+    /// The time limit cuts into the commit, which may have landed: still
+    /// "unknown", not "nothing was saved".
+    #[test]
+    fn a_commit_the_time_limit_cuts_into_stays_unknown() {
+        struct SlowCommit(SqliteConnection);
+        impl Connection for SlowCommit {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn server_version(&self) -> String {
+                self.0.server_version()
+            }
+            fn execute_streaming(
+                &self,
+                sql: &str,
+                row_limit: usize,
+                progress: &mut dyn FnMut(xenon_driver::Progress),
+            ) -> Result<xenon_driver::QueryResult> {
+                if sql == "commit" {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    return Err(anyhow!("connection reset by peer"));
+                }
+                self.0.execute_streaming(sql, row_limit, progress)
+            }
+            fn introspect(&self) -> Result<Vec<xenon_driver::Schema>> {
+                self.0.introspect()
+            }
+            fn describe(&self, schema: &str, table: &str) -> Result<xenon_driver::TableInfo> {
+                self.0.describe(schema, table)
+            }
+            fn cancel_handle(&self) -> std::sync::Arc<dyn xenon_driver::CancelHandle> {
+                self.0.cancel_handle()
+            }
+            fn alive(&self) -> bool {
+                false
+            }
+            fn in_transaction(&self) -> Option<bool> {
+                Some(false)
+            }
+        }
+        let (conn, path) = shop();
+        let data = fetch(&conn);
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(0), 1, Value::Text("saved".into()), None);
+        let todo = statements(&conn, &target(), &data, &edits);
+        let err = save_within(
+            &SlowCommit(conn),
+            &todo,
+            Some(std::time::Duration::from_millis(100)),
+        )
+        .unwrap_err();
+        assert!(err.downcast_ref::<CommitUnknown>().is_some(), "{err:#}");
+        let _ = std::fs::remove_file(path);
     }
 
     /// A key that isn't valid UTF-8 isn't read as U+FFFD, which another row's
