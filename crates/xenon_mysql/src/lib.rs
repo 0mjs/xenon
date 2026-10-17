@@ -404,6 +404,27 @@ impl MysqlConnection {
         })
     }
 
+    /// Wait for a user's kill still on its way, so it can't stop what runs next.
+    fn settle_kill(&self) {
+        let pending = self
+            .cancel
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        // A kill connection that never gets an answer mustn't hang the
+        // session: give it a few seconds, then leave it to finish on its own.
+        if let Some(pending) = pending {
+            let started = std::time::Instant::now();
+            while !pending.is_finished() && started.elapsed() < std::time::Duration::from_secs(5) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if pending.is_finished() {
+                let _ = pending.join();
+            }
+        }
+    }
+
     /// True when the server is MariaDB rather than MySQL.
     pub fn is_mariadb(&self) -> bool {
         self.mariadb
@@ -435,6 +456,8 @@ impl Connection for MysqlConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        // A kill pressed just after the last query returned: let it land first.
+        self.settle_kill();
         let result = (|| -> Result<QueryResult> {
             // MySQL's read-only session stops DML but not DDL (which commits on its
             // own), nor DDL run by `prepare … execute` or a procedure: refuse
@@ -584,15 +607,7 @@ impl Connection for MysqlConnection {
         })();
         // A kill sent while it ran: wait for it to land (MySQL drops one that
         // finds the connection idle) before anything else runs here.
-        let pending = self
-            .cancel
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(pending) = pending {
-            let _ = pending.join();
-        }
+        self.settle_kill();
         // Follow the transaction: MySQL can't be asked. A failed script may have
         // opened one before failing, so then it counts as open.
         let mut state = self.transaction.lock().unwrap_or_else(|e| e.into_inner());
@@ -835,6 +850,7 @@ impl Connection for MysqlConnection {
     }
 
     fn alive(&self) -> bool {
+        self.settle_kill();
         match self.lock().query_drop("select 1") {
             Ok(()) => true,
             // The server answered, if only to refuse.
@@ -844,6 +860,7 @@ impl Connection for MysqlConnection {
     }
 
     fn in_transaction(&self) -> Option<bool> {
+        self.settle_kill();
         // MySQL has no reliable way to ask (`information_schema.innodb_trx` is a
         // snapshot refreshed every 100 ms, and needs PROCESS): the driver follows
         // what ran instead, autocommit and implicit commits included. MariaDB can say.

@@ -2579,7 +2579,23 @@ impl Workspace {
                             Wrap::ReadOnly(_) => Ok(done),
                         }
                     }
-                    Ok(done) => conn.execute("commit", 1).map(|_| done),
+                    Ok(done) => {
+                        // The statements are done: the time limit stops here,
+                        // so it can't cut the commit off part-way.
+                        feed.done.store(true, std::sync::atomic::Ordering::SeqCst);
+                        match conn.execute("commit", 1) {
+                            Ok(_) => Ok(done),
+                            // Refused but still open: roll back, nothing kept.
+                            Err(err) if conn.in_transaction() != Some(false) && conn.alive() => {
+                                let _ = conn.execute("rollback", 1);
+                                Err(wrap.explain(err))
+                            }
+                            Err(err) => Err(err.context(
+                                "The connection dropped while committing, so Xenon can't tell \
+                                 whether the script was kept: check before running it again",
+                            )),
+                        }
+                    }
                     Err(err) => {
                         let _ = conn.execute("rollback", 1);
                         Err(wrap.explain(err))

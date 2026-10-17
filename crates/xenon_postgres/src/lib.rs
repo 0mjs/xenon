@@ -283,6 +283,25 @@ impl PostgresConnection {
         })
     }
 
+    /// Wait for a user's cancel still on its way to land (and the server to
+    /// act on it), so it can't stop whatever runs next.
+    fn settle_cancel(&self) {
+        let pending = self
+            .cancel
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            runtime().block_on(async {
+                // A cancel connection that never gets an answer mustn't hang
+                // the session: give it a few seconds.
+                let _ = tokio::time::timeout(Duration::from_secs(5), pending).await;
+                tokio::time::sleep(CANCEL_SETTLE).await;
+            });
+        }
+    }
+
     async fn run(
         &self,
         sql: &str,
@@ -483,6 +502,9 @@ impl Connection for PostgresConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        // A cancel pressed just after the last query returned is still on its
+        // way: let it land on nothing before this runs.
+        self.settle_cancel();
         if self.read_only && xenon_driver::sql::lifts_read_only(sql) {
             return Err(QueryError {
                 message:
@@ -524,18 +546,7 @@ impl Connection for PostgresConnection {
         }
         // A cancel sent while it ran: wait for it to land (and for the server
         // to act on it) before anything else runs on this session.
-        let pending = self
-            .cancel
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(pending) = pending {
-            runtime().block_on(async {
-                let _ = pending.await;
-                tokio::time::sleep(CANCEL_SETTLE).await;
-            });
-        }
+        self.settle_cancel();
         if self.read_only {
             // However it was done (a `do` block building the statement, say),
             // a read-only session switched to read-write goes straight back.
@@ -794,6 +805,7 @@ impl Connection for PostgresConnection {
     }
 
     fn alive(&self) -> bool {
+        self.settle_cancel();
         if self.client.is_closed() {
             return false;
         }
@@ -805,6 +817,7 @@ impl Connection for PostgresConnection {
     }
 
     fn in_transaction(&self) -> Option<bool> {
+        self.settle_cancel();
         // `now()` is when the transaction began; outside one, that's this statement.
         match runtime().block_on(
             self.client
