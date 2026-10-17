@@ -1494,6 +1494,23 @@ pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
                 });
                 i = end;
             }
+            // `?NNN` (SQLite, DuckDB) is the NNNth parameter, digits and all;
+            // a bare `?` is the next one.
+            b'?' if style.question
+                && !style.mysql
+                && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) =>
+            {
+                let end = (i + 1..bytes.len())
+                    .find(|&j| !bytes[j].is_ascii_digit())
+                    .unwrap_or(bytes.len());
+                let n: usize = sql[i + 1..end].parse().unwrap_or(0);
+                questions = questions.max(n);
+                params.push(Param {
+                    range: i..end,
+                    key: format!("?{n}"),
+                });
+                i = end;
+            }
             b'?' if style.question => {
                 questions += 1;
                 params.push(Param {
@@ -1510,9 +1527,9 @@ pub fn parameters(sql: &str, style: ParamStyle) -> Vec<Param> {
 
 /// `sql` with each placeholder replaced by the SQL literal `value` gives for its key.
 ///
-/// A literal that would run into an operator next to it is set apart by a
-/// space: `0 -:n` with `n = -1` becomes `0 - -1`, not `0 --1`, which would
-/// comment out the rest of the line.
+/// A literal that would run into an operator before it is put in brackets:
+/// `0 -:n` with `n = -1` becomes `0 -(-1)`, not `0 --1`, which would comment
+/// out the rest of the line (and not `0 - -1`: `-- ` is a comment on MySQL).
 pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> String {
     let mut out = sql.to_string();
     let operator =
@@ -1522,7 +1539,7 @@ pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> Stri
         if operator(out[..param.range.start].chars().next_back())
             && operator(literal.chars().next())
         {
-            literal.insert(0, ' ');
+            literal = format!("({literal})");
         }
         if operator(out[param.range.end..].chars().next()) && operator(literal.chars().next_back())
         {
@@ -1531,6 +1548,39 @@ pub fn bind(sql: &str, params: &[Param], value: impl Fn(&str) -> String) -> Stri
         out.replace_range(param.range.clone(), &literal);
     }
     out
+}
+
+/// Whether `text` is a plain number to write as one: an optional sign, digits
+/// with an optional decimal point, and an optional exponent. Not `inf` or
+/// `nan` (they'd be written as bare words), not `1_000` or `0x10`.
+pub fn is_plain_number(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while bytes.get(*i).is_some_and(u8::is_ascii_digit) {
+            *i += 1;
+        }
+        *i - start
+    };
+    let whole = digits(&mut i);
+    let fraction = if bytes.get(i) == Some(&b'.') {
+        i += 1;
+        digits(&mut i)
+    } else {
+        0
+    };
+    if whole + fraction == 0 {
+        return false;
+    }
+    if matches!(bytes.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        i += usize::from(matches!(bytes.get(i), Some(b'+' | b'-')));
+        if digits(&mut i) == 0 {
+            return false;
+        }
+    }
+    i == bytes.len()
 }
 
 /// Whether byte `offset` of `sql` is in code, not inside a string, a quoted
@@ -1925,6 +1975,24 @@ mod tests {
     }
 
     #[test]
+    fn numbered_question_placeholders_take_their_digits() {
+        let style = ParamStyle {
+            question: true,
+            ..Default::default()
+        };
+        let sql = "delete from t where id = ?1 or parent = ?1";
+        let found = parameters(sql, style);
+        assert_eq!(
+            found.iter().map(|p| p.key.as_str()).collect::<Vec<_>>(),
+            ["?1", "?1"]
+        );
+        assert_eq!(
+            bind(sql, &found, |_| "4".into()),
+            "delete from t where id = 4 or parent = 4"
+        );
+    }
+
+    #[test]
     fn bracketed_names_hold_no_placeholders() {
         let style = ParamStyle {
             question: true,
@@ -1946,14 +2014,24 @@ mod tests {
         });
         assert_eq!(
             bound,
-            "delete from accounts where balance > 0 - -1 and id = 7"
+            "delete from accounts where balance > 0 -(-1) and id = 7"
         );
         assert!(assess(&bound).is_some_and(|(risk, _)| risk == Risk::Write));
+        // MySQL: `--` then a space is a comment there; brackets never are.
+        let sql = "select 0 --:n, 1";
+        let mysql = ParamStyle {
+            mysql: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            bind(sql, &parameters(sql, mysql), |_| "-1".into()),
+            "select 0 --(-1), 1"
+        );
         let sql = "select 1 /:n";
         assert_eq!(
             bind(sql, &parameters(sql, ParamStyle::default()), |_| "*2"
                 .into()),
-            "select 1 / *2"
+            "select 1 /(*2)"
         );
     }
 

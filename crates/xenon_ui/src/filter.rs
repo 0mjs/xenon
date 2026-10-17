@@ -252,14 +252,10 @@ pub(crate) enum Menu {
     Op,
 }
 
-/// Type names that hold numbers, so a value like `100` is compared as one.
+/// Type names that hold numbers, so a value like `100` is compared as one:
+/// whole names (`interval`, `point` aren't).
 fn numeric(type_name: &str) -> bool {
-    let t = type_name.to_ascii_lowercase();
-    [
-        "int", "numeric", "decimal", "float", "double", "real", "money", "serial",
-    ]
-    .iter()
-    .any(|n| t.contains(n))
+    crate::value_editor::is_numeric_type(type_name)
 }
 
 impl Workspace {

@@ -1048,7 +1048,10 @@ fn default_literal(value: &Value) -> String {
         Value::Null => "NULL".into(),
         Value::Integer(n) => n.to_string(),
         Value::Real(n) => n.to_string(),
-        Value::Decimal(n) => n.clone(),
+        // A plain number as it is; anything else a numeric type holds (`NaN`,
+        // `Infinity`, money's `$1,234.50`) quoted, for the column to read.
+        Value::Decimal(n) if xenon_driver::sql::is_plain_number(n) => n.clone(),
+        Value::Decimal(n) => format!("'{}'", n.replace('\'', "''")),
         // With a backslash, an escape string: it means the same whatever the
         // server's `standard_conforming_strings`.
         Value::Text(text) if text.contains('\\') => {
@@ -1062,6 +1065,16 @@ fn default_literal(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_that_arent_plain_are_quoted() {
+        assert_eq!(default_literal(&Value::Decimal("12.50".into())), "12.50");
+        assert_eq!(
+            default_literal(&Value::Decimal("$1,234.50".into())),
+            "'$1,234.50'"
+        );
+        assert_eq!(default_literal(&Value::Decimal("NaN".into())), "'NaN'");
+    }
 
     #[test]
     fn prefer_takes_tls_to_remote_servers() {

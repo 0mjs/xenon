@@ -139,37 +139,10 @@ pub(crate) fn is_numeric_type(type_name: &str) -> bool {
     )
 }
 
-/// Whether `text` is a plain number to write as one: an optional sign, digits
-/// with an optional decimal point, and an optional exponent. Not `inf` or
-/// `nan` (they'd be written as bare words), not `1_000` or `0x10`.
+/// Whether `text` is a plain number to write as one (see
+/// [`xenon_driver::sql::is_plain_number`]).
 pub(crate) fn is_plain_number(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut i = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    let digits = |i: &mut usize| {
-        let start = *i;
-        while bytes.get(*i).is_some_and(u8::is_ascii_digit) {
-            *i += 1;
-        }
-        *i - start
-    };
-    let whole = digits(&mut i);
-    let fraction = if bytes.get(i) == Some(&b'.') {
-        i += 1;
-        digits(&mut i)
-    } else {
-        0
-    };
-    if whole + fraction == 0 {
-        return false;
-    }
-    if matches!(bytes.get(i), Some(b'e' | b'E')) {
-        i += 1;
-        i += usize::from(matches!(bytes.get(i), Some(b'+' | b'-')));
-        if digits(&mut i) == 0 {
-            return false;
-        }
-    }
-    i == bytes.len()
+    xenon_driver::sql::is_plain_number(text)
 }
 
 /// Why `text` isn't valid JSON, if it isn't.

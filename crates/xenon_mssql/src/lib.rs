@@ -404,6 +404,15 @@ async fn open(options: &ConnectOptions) -> Result<Tds> {
         }
         Err(err) => return Err(describe(err)),
     };
+    // Dates written as `YYYY-MM-DD` read the same whatever the login's
+    // language (a British login would read `2026-05-03` as 5 March otherwise).
+    client
+        .simple_query("set dateformat ymd")
+        .await
+        .map_err(describe)?
+        .into_results()
+        .await
+        .map_err(describe)?;
     if let Some(wait) = options.lock_timeout {
         client
             .simple_query(format!("set lock_timeout {}", wait.as_millis().max(1)))
@@ -1099,7 +1108,8 @@ impl Connection for MssqlConnection {
             Value::Null => "NULL".into(),
             Value::Integer(n) => n.to_string(),
             Value::Real(n) => n.to_string(),
-            Value::Decimal(n) => n.clone(),
+            Value::Decimal(n) if xenon_driver::sql::is_plain_number(n) => n.clone(),
+            Value::Decimal(n) => format!("'{}'", n.replace('\'', "''")),
         }
     }
 
@@ -1110,6 +1120,27 @@ impl Connection for MssqlConnection {
 
 /// A value as Xenon shows it: numbers exact, dates as SQL Server prints them.
 fn convert(data: ColumnData<'static>, ty: ColumnType) -> Value {
+    /// `format` plus the fraction of a second to `digits` places (none when
+    /// whole), and the offset for a time with one.
+    fn moment<T>(data: &ColumnData<'static>, format: &str, digits: usize) -> Value
+    where
+        T: for<'a> FromSql<'a> + chrono::Timelike + Formats,
+    {
+        match T::from_sql(data) {
+            Ok(Some(value)) => {
+                let nanos = format!("{:09}", value.nanosecond() % 1_000_000_000);
+                let fraction = nanos[..digits].trim_end_matches('0');
+                let mut text = value.formatted(format);
+                if !fraction.is_empty() {
+                    text.push('.');
+                    text.push_str(fraction);
+                }
+                text.push_str(&value.offset_text());
+                Value::Text(text)
+            }
+            _ => Value::Null,
+        }
+    }
     fn date<T: for<'a> FromSql<'a> + ToString>(data: &ColumnData<'static>) -> Value {
         match T::from_sql(data) {
             Ok(Some(value)) => Value::Text(value.to_string()),
@@ -1134,14 +1165,48 @@ fn convert(data: ColumnData<'static>, ty: ColumnType) -> Value {
         ColumnData::Binary(v) => v.map_or(Value::Null, |v| Value::Blob(v.into_owned())),
         ColumnData::Numeric(v) => v.map_or(Value::Null, |v| Value::Decimal(v.to_string())),
         ColumnData::Xml(v) => v.map_or(Value::Null, |v| Value::Text(v.to_string())),
-        data @ (ColumnData::DateTime(_)
-        | ColumnData::SmallDateTime(_)
-        | ColumnData::DateTime2(_)) => date::<chrono::NaiveDateTime>(&data),
-        data @ ColumnData::Date(_) => date::<chrono::NaiveDate>(&data),
-        data @ ColumnData::Time(_) => date::<chrono::NaiveTime>(&data),
-        data @ ColumnData::DateTimeOffset(_) => {
-            date::<chrono::DateTime<chrono::FixedOffset>>(&data)
+        // As many fractional digits as the type holds (datetime 3, the others
+        // 7), so the text reads back as the same value.
+        data @ (ColumnData::DateTime(_) | ColumnData::SmallDateTime(_)) => {
+            moment::<chrono::NaiveDateTime>(&data, "%Y-%m-%d %H:%M:%S", 3)
         }
+        data @ ColumnData::DateTime2(_) => {
+            moment::<chrono::NaiveDateTime>(&data, "%Y-%m-%d %H:%M:%S", 7)
+        }
+        data @ ColumnData::Date(_) => date::<chrono::NaiveDate>(&data),
+        data @ ColumnData::Time(_) => moment::<chrono::NaiveTime>(&data, "%H:%M:%S", 7),
+        data @ ColumnData::DateTimeOffset(_) => {
+            moment::<chrono::DateTime<chrono::FixedOffset>>(&data, "%Y-%m-%d %H:%M:%S", 7)
+        }
+    }
+}
+
+/// What `moment` needs from each chrono type.
+trait Formats {
+    fn formatted(&self, format: &str) -> String;
+    fn offset_text(&self) -> String {
+        String::new()
+    }
+}
+
+impl Formats for chrono::NaiveDateTime {
+    fn formatted(&self, format: &str) -> String {
+        self.format(format).to_string()
+    }
+}
+
+impl Formats for chrono::NaiveTime {
+    fn formatted(&self, format: &str) -> String {
+        self.format(format).to_string()
+    }
+}
+
+impl Formats for chrono::DateTime<chrono::FixedOffset> {
+    fn formatted(&self, format: &str) -> String {
+        self.format(format).to_string()
+    }
+    fn offset_text(&self) -> String {
+        self.format(" %:z").to_string()
     }
 }
 
@@ -1422,6 +1487,44 @@ mod live {
         );
         let name = rows(&db, "select db_name()");
         assert_eq!(name.rows[0][0], Value::Text("master".into()));
+    }
+
+    /// Times are read back so they compare equal to what's stored, and dates
+    /// written as `YYYY-MM-DD` mean the same for a British login.
+    #[test]
+    #[ignore]
+    fn times_round_trip_and_dates_ignore_the_language() {
+        let _serial = serial();
+        let db = fleet();
+        db.execute(
+            "drop table if exists xenon_times; \
+             create table xenon_times (id int primary key, at datetime, at2 datetime2(7)); \
+             insert into xenon_times values (1, getdate(), sysdatetime())",
+            1,
+        )
+        .unwrap();
+        let loaded = rows(&db, "select at, at2 from xenon_times");
+        for (ix, column) in ["at", "at2"].iter().enumerate() {
+            let check = db
+                .unchanged(
+                    column,
+                    if ix == 0 { "datetime" } else { "datetime2" },
+                    &loaded.rows[0][ix],
+                )
+                .unwrap();
+            let found = rows(
+                &db,
+                &format!("select count(*) from xenon_times where {check}"),
+            );
+            assert_eq!(found.rows[0][0], Value::Integer(1), "{column}: {check}");
+        }
+        // Set at connection, after the login's language set its own.
+        let format = rows(
+            &db,
+            "select date_format from sys.dm_exec_sessions where session_id = @@spid",
+        );
+        assert_eq!(format.rows[0][0], Value::Text("ymd".into()));
+        db.execute("drop table xenon_times", 1).unwrap();
     }
 
     /// The default (`prefer`) encrypts the whole session, not just the login.

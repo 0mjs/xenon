@@ -113,6 +113,25 @@ pub(crate) fn toggle_comment(
     (start..end, new.join("\n"))
 }
 
+/// Whether replacing `range` of `text` with `new` keeps what's code and what's
+/// a string or comment everywhere after it. Commenting out a line that opens a
+/// string (or a `/*`) would turn the lines after it into code: then it doesn't.
+pub(crate) fn keeps_the_rest(text: &str, range: Range<usize>, new: &str, mysql: bool) -> bool {
+    let mut changed = String::with_capacity(text.len());
+    changed.push_str(&text[..range.start]);
+    changed.push_str(new);
+    changed.push_str(&text[range.end..]);
+    let shift = |at: usize| at + new.len() - range.len();
+    // Every later line start reads the same before and after.
+    text[range.end..]
+        .match_indices('\n')
+        .map(|(i, _)| range.end + i + 1)
+        .all(|at| {
+            xenon_driver::sql::in_code(text, at, mysql)
+                == xenon_driver::sql::in_code(&changed, shift(at), mysql)
+        })
+}
+
 impl Workspace {
     pub(crate) fn format_sql(
         &mut self,
@@ -172,6 +191,14 @@ impl Workspace {
             .active_session()
             .is_some_and(|s| matches!(s.engine, Engine::MySql | Engine::MariaDb));
         let (lines, new) = toggle_comment(&text, selection, mysql);
+        if !keeps_the_rest(&text, lines.clone(), &new, mysql) {
+            self.flash(
+                "That would comment out the start of a string or comment and turn what follows into code: select it all.",
+                true,
+                cx,
+            );
+            return;
+        }
         let start = lines.start;
         editor.update(cx, |editor, cx| {
             editor.set_selected_range(lines, cx);
@@ -186,6 +213,17 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commenting_the_start_of_a_string_alone_is_refused() {
+        let text = "insert into t values ('a\ndrop table users; --');\nselect 1";
+        // Only the first line: its quote would go into the comment.
+        let (range, new) = toggle_comment(text, 0..3, false);
+        assert!(!keeps_the_rest(text, range, &new, false));
+        // The whole statement is fine.
+        let (range, new) = toggle_comment(text, 0..text.len(), false);
+        assert!(keeps_the_rest(text, range, &new, false));
+    }
 
     #[test]
     fn toggle_comment_leaves_strings_alone() {

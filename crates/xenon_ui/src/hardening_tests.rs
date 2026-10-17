@@ -608,3 +608,24 @@ fn hardening_nothing_runs_while_a_count_is_open() {
         assert!(!w.is_running(), "ran while a count was open");
     });
 }
+
+/// 0.5.3 W4/E16: closing, disconnecting or quitting waits for a running save.
+#[test]
+#[ignore]
+fn hardening_a_running_save_isnt_cut_off() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, _, shop) = setup("save-close");
+    let mut shot = Shot::new(Mode::Dark, Some(&shop), &root);
+    shot.act(|w, window, cx| {
+        let active = w.active;
+        w.tabs[active].saving = true;
+        let tabs = w.tabs().len();
+        w.close_tab_at(active, window, cx);
+        assert_eq!(w.tabs().len(), tabs, "closed mid-save");
+        let session = w.sessions[0].id;
+        w.close_session(session, window, cx);
+        assert_eq!(w.sessions.len(), 1, "disconnected mid-save");
+        assert!(!w.may_quit(window, cx), "quit mid-save");
+        w.tabs[active].saving = false;
+    });
+}

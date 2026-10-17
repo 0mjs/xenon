@@ -1057,6 +1057,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A save is still going: closing now would free the connection mid-way
+        // (and the changes are being kept, not discarded).
+        if self.tabs[index].saving {
+            self.flash("Saving: close it when that's done.", true, cx);
+            return;
+        }
         // Staged changes would go with it: ask.
         let tab = &self.tabs[index];
         if !tab.edits.is_empty() {
@@ -1469,6 +1475,11 @@ impl Workspace {
         let text = self.paste_input.read(cx).value().to_string();
         match detect(&text) {
             Detected::Server(engine, url) => match servers::parse_url(engine, &url) {
+                // A saved database's URL opens as that saved connection, guards
+                // and all (`connect_url` sees to it).
+                Ok(options) if self.saved_for(engine, &options).is_some() => {
+                    self.connect_url(engine, url, window, cx)
+                }
                 Ok(options) if options.password.is_empty() && !is_local_host(&options.host) => {
                     self.open_connection_dialog(
                         Subject::Prefill {
@@ -1603,6 +1614,13 @@ impl Workspace {
         let Some(session) = self.session(id) else {
             return;
         };
+        if self.tabs.iter().any(|t| t.session == Some(id) && t.saving) {
+            self.notice = Some(
+                "A save is still running on that connection: disconnect when it's done.".into(),
+            );
+            cx.notify();
+            return;
+        }
         let unsaved: usize = self
             .tabs
             .iter()
@@ -3110,6 +3128,12 @@ impl Workspace {
     /// Quit, asking first when a transaction is open (quitting rolls it back).
     /// Returns whether Xenon may close now.
     pub(crate) fn may_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // Quitting mid-save ends it part-way: wait for it.
+        if self.tabs.iter().any(|t| t.saving) {
+            self.notice = Some("A save is still running: quit when it's done.".into());
+            cx.notify();
+            return false;
+        }
         let open = self.open_transactions();
         let unsaved: usize = self.tabs.iter().map(|t| t.edits.count()).sum();
         if open.is_empty() && unsaved == 0 {
@@ -3447,9 +3471,13 @@ impl Workspace {
         if matches!(tab.query, Query::Running { .. }) {
             return Err("Still loading.");
         }
-        // Changes made now would be thrown away when the save finishes.
+        // Changes made now would be thrown away when the save finishes, or when
+        // the rows the check is waiting to run come back.
         if tab.saving {
             return Err("Saving: wait for it to finish.");
+        }
+        if session.reconnecting {
+            return Err("Checking the connection: wait a moment.");
         }
         let ran = tab.last_run.as_ref().map(|(sql, _)| sql.trim());
         if ran.is_none() || ran != browse.loaded_with.as_deref().map(str::trim) {

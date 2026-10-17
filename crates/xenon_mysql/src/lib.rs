@@ -884,7 +884,8 @@ impl Connection for MysqlConnection {
             Value::Null => "NULL".into(),
             Value::Integer(n) => n.to_string(),
             Value::Real(n) => n.to_string(),
-            Value::Decimal(n) => n.clone(),
+            Value::Decimal(n) if xenon_driver::sql::is_plain_number(n) => n.clone(),
+            Value::Decimal(n) => format!("'{}'", n.replace('\'', "''")),
         }
     }
 
