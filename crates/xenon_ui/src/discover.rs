@@ -100,6 +100,15 @@ fn run(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    // Read while it runs: output larger than the pipe (many containers) would
+    // otherwise block it until the timeout.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut out)
+            .ok()
+            .map(|_| out)
+    });
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -113,9 +122,7 @@ fn run(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
             Err(_) => return None,
         }
     }
-    let mut out = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    Some(out)
+    reader.join().ok().flatten()
 }
 
 fn docker() -> Vec<Found> {
@@ -493,6 +500,17 @@ fn parse_env_file(text: &str, source: &str) -> Vec<Found> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_output_is_read_while_the_command_runs() {
+        // Far more than a pipe holds.
+        let out = run(
+            "/bin/sh",
+            &["-c", "head -c 300000 /dev/zero | tr '\\0' x"],
+            Duration::from_secs(5),
+        );
+        assert_eq!(out.map(|o| o.len()), Some(300_000));
+    }
 
     #[test]
     fn docker_ports_and_images() {

@@ -192,7 +192,16 @@ impl Tunnel {
                 return Err(explain(&self.log(), &self.destination, status.code()));
             }
             if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
-                return Ok(());
+                // Something answers: make sure it's ssh's forward, not another
+                // program that took the port first (it would get the login).
+                return match listener_pids(self.local_port) {
+                    Some(pids) if !pids.contains(&self.child.id()) => Err(anyhow!(
+                        "Another program is listening on the SSH tunnel's local port ({}), so \
+                         Xenon didn't connect through it. Try again.",
+                        self.local_port
+                    )),
+                    _ => Ok(()),
+                };
             }
             if started.elapsed() > READY_TIMEOUT {
                 return Err(anyhow!(
@@ -204,6 +213,27 @@ impl Tunnel {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+}
+
+/// Your processes listening on `127.0.0.1:port`, by `lsof` (which macOS has;
+/// it can't see other accounts' processes, and doesn't need to: ssh is yours).
+/// `None` when `lsof` can't be run; then the port is taken on trust.
+fn listener_pids(port: u16) -> Option<Vec<u32>> {
+    let out = std::process::Command::new("/usr/sbin/lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP@127.0.0.1:{port}"),
+            "-sTCP:LISTEN",
+            "-t",
+        ])
+        .output()
+        .ok()?;
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect(),
+    )
 }
 
 impl Drop for Tunnel {
@@ -326,6 +356,19 @@ impl Drop for Askpass {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_listener_is_told_apart_by_its_process() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Where `lsof` isn't at its macOS path (CI on Linux), there's nothing to tell.
+        let Some(pids) = super::listener_pids(port) else {
+            return;
+        };
+        assert!(pids.contains(&std::process::id()), "{pids:?}");
+        drop(listener);
+        assert_eq!(super::listener_pids(port), Some(vec![]));
+    }
+
     use super::*;
 
     #[test]

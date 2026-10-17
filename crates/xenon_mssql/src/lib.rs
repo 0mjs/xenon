@@ -122,16 +122,67 @@ pub fn parse_url(text: &str) -> Result<ConnectOptions> {
     Ok(options)
 }
 
+/// `key=value;…` pairs, as ADO.NET reads them: a value in `{…}` (with `}}` for
+/// a `}`) or in quotes (doubled to escape) can hold `;`.
 fn key_values(text: &str) -> Vec<(String, String)> {
-    text.split(';')
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(k, v)| {
-            (
-                k.trim().to_ascii_lowercase(),
-                v.trim().trim_matches(['{', '}']).to_string(),
-            )
-        })
-        .collect()
+    let mut pairs = Vec::new();
+    let mut chars = text.chars().peekable();
+    loop {
+        let key: String = chars.by_ref().take_while(|&c| c != '=').collect();
+        if key.trim().is_empty() && chars.peek().is_none() {
+            break;
+        }
+        while chars.peek().is_some_and(|c| c.is_whitespace()) {
+            chars.next();
+        }
+        let mut value = String::new();
+        match chars.peek().copied() {
+            Some(close @ ('{' | '"' | '\'')) => {
+                let close = if close == '{' { '}' } else { close };
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == close {
+                        if chars.peek() == Some(&close) {
+                            value.push(close);
+                            chars.next();
+                            continue;
+                        }
+                        break;
+                    }
+                    value.push(c);
+                }
+                // Up to the next separator.
+                for c in chars.by_ref() {
+                    if c == ';' {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                for c in chars.by_ref() {
+                    if c == ';' {
+                        break;
+                    }
+                    value.push(c);
+                }
+                value = value.trim().to_string();
+            }
+        }
+        // A key's own `;` part (`a;b=c`) keeps only what's after the last `;`.
+        let key = key
+            .rsplit(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if !key.is_empty() {
+            pairs.push((key, value));
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+    }
+    pairs
 }
 
 /// `host`, `host:1433` (URLs) or `host,1433` (ADO.NET). A named instance
@@ -1115,6 +1166,22 @@ fn unwrap_parens(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn braced_and_quoted_values_keep_their_semicolons() {
+        let options = parse_url(
+            "Server=db.example.com;Password={x;TrustServerCertificate=true};Encrypt=True;User ID=me",
+        )
+        .unwrap();
+        assert_eq!(options.password, "x;TrustServerCertificate=true");
+        assert_eq!(options.ssl, SslMode::VerifyFull);
+        assert_eq!(options.user, "me");
+        let quoted = parse_url("Server=h;Password=\"a;\"\"b\";Database=d").unwrap();
+        assert_eq!(quoted.password, "a;\"b");
+        assert_eq!(quoted.database, "d");
+        let braces = parse_url("Server=h;Password={p}}w}").unwrap();
+        assert_eq!(braces.password, "p}w");
+    }
 
     #[test]
     fn no_encrypt_setting_means_encrypt_and_verify() {

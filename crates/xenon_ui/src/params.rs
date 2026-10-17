@@ -83,8 +83,10 @@ pub(crate) fn value_of(text: &str) -> Value {
     Value::Text(text.to_string())
 }
 
-fn remembered_key(key: &str) -> String {
-    format!("param{key}")
+/// Where a parameter's last value is kept: per connection, so one database's
+/// values aren't offered for another's (and cleared with the history).
+fn remembered_key(connection: &str, key: &str) -> String {
+    format!("param@{connection}{key}")
 }
 
 impl Workspace {
@@ -120,9 +122,11 @@ impl Workspace {
             }
             let last = remember
                 .then(|| {
-                    self.store
-                        .as_ref()
-                        .and_then(|s| s.setting(&remembered_key(&param.key)).ok().flatten())
+                    self.store.as_ref().and_then(|s| {
+                        s.setting(&remembered_key(&session.conn.id(), &param.key))
+                            .ok()
+                            .flatten()
+                    })
                 })
                 .flatten()
                 .unwrap_or_default();
@@ -179,7 +183,7 @@ impl Workspace {
             .collect();
         if let (true, Some(store)) = (remember, &self.store) {
             for (key, value) in &values {
-                let _ = store.set_setting(&remembered_key(key), value);
+                let _ = store.set_setting(&remembered_key(&conn.id(), key), value);
             }
         }
         let sql = bind(&prompt.sql, &prompt.params, |key| {

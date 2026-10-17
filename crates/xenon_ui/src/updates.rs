@@ -52,13 +52,31 @@ fn latest() -> anyhow::Result<Release> {
             .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("GitHub's reply has no {name}"))
     };
+    let version = field("tag_name")?.trim_start_matches('v').to_string();
     Ok(Release {
-        version: field("tag_name")?
-            .trim_start_matches('v')
-            .to_string()
-            .into(),
-        url: field("html_url")?.into(),
+        url: release_page(&field("html_url")?, &version).into(),
+        version: version.into(),
     })
+}
+
+/// The page the notice opens: only ever Xenon's own release page on GitHub,
+/// whatever the reply says (it's opened with the system's URL handler).
+fn release_page(html_url: &str, version: &str) -> String {
+    const RELEASES: &str = "https://github.com/0mjs/xenon/releases/";
+    let safe = html_url.starts_with(RELEASES)
+        && !html_url.contains("..")
+        && html_url[RELEASES.len()..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_'));
+    if safe {
+        html_url.to_string()
+    } else {
+        let tag: String = version
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+            .collect();
+        format!("{RELEASES}tag/v{tag}")
+    }
 }
 
 /// Whether `candidate` is a later version than `current` (both `major.minor.patch`).
@@ -151,6 +169,24 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_notice_only_opens_xenons_release_page() {
+        let ok = "https://github.com/0mjs/xenon/releases/tag/v0.5.3";
+        assert_eq!(release_page(ok, "0.5.3"), ok);
+        for bad in [
+            "file:///Applications/Calculator.app",
+            "https://evil.example/xenon",
+            "https://github.com/0mjs/xenon/releases/../../other",
+            "https://github.com/0mjs/xenon/releases/tag/v1?x=javascript:alert(1)",
+        ] {
+            assert_eq!(
+                release_page(bad, "0.5.3"),
+                "https://github.com/0mjs/xenon/releases/tag/v0.5.3",
+                "{bad}"
+            );
+        }
+    }
 
     #[test]
     fn versions_compare_numerically() {

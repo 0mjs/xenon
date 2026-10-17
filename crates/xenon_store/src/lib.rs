@@ -262,7 +262,28 @@ impl Store {
         }
         let conn = rusqlite::Connection::open(path)
             .with_context(|| format!("could not open {}", path.display()))?;
-        Self::init(conn)
+        let store = Self::init(conn)?;
+        // History holds SQL as typed (a password in it, say): only you can read
+        // it. SQLite gives its -wal and -shm files the database file's mode.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let only_you = |p: &Path, mode: u32| {
+                let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
+            };
+            if let Some(dir) = path.parent() {
+                only_you(dir, 0o700);
+            }
+            only_you(path, 0o600);
+            for suffix in ["-wal", "-shm"] {
+                let mut side = path.as_os_str().to_owned();
+                side.push(suffix);
+                let side = std::path::PathBuf::from(side);
+                if side.exists() {
+                    only_you(&side, 0o600);
+                }
+            }
+        }
+        Ok(store)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -272,6 +293,7 @@ impl Store {
     fn init(conn: rusqlite::Connection) -> Result<Self> {
         conn.execute_batch(
             "pragma journal_mode = wal;
+             pragma secure_delete = on;
              create table if not exists history (
                  id integer primary key,
                  connection text not null,
@@ -708,8 +730,14 @@ impl Store {
         Ok(())
     }
 
+    /// Forget the history, and the parameter values remembered with it. The
+    /// file overwrites what it deletes (`secure_delete`), and the write-ahead
+    /// log is emptied, so the SQL isn't left on disk.
     pub fn clear_history(&self) -> Result<()> {
-        self.lock().execute("delete from history", [])?;
+        let conn = self.lock();
+        conn.execute("delete from history", [])?;
+        conn.execute("delete from settings where key like 'param%'", [])?;
+        conn.execute_batch("pragma wal_checkpoint(truncate)")?;
         Ok(())
     }
 
@@ -774,6 +802,37 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_data_file_is_yours_alone_and_cleared_history_is_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("xenon-store-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("xenon.db");
+        let store = Store::open(&path).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        store
+            .record(NewHistoryEntry {
+                connection: "c",
+                sql: "alter user app password 'SECRET-IN-HISTORY'",
+                duration: std::time::Duration::ZERO,
+                rows: None,
+                error: None,
+            })
+            .unwrap();
+        store.set_setting("param@c:pw", "SECRET-PARAM").unwrap();
+        store.clear_history().unwrap();
+        assert_eq!(store.setting("param@c:pw").unwrap(), None);
+        drop(store);
+        for file in std::fs::read_dir(&dir).unwrap() {
+            let bytes = std::fs::read(file.unwrap().path()).unwrap();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(!text.contains("SECRET-IN-HISTORY") && !text.contains("SECRET-PARAM"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn keychain_names_are_never_reused() {

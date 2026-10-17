@@ -283,15 +283,15 @@ impl Profile {
             read_only: self.read_only,
             color: self.color.clone(),
         })?;
+        // The form shows the saved passwords, so what it sends is what to keep:
+        // one cleared there (or a tunnel removed) is removed from the Keychain
+        // too, not quietly sent on.
         if let RequestTarget::Server(_, options) = &self.target {
-            if !options.password.is_empty() {
-                secrets::set(&SavedConnection::secret_key(id), &options.password)?;
-            }
-            if let Some(ssh) = &options.ssh
-                && !ssh.password.is_empty()
-            {
-                secrets::set(&SavedConnection::ssh_secret_key(id), &ssh.password)?;
-            }
+            secrets::set(&SavedConnection::secret_key(id), &options.password)?;
+            secrets::set(
+                &SavedConnection::ssh_secret_key(id),
+                options.ssh.as_ref().map_or("", |ssh| ssh.password.as_str()),
+            )?;
         }
         Ok(Some(id))
     }
