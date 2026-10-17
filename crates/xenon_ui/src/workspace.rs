@@ -163,6 +163,10 @@ pub(crate) struct Profile {
     pub(crate) target: RequestTarget,
     /// Set from Settings for production connections when connecting.
     lock_timeout: Option<std::time::Duration>,
+    /// Submitted from the connection form, which shows the saved passwords: an
+    /// empty one there was cleared on purpose. Everywhere else an empty
+    /// password means "use the Keychain's".
+    edited: bool,
 }
 
 impl Profile {
@@ -205,6 +209,7 @@ impl Profile {
             color: saved.color.clone(),
             target,
             lock_timeout: None,
+            edited: false,
         }
     }
 
@@ -218,6 +223,7 @@ impl Profile {
             color: request.color,
             target: request.target,
             lock_timeout: None,
+            edited: true,
         }
     }
 
@@ -283,15 +289,19 @@ impl Profile {
             read_only: self.read_only,
             color: self.color.clone(),
         })?;
-        // The form shows the saved passwords, so what it sends is what to keep:
-        // one cleared there (or a tunnel removed) is removed from the Keychain
-        // too, not quietly sent on.
+        // From the form, which shows the saved passwords, what it sends is what
+        // to keep: one cleared there (or a tunnel removed) leaves the Keychain.
+        // Opened any other way, an empty password means "the Keychain's": keep it.
         if let RequestTarget::Server(_, options) = &self.target {
-            secrets::set(&SavedConnection::secret_key(id), &options.password)?;
-            secrets::set(
-                &SavedConnection::ssh_secret_key(id),
-                options.ssh.as_ref().map_or("", |ssh| ssh.password.as_str()),
-            )?;
+            let ssh = options.ssh.as_ref().map_or("", |ssh| ssh.password.as_str());
+            for (key, secret) in [
+                (SavedConnection::secret_key(id), options.password.as_str()),
+                (SavedConnection::ssh_secret_key(id), ssh),
+            ] {
+                if self.edited || !secret.is_empty() {
+                    secrets::set(&key, secret)?;
+                }
+            }
         }
         Ok(Some(id))
     }
@@ -1146,6 +1156,7 @@ impl Workspace {
                 color: String::new(),
                 target: RequestTarget::Sqlite(path_text),
                 lock_timeout: None,
+                edited: false,
             },
         };
         self.open_profile(profile, window, cx);
@@ -1193,6 +1204,7 @@ impl Workspace {
             color: String::new(),
             target: RequestTarget::Server(engine, options),
             lock_timeout: None,
+            edited: false,
         }
     }
 
@@ -1516,6 +1528,7 @@ impl Workspace {
                     color: String::new(),
                     target: RequestTarget::Server(*engine, options.clone()),
                     lock_timeout: None,
+                    edited: false,
                 },
                 window,
                 cx,
@@ -1798,6 +1811,7 @@ impl Workspace {
                 color: String::new(),
                 target: RequestTarget::Server(engine, options),
                 lock_timeout: None,
+                edited: false,
             },
             window,
             cx,
