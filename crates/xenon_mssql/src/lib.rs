@@ -1730,7 +1730,7 @@ mod live {
         assert_eq!(max[col("born")], Value::Text("2024-02-29".into()));
         assert_eq!(
             max[col("at_dt2")],
-            Value::Text("9999-12-31 23:59:59.999999900".into())
+            Value::Text("9999-12-31 23:59:59.9999999".into())
         );
         assert_eq!(
             max[col("uid")],
