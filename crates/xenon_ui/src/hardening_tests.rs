@@ -525,3 +525,58 @@ fn hardening_paging_keeps_the_page_with_changes() {
         );
     });
 }
+
+fn order_status(path: &Path, id: i64) -> String {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("select status from orders where id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+}
+
+/// 0.5.3 W1: a saved query double-clicked while an empty tab on another
+/// connection is in front runs on its own connection, not that one.
+#[test]
+#[ignore]
+fn hardening_a_saved_query_never_runs_on_another_connections_tab() {
+    let _harness = HARNESS.lock().unwrap_or_else(|e| e.into_inner());
+    let (root, data, shop) = setup("saved-reuse");
+    let staging = data.join("staging.db");
+    std::fs::copy(&shop, &staging).unwrap();
+    let store = Store::open(&data.join("xenon.db")).unwrap();
+    let dev_id = store
+        .save_connection(&saved("dev", Environment::Development, &shop))
+        .unwrap();
+    let stg_id = store
+        .save_connection(&saved("staging", Environment::None, &staging))
+        .unwrap();
+    let all = store.connections().unwrap();
+    let dev = all.iter().find(|s| s.id == dev_id).unwrap().clone();
+    let stg = all.iter().find(|s| s.id == stg_id).unwrap().clone();
+    let qid = store
+        .save_query(&xenon_store::SavedQuery {
+            id: 0,
+            name: "reset order 4".into(),
+            sql: "update orders set status = 'ran-here' where id = 4".into(),
+            connection: Some(dev_id),
+            updated_at: 0,
+        })
+        .unwrap();
+    let query = store
+        .saved_queries("")
+        .unwrap()
+        .into_iter()
+        .find(|q| q.id == qid)
+        .unwrap();
+    let before = order_status(&staging, 4);
+    let mut shot = Shot::new(Mode::Dark, None, &root);
+    shot.act(|w, window, cx| w.connect_to_saved(&dev, window, cx));
+    assert!(shot.settle(10, |w| w.sessions.len() == 1));
+    shot.act(|w, window, cx| w.connect_to_saved(&stg, window, cx));
+    assert!(shot.settle(10, |w| w.sessions.len() == 2));
+    shot.act(|w, window, cx| w.open_saved_query(query.clone(), true, window, cx));
+    assert!(shot.settle(10, |w| !w.is_running()));
+    assert_eq!(order_status(&staging, 4), before, "ran on staging");
+    assert_eq!(order_status(&shop, 4), "ran-here", "didn't run on dev");
+}

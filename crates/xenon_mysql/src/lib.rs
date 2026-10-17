@@ -458,7 +458,11 @@ impl Connection for MysqlConnection {
                 }
                 .into());
             }
-            let writes = xenon_driver::sql::writes(sql);
+            // A write must finish, and so must a transaction (a kill would stop
+            // a script before its `commit`): the row limit reads on in both.
+            let writes = xenon_driver::sql::writes(sql)
+                || xenon_driver::sql::controls_transaction(sql)
+                || self.transaction.lock().unwrap_or_else(|e| e.into_inner()).0;
             let started = Instant::now();
             let mut feed = Feed::new(progress);
             let mut cancelled = false;
@@ -596,7 +600,12 @@ impl Connection for MysqlConnection {
             xenon_driver::sql::mysql_transaction_state(sql, state.0, state.1);
         *state = match &result {
             Ok(_) => (open, autocommit_off),
-            Err(_) => (state.0 || open, state.1 || autocommit_off),
+            // Failed part-way: what followed the failure (a closing `commit`,
+            // say) didn't run, so one opened on the way is still open.
+            Err(_) => (
+                xenon_driver::sql::mysql_transaction_open_after_failure(sql, state.0, state.1),
+                state.1 || autocommit_off,
+            ),
         };
         result
     }

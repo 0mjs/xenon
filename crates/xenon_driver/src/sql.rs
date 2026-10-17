@@ -496,6 +496,17 @@ const WRITE_VERBS: &[&str] = &[
     "pg_stat_reset",
     "pg_stat_reset_shared",
     "pg_stat_reset_single_table_counters",
+    "pg_stat_reset_single_function_counters",
+    "pg_stat_reset_slru",
+    "pg_stat_reset_replication_slot",
+    "pg_stat_reset_subscription_stats",
+    "pg_stat_reset_backend_stats",
+    "pg_stat_statements_reset",
+    // Index maintenance: changes the index on disk.
+    "gin_clean_pending_list",
+    "brin_summarize_new_values",
+    "brin_summarize_range",
+    "brin_desummarize_range",
     "pg_backup_start",
     "pg_backup_stop",
     "pg_start_backup",
@@ -829,11 +840,25 @@ pub fn mysql_has_implicit_commit(sql: &str) -> bool {
 /// `xa start` open one, `commit` / `rollback` end it, schema changes commit
 /// it, and with `autocommit = 0` any other statement opens one. MySQL can't be
 /// asked (MariaDB can), so its driver follows what ran.
-pub fn mysql_transaction_state(
+pub fn mysql_transaction_state(sql: &str, open: bool, autocommit_off: bool) -> (bool, bool) {
+    let (open, autocommit_off, _) = mysql_transaction_walk(sql, open, autocommit_off);
+    (open, autocommit_off)
+}
+
+/// After `sql` failed part-way: whether a transaction may be open, which it is
+/// if one was open at any point (the statements after the failure, a closing
+/// `commit` included, didn't run).
+pub fn mysql_transaction_open_after_failure(sql: &str, open: bool, autocommit_off: bool) -> bool {
+    mysql_transaction_walk(sql, open, autocommit_off).2
+}
+
+/// [`mysql_transaction_state`], and whether a transaction was open at any point.
+fn mysql_transaction_walk(
     sql: &str,
     mut open: bool,
     mut autocommit_off: bool,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
+    let mut ever = open;
     for range in split_as(sql, MYSQL) {
         let words = words_outside_literals(&sql[range], MYSQL);
         let second = words.get(1).map(String::as_str);
@@ -842,7 +867,12 @@ pub fn mysql_transaction_state(
             Some("start") if second == Some("transaction") => open = true,
             Some("xa") if matches!(second, Some("start" | "begin")) => open = true,
             Some("xa") if matches!(second, Some("commit" | "rollback")) => open = false,
-            Some("commit" | "rollback") => open = false,
+            // `commit and chain` starts the next one at once.
+            Some("commit" | "rollback") => {
+                let chain = words.windows(2).any(|w| w[0] == "and" && w[1] == "chain")
+                    && !words.windows(2).any(|w| w[0] == "no" && w[1] == "chain");
+                open = chain;
+            }
             Some("set")
                 if words
                     .iter()
@@ -867,8 +897,9 @@ pub fn mysql_transaction_state(
             Some(_) if autocommit_off => open = true,
             _ => {}
         }
+        ever |= open;
     }
-    (open, autocommit_off)
+    (open, autocommit_off, ever)
 }
 
 /// True when `sql` tries to turn a read-only session back into a read-write
@@ -1837,6 +1868,9 @@ mod tests {
             "select dblink('dbname=x', 'delete from t')",
             "select lo_from_bytea(0, 'x')",
             "select pg_notify('c', 'x')",
+            "select gin_clean_pending_list('idx'::regclass)",
+            "select brin_summarize_new_values('idx')",
+            "select pg_stat_statements_reset()",
             // SQLite pragmas that set or act; DuckDB settings that write files
             // or fetch extensions.
             "pragma user_version(7)",
@@ -1937,6 +1971,19 @@ mod tests {
         );
         assert_eq!(state("select 1", false, false), (false, false));
         assert_eq!(state("xa start 'x'", false, false), (true, false));
+        assert_eq!(state("commit and chain", true, false), (true, false));
+        assert_eq!(state("commit and no chain", true, false), (false, false));
+        // Failed part-way, a transaction opened on the way is still open.
+        assert!(mysql_transaction_open_after_failure(
+            "start transaction; insert into t values (1); insert into nope values (2); commit",
+            false,
+            false
+        ));
+        assert!(!mysql_transaction_open_after_failure(
+            "select 1; select nope",
+            false,
+            false
+        ));
         assert!(mysql_has_implicit_commit(
             "insert into t values (1); alter table t add b int"
         ));

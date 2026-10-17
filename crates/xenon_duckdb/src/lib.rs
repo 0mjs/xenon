@@ -211,6 +211,11 @@ impl DuckDbConnection {
         let mut cancelled = false;
 
         for range in split_statements(sql) {
+            // DuckDB drops an interrupt that finds nothing running: one that came
+            // between statements stops the rest here.
+            if self.cancel.user.load(Ordering::SeqCst) {
+                return Err(anyhow!("Cancelled before the end of the script."));
+            }
             let text = &sql[range];
             statements += 1;
             let mut stmt = conn.prepare(text).map_err(query_error)?;
@@ -321,6 +326,23 @@ impl Connection for DuckDbConnection {
         row_limit: usize,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<QueryResult> {
+        // Committing a transaction an error already aborted keeps nothing:
+        // say so, rather than "committed".
+        if !xenon_driver::sql::several_statements(sql)
+            && xenon_driver::sql::transaction_effect(sql) == Some(false)
+            && !sql.to_ascii_lowercase().contains("rollback")
+            && !sql.to_ascii_lowercase().contains("abort")
+        {
+            let conn = self.lock();
+            if let Err(err) = conn.execute_batch("select 1")
+                && err.to_string().to_ascii_lowercase().contains("aborted")
+            {
+                let _ = conn.execute_batch("rollback");
+                return Err(anyhow!(
+                    "The transaction had already failed, so nothing was committed: it was rolled back."
+                ));
+            }
+        }
         // A deeply nested value (a list in a list, 600 times over) is copied
         // and printed recursively, here and in the duckdb crate. The threads
         // background work runs on have small stacks, and running out aborts the
@@ -945,6 +967,44 @@ mod tests {
             "{}",
             &shown[..20]
         );
+    }
+
+    /// A cancel between the statements of a script stops it.
+    #[test]
+    fn a_cancel_stops_a_script_of_many_statements() {
+        let db = DuckDbConnection::open_in_memory().unwrap();
+        db.execute("create table t (n int)", 0).unwrap();
+        let script: String = (0..20_000)
+            .map(|n| format!("insert into t values ({n});"))
+            .collect();
+        let cancel = db.cancel_handle();
+        let stopper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            cancel.cancel();
+        });
+        let _ = db.execute(&script, 0);
+        stopper.join().unwrap();
+        let count = match db.execute("select count(*) from t", 1).unwrap().outcome {
+            QueryOutcome::Rows(rows) => rows.rows[0][0].clone(),
+            other => panic!("{other:?}"),
+        };
+        let Value::Integer(count) = count else {
+            panic!("{count:?}")
+        };
+        assert!(count < 20_000, "the cancel was lost ({count} rows)");
+    }
+
+    #[test]
+    fn committing_a_failed_transaction_says_nothing_was_kept() {
+        let db = DuckDbConnection::open_in_memory().unwrap();
+        db.execute("create table t (n int primary key)", 0).unwrap();
+        db.execute("begin", 0).unwrap();
+        db.execute("insert into t values (1)", 0).unwrap();
+        assert!(db.execute("insert into t values (1)", 0).is_err());
+        let err = db.execute("commit", 0).unwrap_err().to_string();
+        assert!(err.contains("nothing was committed"), "{err}");
+        // And the session works again.
+        assert!(db.execute("select count(*) from t", 1).is_ok());
     }
 
     #[test]

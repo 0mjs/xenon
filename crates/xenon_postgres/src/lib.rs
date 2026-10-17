@@ -296,10 +296,12 @@ impl PostgresConnection {
         let mut feed = Feed::new(progress);
         // Committing a transaction a failed statement aborted only rolls it back:
         // say so, rather than "committed".
-        let statement = sql.trim().trim_end_matches(';').trim();
-        if ["commit", "end", "commit work", "commit transaction"]
-            .iter()
-            .any(|c| statement.eq_ignore_ascii_case(c))
+        // Any spelling (`commit`, `end`, `COMMIT WORK;`, with a comment…).
+        let commits = !xenon_driver::sql::several_statements(sql)
+            && xenon_driver::sql::transaction_effect(sql) == Some(false)
+            && !sql.to_ascii_lowercase().contains("rollback")
+            && !sql.to_ascii_lowercase().contains("abort");
+        if commits
             && let Err(err) = self.client.simple_query("select 1").await
             && err.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION)
         {
@@ -511,6 +513,15 @@ impl Connection for PostgresConnection {
             }
         }
         let result = runtime().block_on(self.run(sql, row_limit, progress));
+        // Follow the transactions it starts and ends itself (the production
+        // read-only wrap's `start transaction read only`, say): inside one, the
+        // row limit must read on rather than cancel, which would abort it.
+        if result.is_ok()
+            && let Some(open) = xenon_driver::sql::transaction_effect(sql)
+        {
+            self.transaction_open
+                .store(open, std::sync::atomic::Ordering::SeqCst);
+        }
         // A cancel sent while it ran: wait for it to land (and for the server
         // to act on it) before anything else runs on this session.
         let pending = self
@@ -1376,6 +1387,20 @@ mod tests {
         let err = db.execute("commit", 1).unwrap_err().to_string();
         assert!(err.contains("nothing was committed"), "{err}");
         assert_eq!(db.in_transaction(), Some(false));
+    }
+
+    /// A production read (inside the read-only wrap) past the row limit
+    /// returns its rows, and the wrap's commit succeeds.
+    #[test]
+    fn live_a_wrapped_read_past_the_row_limit_keeps_its_rows() {
+        let Some(db) = live() else { return };
+        db.execute(db.begin_read_only().unwrap(), 1).unwrap();
+        let big = rows(
+            db.execute("select g from generate_series(1, 300000) g", 1000)
+                .unwrap(),
+        );
+        assert_eq!(big.rows.len(), 1000);
+        db.execute("commit", 1).unwrap();
     }
 
     #[test]

@@ -235,6 +235,49 @@ pub struct MssqlConnection {
     /// it back, so the next statement isn't run on a fresh session as if it were
     /// still open: it fails, saying so.
     transaction_open: std::sync::atomic::AtomicBool,
+    /// What the session was set to (`USE`, implicit transactions), to set again
+    /// on a session opened in its place.
+    session_state: Mutex<SessionState>,
+}
+
+/// Session settings a replacement session must get back.
+#[derive(Default)]
+struct SessionState {
+    database: Option<String>,
+    implicit_transactions: bool,
+}
+
+impl SessionState {
+    /// Follow `use …` and `set implicit_transactions on|off` in what ran.
+    fn follow(&mut self, sql: &str) {
+        for range in xenon_driver::sql::split_statements(sql) {
+            let statement = sql[range].trim();
+            let lower = statement.to_ascii_lowercase();
+            let words: Vec<&str> = lower.split_whitespace().collect();
+            match words.as_slice() {
+                ["use", ..] => {
+                    let name = statement[3..].trim().trim_end_matches(';').trim();
+                    self.database = Some(name.to_string());
+                }
+                ["set", "implicit_transactions", on, ..] => {
+                    self.implicit_transactions = on.starts_with("on");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The batch that puts a new session back as this one was.
+    fn script(&self) -> String {
+        let mut script = String::new();
+        if let Some(database) = &self.database {
+            script.push_str(&format!("use {database}; "));
+        }
+        if self.implicit_transactions {
+            script.push_str("set implicit_transactions on; ");
+        }
+        script
+    }
 }
 
 struct MsCancel {
@@ -444,6 +487,7 @@ impl MssqlConnection {
             options: options.clone(),
             client: Mutex::new(Some(client)),
             transaction_open: Default::default(),
+            session_state: Default::default(),
         })
     }
 
@@ -647,7 +691,27 @@ impl Connection for MssqlConnection {
                 anyhow::Ok((client, (spid.unwrap_or_default(), login_time)))
             })?;
             *self.cancel.spid.lock().unwrap_or_else(|e| e.into_inner()) = fresh.1;
-            *guard = Some(fresh.0);
+            let mut client = fresh.0;
+            // The old session's `USE` and implicit transactions, set again: a
+            // write meant for that database, or that mode, mustn't land in
+            // another or autocommit.
+            let restore = self
+                .session_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .script();
+            if !restore.is_empty() {
+                runtime().block_on(async {
+                    client
+                        .simple_query(restore)
+                        .await
+                        .map_err(describe)?
+                        .into_results()
+                        .await
+                        .map_err(describe)
+                })?;
+            }
+            *guard = Some(client);
         }
         let client = guard.as_mut().expect("connected above");
 
@@ -689,6 +753,16 @@ impl Connection for MssqlConnection {
                     self.transaction_open
                         .store(open, std::sync::atomic::Ordering::SeqCst);
                 }
+                let mut state = self.session_state.lock().unwrap_or_else(|e| e.into_inner());
+                state.follow(sql);
+                // With implicit transactions on, every statement opens one.
+                if state.implicit_transactions
+                    && xenon_driver::sql::transaction_effect(sql) != Some(false)
+                {
+                    self.transaction_open
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                drop(state);
                 Ok(QueryResult {
                     outcome,
                     earlier,
@@ -1168,6 +1242,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_replacement_session_gets_use_and_implicit_transactions_back() {
+        let mut state = SessionState::default();
+        state.follow("use [Other DB]; select 1");
+        state.follow("set implicit_transactions on");
+        assert_eq!(
+            state.script(),
+            "use [Other DB]; set implicit_transactions on; "
+        );
+        state.follow("SET IMPLICIT_TRANSACTIONS OFF");
+        assert_eq!(state.script(), "use [Other DB]; ");
+    }
+
+    #[test]
     fn braced_and_quoted_values_keep_their_semicolons() {
         let options = parse_url(
             "Server=db.example.com;Password={x;TrustServerCertificate=true};Encrypt=True;User ID=me",
@@ -1319,6 +1406,22 @@ mod live {
             );
         }
         db.execute("drop table xenon_case", 1).unwrap();
+    }
+
+    /// A row-limited read ends the session; the one opened in its place is
+    /// still in the database `USE` chose.
+    #[test]
+    #[ignore]
+    fn the_database_survives_a_row_limit_stop() {
+        let _serial = serial();
+        let db = fleet();
+        db.execute("use master", 1).unwrap();
+        let _ = db.execute(
+            "select a.object_id from sys.all_objects a cross join sys.all_objects b",
+            10,
+        );
+        let name = rows(&db, "select db_name()");
+        assert_eq!(name.rows[0][0], Value::Text("master".into()));
     }
 
     /// The default (`prefer`) encrypts the whole session, not just the login.

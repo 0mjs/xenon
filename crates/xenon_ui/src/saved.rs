@@ -166,7 +166,7 @@ impl Workspace {
     }
 
     /// Load a saved query into a tab (its own, if one has it open); `run` runs it too.
-    fn open_saved_query(
+    pub(crate) fn open_saved_query(
         &mut self,
         query: SavedQuery,
         run: bool,
@@ -220,7 +220,10 @@ impl Workspace {
             }
         } else {
             let tab = self.active_tab();
-            let reuse = tab.browse.is_none()
+            // An empty tab is reused only if it's on the connection the query
+            // runs on: otherwise it would run there.
+            let reuse = tab.session == Some(session)
+                && tab.browse.is_none()
                 && tab.saved_query.is_none()
                 && tab.editor.read(cx).value().trim().is_empty();
             if !reuse {
