@@ -24,6 +24,10 @@ pub(crate) enum DateKind {
     Date,
     Time,
     Timestamp,
+    /// A timestamp stored as a moment (Postgres `timestamptz`, DuckDB
+    /// `TIMESTAMPTZ`, SQL Server `datetimeoffset`): a value without an offset
+    /// is read in the session's time zone, so "now" carries the Mac's.
+    TimestampTz,
 }
 
 impl DateKind {
@@ -33,6 +37,7 @@ impl DateKind {
             DateKind::Date => "YYYY-MM-DD",
             DateKind::Time => "HH:MM:SS",
             DateKind::Timestamp => "YYYY-MM-DD HH:MM:SS",
+            DateKind::TimestampTz => "YYYY-MM-DD HH:MM:SS+HH:MM",
         }
     }
 
@@ -43,6 +48,7 @@ impl DateKind {
             DateKind::Date => "%Y-%m-%d",
             DateKind::Time => "%H:%M:%S",
             DateKind::Timestamp => "%Y-%m-%d %H:%M:%S",
+            DateKind::TimestampTz => "%Y-%m-%d %H:%M:%S%:z",
         };
         now.format(format).to_string()
     }
@@ -75,6 +81,13 @@ pub(crate) fn kind_of(
         ("bit", _) | (_, "tinyint(1)") => return ValueKind::Bool { numeric: true },
         _ => {}
     }
+    if base == "timestamptz"
+        || base == "datetimeoffset"
+        || kind.starts_with("timestamp with time zone")
+        || kind.starts_with("timestamp(") && kind.contains("with time zone")
+    {
+        return ValueKind::Date(DateKind::TimestampTz);
+    }
     if base.starts_with("timestamp") || base.starts_with("datetime") || base == "smalldatetime" {
         return ValueKind::Date(DateKind::Timestamp);
     }
@@ -92,19 +105,44 @@ pub(crate) fn kind_of(
     }
 }
 
-/// Whether a column's type (as the engine names it) holds numbers: matched
-/// as a whole name, so `interval`, `point` or `zip_code` aren't.
-pub(crate) fn is_numeric_type(type_name: &str) -> bool {
+/// A type name without its size or `unsigned`: `int(11) unsigned` is `int`.
+fn base_type(type_name: &str) -> String {
     let lower = type_name.to_ascii_lowercase();
-    let base = lower
+    lower
         .split('(')
         .next()
         .unwrap_or("")
         .trim()
         .trim_end_matches(" unsigned")
-        .trim();
+        .trim()
+        .to_string()
+}
+
+/// Whether a column's type holds whole numbers only.
+pub(crate) fn is_integer_type(type_name: &str) -> bool {
+    is_numeric_type(type_name)
+        && !matches!(
+            base_type(type_name).as_str(),
+            "numeric"
+                | "decimal"
+                | "number"
+                | "dec"
+                | "float"
+                | "float4"
+                | "float8"
+                | "double"
+                | "double precision"
+                | "real"
+                | "money"
+                | "smallmoney"
+        )
+}
+
+/// Whether a column's type (as the engine names it) holds numbers: matched
+/// as a whole name, so `interval`, `point` or `zip_code` aren't.
+pub(crate) fn is_numeric_type(type_name: &str) -> bool {
     matches!(
-        base,
+        base_type(type_name).as_str(),
         "int"
             | "integer"
             | "int1"
@@ -145,6 +183,25 @@ pub(crate) fn is_plain_number(text: &str) -> bool {
     xenon_driver::sql::is_plain_number(text)
 }
 
+/// How typed text is written to a column of `type_name` whose loaded value
+/// was `numeric` or not: as a number only when that loses nothing. A
+/// fraction in an integer column is left as text, for the server to refuse
+/// rather than round (`1.5` stored as 2); a leading zero in a column that
+/// isn't declared numeric (SQLite, `07700…`) stays text too.
+pub(crate) fn typed_number(text: &str, type_name: Option<&str>, numeric: bool) -> bool {
+    let declared = type_name.is_some_and(is_numeric_type);
+    if !(numeric || declared) || !is_plain_number(text) {
+        return false;
+    }
+    let digits = text.trim_start_matches(['+', '-']);
+    let whole = !digits.contains(['.', 'e', 'E']);
+    if type_name.is_some_and(is_integer_type) && !whole {
+        return false;
+    }
+    let leading_zero = digits.len() > 1 && digits.starts_with('0') && !digits.starts_with("0.");
+    declared || !leading_zero
+}
+
 /// Why `text` isn't valid JSON, if it isn't.
 pub(crate) fn json_error(text: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(text)
@@ -171,6 +228,23 @@ pub(crate) fn same_json(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_numbers_are_written_as_numbers_only_when_nothing_is_lost() {
+        assert!(typed_number("2", Some("integer"), true));
+        assert!(typed_number("-12", Some("int(11) unsigned"), false));
+        assert!(!typed_number("1.5", Some("integer"), true));
+        assert!(!typed_number("1e3", Some("bigint"), true));
+        assert!(typed_number("1.5", Some("numeric(10,2)"), true));
+        assert!(typed_number("1.5", None, true));
+        // A typeless SQLite column holding a number.
+        assert!(!typed_number("07700900123", None, true));
+        assert!(!typed_number("07700900123", Some(""), true));
+        assert!(typed_number("0.5", None, true));
+        assert!(typed_number("0", None, true));
+        assert!(typed_number("007", Some("integer"), true));
+        assert!(!typed_number("12", Some("text"), false));
+    }
 
     #[test]
     fn numbers_are_numbers_only_when_plainly_so() {
@@ -248,6 +322,22 @@ mod tests {
         );
         assert_eq!(
             kind_of(Some("timestamp with time zone"), &[], None),
+            ValueKind::Date(DateKind::TimestampTz)
+        );
+        for zoned in [
+            "timestamptz",
+            "TIMESTAMPTZ",
+            "datetimeoffset(7)",
+            "timestamp(3) with time zone",
+        ] {
+            assert_eq!(
+                kind_of(Some(zoned), &[], None),
+                ValueKind::Date(DateKind::TimestampTz),
+                "{zoned}"
+            );
+        }
+        assert_eq!(
+            kind_of(Some("timestamp"), &[], None),
             ValueKind::Date(DateKind::Timestamp)
         );
         assert_eq!(
@@ -296,6 +386,10 @@ mod tests {
         assert_eq!(
             DateKind::Timestamp.now().len(),
             DateKind::Timestamp.hint().len()
+        );
+        assert_eq!(
+            DateKind::TimestampTz.now().len(),
+            DateKind::TimestampTz.hint().len()
         );
     }
 }

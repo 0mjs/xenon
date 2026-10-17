@@ -273,6 +273,17 @@ pub fn save(conn: &dyn Connection, statements: &[Statement]) -> Result<usize> {
                     "Nothing was saved: the database refused to commit, so the changes were rolled back. ({err:#})"
                 ))
             }
+            // Refused, and the server ended the transaction itself (Postgres,
+            // over a deferred constraint): definitely nothing saved.
+            Err(err)
+                if conn.in_transaction() == Some(false)
+                    && conn.alive()
+                    && !conn.session_ended() =>
+            {
+                Err(anyhow!(
+                    "Nothing was saved: the database refused to commit, so the changes were rolled back. ({err:#})"
+                ))
+            }
             // The connection went while committing: the server may or may not
             // have kept it.
             Err(err) => Err(anyhow::Error::new(CommitUnknown).context(format!(
@@ -635,6 +646,58 @@ mod tests {
         let err = save(&Drops(conn), &todo).unwrap_err();
         assert!(err.downcast_ref::<CommitUnknown>().is_some(), "{err:#}");
         assert!(format!("{err:#}").contains("can't tell"), "{err:#}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The server refuses the commit and ends the transaction itself
+    /// (Postgres over a deferred constraint), still answering: nothing was
+    /// saved, and that's what the user is told.
+    #[test]
+    fn a_commit_the_server_refuses_and_rolls_back_is_definite() {
+        struct Refuses(SqliteConnection);
+        impl Connection for Refuses {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn server_version(&self) -> String {
+                self.0.server_version()
+            }
+            fn execute_streaming(
+                &self,
+                sql: &str,
+                row_limit: usize,
+                progress: &mut dyn FnMut(xenon_driver::Progress),
+            ) -> Result<xenon_driver::QueryResult> {
+                if sql == "commit" {
+                    self.0.execute("rollback", 0)?;
+                    return Err(anyhow!("deferred constraint violated"));
+                }
+                self.0.execute_streaming(sql, row_limit, progress)
+            }
+            fn introspect(&self) -> Result<Vec<xenon_driver::Schema>> {
+                self.0.introspect()
+            }
+            fn describe(&self, schema: &str, table: &str) -> Result<xenon_driver::TableInfo> {
+                self.0.describe(schema, table)
+            }
+            fn cancel_handle(&self) -> std::sync::Arc<dyn xenon_driver::CancelHandle> {
+                self.0.cancel_handle()
+            }
+            fn in_transaction(&self) -> Option<bool> {
+                self.0.in_transaction()
+            }
+        }
+        let (conn, path) = shop();
+        let data = fetch(&conn);
+        let mut edits = Edits::default();
+        edits.set(RowRef::Existing(0), 1, Value::Text("saved".into()), None);
+        let todo = statements(&conn, &target(), &data, &edits);
+        let err = save(&Refuses(conn), &todo).unwrap_err();
+        assert!(err.downcast_ref::<CommitUnknown>().is_none(), "{err:#}");
+        assert!(
+            format!("{err:#}").starts_with("Nothing was saved"),
+            "{err:#}"
+        );
         let _ = std::fs::remove_file(path);
     }
 

@@ -596,6 +596,20 @@ pub trait Connection: Send + Sync {
         None
     }
 
+    /// True when the session that ran the last statement has ended and the
+    /// next query opens another (SQL Server after a cancel or a drop): what it
+    /// was doing is unknown, even though the connection answers.
+    fn session_ended(&self) -> bool {
+        false
+    }
+
+    /// True when a `use` has made another database current than the one
+    /// opened ([`Connection::catalog`]), so what introspection says (a table's
+    /// key) may describe another database's table of the same name.
+    fn switched_catalog(&self) -> bool {
+        false
+    }
+
     /// The statement that starts a transaction the server keeps read-only,
     /// refusing any write inside it. `None` for engines without one.
     fn begin_read_only(&self) -> Option<&'static str> {

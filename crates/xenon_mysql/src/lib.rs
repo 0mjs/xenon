@@ -824,7 +824,8 @@ impl Connection for MysqlConnection {
         if loaded.is_null() {
             return Some(format!("{column} is null"));
         }
-        match kind.as_str() {
+        // `float unsigned` is still a float.
+        match kind.trim_end_matches(" unsigned") {
             // By meaning, not spacing or key order.
             "json" => Some(format!("{column} = cast({} as json)", self.literal(loaded))),
             // Spatial values come back in a form that doesn't compare reliably.

@@ -369,6 +369,8 @@ impl Connection for SqliteConnection {
                 "{column} = {} collate binary",
                 self.literal(loaded)
             )),
+            // Bytes, or text that isn't UTF-8 (read as bytes): compare the bytes.
+            Value::Blob(_) => Some(format!("cast({column} as blob) = {}", self.literal(loaded))),
             _ => xenon_driver::default_unchanged(self, column, loaded),
         }
     }
@@ -506,6 +508,31 @@ fn to_value(value: ValueRef<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_read_as_bytes_compares_back() {
+        let conn = SqliteConnection::open_in_memory().unwrap();
+        conn.execute(
+            "create table t (v text); insert into t values (cast(X'80' as text)), (X'0102')",
+            10,
+        )
+        .unwrap();
+        let read = match conn.execute("select v from t", 10).unwrap().outcome {
+            QueryOutcome::Rows(rows) => rows,
+            other => panic!("{other:?}"),
+        };
+        for row in &read.rows {
+            assert!(matches!(row[0], Value::Blob(_)), "{row:?}");
+            let condition = conn.unchanged("v", "TEXT", &row[0]).unwrap();
+            let found = conn
+                .execute(&format!("select count(*) from t where {condition}"), 10)
+                .unwrap();
+            assert!(
+                matches!(&found.outcome, QueryOutcome::Rows(r) if r.rows[0][0] == Value::Integer(1)),
+                "{condition}"
+            );
+        }
+    }
 
     fn db() -> SqliteConnection {
         let db = SqliteConnection::open_in_memory().unwrap();

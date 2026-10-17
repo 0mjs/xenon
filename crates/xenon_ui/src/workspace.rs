@@ -3419,10 +3419,11 @@ impl Workspace {
             conn.uses_top(),
         );
         let editor = self.active_tab().editor.clone();
-        // The filter goes into a `where`: it can narrow the rows, not change them.
-        if xenon_driver::sql::writes(&sql) {
+        // The filter goes into a `where`: it can narrow the rows, not change
+        // them or bring in others (which would then be editable as this table's).
+        if xenon_driver::sql::writes(&sql) || !xenon_driver::sql::narrows_only(&filter) {
             self.flash(
-                "The filter can only narrow the rows: it can't run other statements.",
+                "The filter can only narrow the rows: it can't run other statements or bring in other rows.",
                 true,
                 cx,
             );
@@ -3494,6 +3495,11 @@ impl Workspace {
         }
         if session.reconnecting {
             return Err("Checking the connection: wait a moment.");
+        }
+        if session.conn.switched_catalog() {
+            return Err(
+                "A USE switched this connection to another database: switch back to edit this table.",
+            );
         }
         let ran = tab.last_run.as_ref().map(|(sql, _)| sql.trim());
         if ran.is_none() || ran != browse.loaded_with.as_deref().map(str::trim) {
@@ -3706,11 +3712,8 @@ impl Workspace {
             RowRef::Existing(r) => Some(grid.data.rows[r][editor.column].clone()),
             RowRef::New(_) => None,
         };
-        let numeric = original.as_ref().is_some_and(Value::is_numeric)
-            || grid.data.columns[editor.column]
-                .type_name
-                .as_deref()
-                .is_some_and(crate::value_editor::is_numeric_type);
+        let numeric = original.as_ref().is_some_and(Value::is_numeric);
+        let type_name = grid.data.columns[editor.column].type_name.as_deref();
         // Laid out for editing, JSON reads differently but may mean the same.
         let same_json = editor.kind == crate::value_editor::ValueKind::Json
             && original
@@ -3726,7 +3729,7 @@ impl Workspace {
             || (text.is_empty() && original.as_ref().is_some_and(Value::is_null))
         {
             original.clone().expect("checked above")
-        } else if numeric && crate::value_editor::is_plain_number(text.trim()) {
+        } else if crate::value_editor::typed_number(text.trim(), type_name, numeric) {
             Value::Decimal(text.trim().to_string())
         } else {
             Value::Text(text)

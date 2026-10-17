@@ -1013,15 +1013,14 @@ impl Connection for MssqlConnection {
         }
         let literal = self.literal(loaded);
         match kind.as_str() {
-            // The legacy types and xml have no `=`: compare their text or bytes.
-            "text" | "ntext" | "xml" => {
-                Some(format!("cast({column} as nvarchar(max)) = {literal}"))
-            }
             "image" => Some(format!("cast({column} as varbinary(max)) = {literal}")),
-            "geometry" | "geography" => None,
+            // Spatial types (and other CLR types, which can't be told apart)
+            // have no `=`: left out of the check.
+            "geometry" | "geography" | "udt" => None,
             // The default collation ignores case, and `=` always ignores trailing
-            // spaces: compare the characters exactly, and the length.
-            "varchar" | "nvarchar" => Some(format!(
+            // spaces: compare the characters exactly, and the length. The legacy
+            // types and xml have no `=` at all, so they're compared as text too.
+            "varchar" | "nvarchar" | "text" | "ntext" | "xml" => Some(format!(
                 "cast({column} as nvarchar(max)) collate Latin1_General_100_BIN2 = {literal} \
                  and len(cast({column} as nvarchar(max)) + N'.') = len({literal} + N'.')"
             )),
@@ -1074,6 +1073,27 @@ impl Connection for MssqlConnection {
                 self.transaction_open
                     .store(*open, std::sync::atomic::Ordering::SeqCst)
             })
+    }
+
+    fn switched_catalog(&self) -> bool {
+        let state = self.session_state.lock().unwrap_or_else(|e| e.into_inner());
+        let bare = |name: &str| {
+            name.trim()
+                .trim_start_matches(['[', '"'])
+                .trim_end_matches([']', '"'])
+                .to_lowercase()
+        };
+        match (&state.database, &self.catalog) {
+            (Some(now), Some(opened)) => bare(now) != bare(opened),
+            _ => false,
+        }
+    }
+
+    fn session_ended(&self) -> bool {
+        self.client
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
     }
 
     fn is_local(&self) -> bool {
@@ -1152,13 +1172,17 @@ fn convert(data: ColumnData<'static>, ty: ColumnType) -> Value {
         ColumnData::I16(v) => v.map_or(Value::Null, |v| Value::Integer(v.into())),
         ColumnData::I32(v) => v.map_or(Value::Null, |v| Value::Integer(v.into())),
         ColumnData::I64(v) => v.map_or(Value::Null, Value::Integer),
-        ColumnData::F32(v) => v.map_or(Value::Null, |v| Value::Decimal(v.to_string())),
+        ColumnData::F32(v) => v.map_or(Value::Null, |v| {
+            Value::Decimal(float_text(v.into(), v.to_string()))
+        }),
         // money arrives as a float (tiberius decodes it so); it has four decimal
         // places, exact up to about 900 billion.
         ColumnData::F64(v) if matches!(ty, ColumnType::Money | ColumnType::Money4) => {
             v.map_or(Value::Null, |v| Value::Decimal(format!("{v:.4}")))
         }
-        ColumnData::F64(v) => v.map_or(Value::Null, |v| Value::Decimal(v.to_string())),
+        ColumnData::F64(v) => v.map_or(Value::Null, |v| {
+            Value::Decimal(float_text(v, v.to_string()))
+        }),
         ColumnData::Bit(v) => v.map_or(Value::Null, |v| Value::Integer(v.into())),
         ColumnData::String(v) => v.map_or(Value::Null, |v| Value::Text(v.into_owned())),
         ColumnData::Guid(v) => v.map_or(Value::Null, |v| Value::Text(v.to_string().to_uppercase())),
@@ -1207,6 +1231,16 @@ impl Formats for chrono::DateTime<chrono::FixedOffset> {
     }
     fn offset_text(&self) -> String {
         self.format(" %:z").to_string()
+    }
+}
+
+/// A float as text: in full, unless that's longer than SQL Server reads as a
+/// number (38 digits), as with `1e39`: then as `1e39`, read as a float.
+fn float_text(v: f64, full: String) -> String {
+    if full.trim_start_matches('-').len() > 30 {
+        format!("{v:e}")
+    } else {
+        full
     }
 }
 
@@ -1305,6 +1339,18 @@ fn unwrap_parens(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floats_too_long_for_a_number_are_written_as_exponents() {
+        assert_eq!(float_text(1e39, 1e39_f64.to_string()), "1e39");
+        assert_eq!(float_text(-1.5e-40, (-1.5e-40_f64).to_string()), "-1.5e-40");
+        assert_eq!(float_text(0.1, 0.1_f64.to_string()), "0.1");
+        assert_eq!(
+            float_text(123456.75, 123456.75_f64.to_string()),
+            "123456.75"
+        );
+        assert!(xenon_driver::sql::is_plain_number("-1.5e-40"));
+    }
 
     #[test]
     fn a_replacement_session_gets_use_and_implicit_transactions_back() {

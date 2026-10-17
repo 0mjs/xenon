@@ -796,7 +796,11 @@ impl Connection for PostgresConnection {
         Some(match kind.as_str() {
             // `json` has no `=`: compare as `jsonb` (by meaning, not spacing).
             "json" => format!("{column}::jsonb = {literal}::jsonb"),
-            "xml" | "geometry" | "geography" => format!("{column}::text = {literal}"),
+            // No `=`, or one that compares areas (`box`, `circle`): compare
+            // the text Postgres gave, also for arrays of them.
+            "xml" | "geometry" | "geography" | "point" | "polygon" | "box" | "circle" | "path"
+            | "lseg" | "line" | "json[]" | "xml[]" | "point[]" | "polygon[]" | "box[]"
+            | "circle[]" | "path[]" | "lseg[]" | "line[]" => format!("{column}::text = {literal}"),
             // `citext`, or a nondeterministic collation, ignores case or accents:
             // compare the characters exactly.
             "text" | "varchar" | "citext" | "name" => {

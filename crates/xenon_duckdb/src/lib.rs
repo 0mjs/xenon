@@ -88,6 +88,19 @@ impl CancelHandle for Interrupt {
 }
 
 impl DuckDbConnection {
+    /// `sql` reading the database this connection opened on, not whichever
+    /// one a `use` made current: keys and columns then come from the table
+    /// that's browsed (named in full, with this catalog).
+    fn own(&self, sql: &str) -> String {
+        match &self.catalog {
+            Some(catalog) => sql.replace(
+                "current_database()",
+                &format!("'{}'", catalog.replace('\'', "''")),
+            ),
+            None => sql.to_string(),
+        }
+    }
+
     /// Open a DuckDB database, or a CSV / TSV / Parquet / JSON file as a view
     /// named after it in a fresh in-memory database.
     pub fn open(path: &Path, read_only: bool) -> Result<Self> {
@@ -229,7 +242,10 @@ impl DuckDbConnection {
                     .enumerate()
                     .map(|(ix, name)| Column {
                         name,
-                        type_name: Some(type_name(&stmt.column_type(ix))),
+                        type_name: Some(
+                            lossy_type(&stmt.column_logical_type(ix))
+                                .map_or_else(|| type_name(&stmt.column_type(ix)), Into::into),
+                        ),
                     })
                     .collect();
                 (columns, width)
@@ -389,7 +405,7 @@ impl Connection for DuckDbConnection {
             where c.database_name = current_database()
             order by c.schema_name = 'main' desc, c.schema_name, c.table_name, c.column_index";
         let conn = self.lock();
-        let mut stmt = conn.prepare(QUERY).map_err(query_error)?;
+        let mut stmt = conn.prepare(&self.own(QUERY)).map_err(query_error)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -442,7 +458,7 @@ impl Connection for DuckDbConnection {
 
         // Constraints first: primary keys mark columns, the rest become indexes and keys.
         let mut constraints = conn
-            .prepare(
+            .prepare(&self.own(
                 "select constraint_type, constraint_name, table_name, constraint_column_names,
                         referenced_table, referenced_column_names
                  from duckdb_constraints()
@@ -450,7 +466,7 @@ impl Connection for DuckDbConnection {
                    and (table_name = ? or referenced_table = ?)
                    and constraint_type in ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
                  order by constraint_index",
-            )
+            ))
             .map_err(query_error)?;
         let found = constraints
             .query_map([schema, table, table], |row| {
@@ -523,12 +539,12 @@ impl Connection for DuckDbConnection {
         }
 
         let mut columns = conn
-            .prepare(
+            .prepare(&self.own(
                 "select column_name, data_type, is_nullable, column_default, comment
                  from duckdb_columns()
                  where database_name = current_database() and schema_name = ? and table_name = ?
                  order by column_index",
-            )
+            ))
             .map_err(query_error)?;
         info.columns = columns
             .query_map([schema, table], |row| {
@@ -549,12 +565,12 @@ impl Connection for DuckDbConnection {
             .map_err(query_error)?;
 
         let mut indexes = conn
-            .prepare(
+            .prepare(&self.own(
                 "select index_name, is_unique, is_primary, expressions
                  from duckdb_indexes()
                  where database_name = current_database() and schema_name = ? and table_name = ?
                  order by index_name",
-            )
+            ))
             .map_err(query_error)?;
         let more = indexes
             .query_map([schema, table], |row| {
@@ -576,8 +592,10 @@ impl Connection for DuckDbConnection {
 
         info.estimated_rows = conn
             .query_row(
-                "select estimated_size from duckdb_tables()
+                &self.own(
+                    "select estimated_size from duckdb_tables()
                  where database_name = current_database() and schema_name = ? and table_name = ?",
+                ),
                 [schema, table],
                 |row| row.get::<_, Option<i64>>(0),
             )
@@ -586,11 +604,13 @@ impl Connection for DuckDbConnection {
             .and_then(|n| u64::try_from(n).ok());
         info.definition = conn
             .query_row(
-                "select sql from duckdb_tables()
+                &self.own(
+                    "select sql from duckdb_tables()
                  where database_name = current_database() and schema_name = ? and table_name = ?
                  union all
                  select sql from duckdb_views()
                  where database_name = current_database() and schema_name = ? and view_name = ?",
+                ),
                 [schema, table, schema, table],
                 |row| row.get::<_, Option<String>>(0),
             )
@@ -604,10 +624,18 @@ impl Connection for DuckDbConnection {
     }
 
     fn unchanged(&self, column: &str, type_name: &str, loaded: &Value) -> Option<String> {
-        if !loaded.is_null() && type_name.eq_ignore_ascii_case("json") {
-            return Some(format!("{column}::varchar = {}", self.literal(loaded)));
+        if loaded.is_null() {
+            return xenon_driver::default_unchanged(self, column, loaded);
         }
-        xenon_driver::default_unchanged(self, column, loaded)
+        let literal = self.literal(loaded);
+        match type_name.to_ascii_uppercase().as_str() {
+            "TIMESTAMP_NS" | "TIME_NS" | "TIMETZ" | "BIT" => None,
+            "JSON" => Some(format!("{column}::varchar = {literal}")),
+            // A column's collation, or `default_collation`, can ignore case or
+            // accents: compare the characters exactly.
+            "VARCHAR" => Some(format!("{column} collate c = {literal}")),
+            _ => xenon_driver::default_unchanged(self, column, loaded),
+        }
     }
 
     fn is_local(&self) -> bool {
@@ -687,6 +715,20 @@ fn index_columns(expressions: &str) -> Vec<String> {
 }
 
 /// A column's type as DuckDB would name it in SQL.
+/// Types Xenon reads with less than they hold (`timestamp_ns` to the
+/// microsecond, `timetz` without its offset, `bit` as bytes), named so the
+/// edit check leaves them out: their value as read never compares back.
+fn lossy_type(logical: &duckdb::core::LogicalTypeHandle) -> Option<&'static str> {
+    use duckdb::core::LogicalTypeId;
+    match logical.try_id().ok()? {
+        LogicalTypeId::TimestampNs => Some("TIMESTAMP_NS"),
+        LogicalTypeId::TimeNs => Some("TIME_NS"),
+        LogicalTypeId::TimeTZ => Some("TIMETZ"),
+        LogicalTypeId::Bit => Some("BIT"),
+        _ => None,
+    }
+}
+
 fn type_name(data_type: &DataType) -> String {
     match data_type {
         DataType::Boolean => "BOOLEAN".into(),
@@ -800,7 +842,7 @@ fn render(value: &DuckValue) -> String {
         DuckValue::Map(entries) => {
             let parts: Vec<String> = entries
                 .iter()
-                .map(|(key, value)| format!("{}={}", render(key), render(value)))
+                .map(|(key, value)| format!("{}={}", nested(key), nested(value)))
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
@@ -810,10 +852,11 @@ fn render(value: &DuckValue) -> String {
     }
 }
 
-/// A value inside a list or struct: text is quoted, as DuckDB prints it.
+/// A value inside a list or struct: text is quoted, as DuckDB prints it
+/// (`['it\'s']`).
 fn nested(value: &DuckValue) -> String {
     match value {
-        DuckValue::Text(text) => format!("'{}'", text.replace('\'', "''")),
+        DuckValue::Text(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'")),
         other => render(other),
     }
 }
@@ -936,7 +979,8 @@ mod tests {
                 "1 year 2 months 3 days",
                 "[1, 2]",
                 "{'a': 'x', 'b': [true]}",
-                "{k=1}",
+                // Map text is quoted, so it casts back for the edit check.
+                "{'k'=1}",
                 "b",
                 "<blob 1 bytes>",
             ]

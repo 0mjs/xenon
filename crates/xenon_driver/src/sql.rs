@@ -1053,15 +1053,18 @@ struct Scan {
     words: Vec<Word>,
     /// An `=` in the code (not in a string).
     equals: bool,
+    /// A `)` with no `(` before it, or a `(` never closed.
+    unbalanced: bool,
 }
 
 fn scan(statement: &str, lexing: Lexing) -> Scan {
     let bytes = statement.as_bytes();
     let mut words = Vec::new();
     let mut equals = false;
+    let mut unbalanced = false;
     let mut depth = 0usize;
     let mut i = 0;
-    let mut push = |words: &mut Vec<Word>, text: String, start: usize, end: usize, depth| {
+    let push = |words: &mut Vec<Word>, text: String, start: usize, end: usize, depth| {
         let call = bytes[end..]
             .iter()
             .find(|b| !b.is_ascii_whitespace())
@@ -1123,6 +1126,7 @@ fn scan(statement: &str, lexing: Lexing) -> Scan {
                 i += 1;
             }
             b')' => {
+                unbalanced |= depth == 0;
                 depth = depth.saturating_sub(1);
                 i += 1;
             }
@@ -1133,7 +1137,30 @@ fn scan(statement: &str, lexing: Lexing) -> Scan {
             _ => i += 1,
         }
     }
-    Scan { words, equals }
+    Scan {
+        words,
+        equals,
+        unbalanced: unbalanced || depth > 0,
+    }
+}
+
+/// True when `filter`, put after a `where`, can only narrow a table's rows:
+/// one condition, not a second statement (`true; select …`), another query's
+/// rows (`0 union all select * from archive`) or a bracket closed early to
+/// get out of one, however each engine reads it.
+pub fn narrows_only(filter: &str) -> bool {
+    READINGS.into_iter().all(|lexing| {
+        let scan = scan(filter, lexing);
+        split_as(filter, lexing).len() <= 1
+            && !scan.unbalanced
+            && !scan.words.iter().any(|word| {
+                word.depth == 0
+                    && matches!(
+                        word.text.as_str(),
+                        "union" | "except" | "intersect" | "minus" | "from" | "into"
+                    )
+            })
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2586,6 +2613,29 @@ mod tests {
             mysql_transaction_state("call p(); commit", false, false),
             (false, false)
         );
+    }
+
+    #[test]
+    fn filters_can_only_narrow() {
+        for filter in [
+            "status = 'paid'",
+            "a = 1 or (b = 2 and c in (select id from other))",
+            "note = 'union all select'",
+            "exists (select 1 from s where s.id = t.id union select 2)",
+            "",
+        ] {
+            assert!(narrows_only(filter), "{filter}");
+        }
+        for filter in [
+            "0 union all select * from archive",
+            "true; select * from customers",
+            "1) union (select * from archive",
+            "(1",
+            "1 intersect select * from t",
+            "id = 1 -- ok\n union select * from s",
+        ] {
+            assert!(!narrows_only(filter), "{filter}");
+        }
     }
 
     #[test]
