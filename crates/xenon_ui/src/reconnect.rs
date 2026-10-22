@@ -39,12 +39,30 @@ fn answers(conn: Arc<dyn Connection>) -> bool {
 }
 
 fn check(conn: Arc<dyn Connection>, profile: Profile) -> Checked {
+    let was = conn.server_identity();
     if answers(conn) {
         return Checked::Alive;
     }
     match profile.connect() {
-        Ok(conn) => Checked::Reconnected(conn),
+        Ok(conn) => match same_server(was.as_deref(), conn.server_identity().as_deref()) {
+            Ok(()) => Checked::Reconnected(conn),
+            Err(err) => Checked::Failed(err),
+        },
         Err(err) => Checked::Failed(err),
+    }
+}
+
+/// A reconnect reaches the same address, but not always the same server: a
+/// local database stops and a port forward to another takes its port. That
+/// one isn't adopted under the old name and guards. Servers that can't say
+/// who they are are taken as the same.
+fn same_server(was: Option<&str>, now: Option<&str>) -> anyhow::Result<()> {
+    match (was, now) {
+        (Some(was), Some(now)) if was != now => Err(anyhow::anyhow!(
+            "a different server now answers at its address. Connect to it again \
+             (from the Connections list) if that's the one you want"
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -219,5 +237,19 @@ impl Workspace {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             tab.flash = Some((SharedString::from(text), error));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_server;
+
+    #[test]
+    fn a_reconnect_to_another_server_is_refused() {
+        assert!(same_server(Some("7301"), Some("7301")).is_ok());
+        assert!(same_server(Some("7301"), Some("9912")).is_err());
+        // Nothing to compare: as before.
+        assert!(same_server(None, Some("9912")).is_ok());
+        assert!(same_server(Some("7301"), None).is_ok());
     }
 }

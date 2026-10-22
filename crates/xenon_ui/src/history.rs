@@ -20,10 +20,19 @@ impl Workspace {
             cx.notify();
             return;
         };
-        let connection = session.conn.id();
+        let connection = session.history_key();
+        // Before 0.5.5 history was kept by address alone: still shown, not run.
+        let address = session.conn.id();
         let filter = self.history_filter.read(cx).value().to_string();
-        let task =
-            cx.background_spawn(async move { store.history(&connection, &filter, HISTORY_SHOWN) });
+        let task = cx.background_spawn(async move {
+            let mut entries = store.history(&connection, &filter, HISTORY_SHOWN)?;
+            if address != connection {
+                entries.extend(store.history(&address, &filter, HISTORY_SHOWN)?);
+                entries.sort_by_key(|e| std::cmp::Reverse((e.ran_at, e.id)));
+                entries.truncate(HISTORY_SHOWN);
+            }
+            anyhow::Ok(entries)
+        });
         cx.spawn(async move |this, cx| {
             let entries = task.await;
             this.update(cx, |this, cx| {
@@ -52,8 +61,17 @@ impl Workspace {
         // tab's connection's history for a moment.
         let here = self
             .active_session()
-            .is_some_and(|s| s.conn.id() == connection);
-        if run && !here {
+            .is_some_and(|s| s.history_key() == connection);
+        let older = self
+            .active_session()
+            .is_some_and(|s| s.saved_id.is_some() && s.conn.id() == connection);
+        if run && older {
+            self.flash(
+                "That was recorded before history was kept per saved connection: loaded, not run.",
+                true,
+                cx,
+            );
+        } else if run && !here {
             self.flash(
                 "That ran on another connection: loaded here, not run.",
                 true,

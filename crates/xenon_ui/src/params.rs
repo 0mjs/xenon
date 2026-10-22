@@ -123,7 +123,7 @@ impl Workspace {
             let last = remember
                 .then(|| {
                     self.store.as_ref().and_then(|s| {
-                        s.setting(&remembered_key(&session.conn.id(), &param.key))
+                        s.setting(&remembered_key(&session.history_key(), &param.key))
                             .ok()
                             .flatten()
                     })
@@ -175,6 +175,7 @@ impl Workspace {
             return;
         };
         let conn = session.conn.clone();
+        let history_key = session.history_key();
         let remember = self.keeps_history(session);
         let values: Vec<(String, String)> = prompt
             .fields
@@ -183,7 +184,7 @@ impl Workspace {
             .collect();
         if let (true, Some(store)) = (remember, &self.store) {
             for (key, value) in &values {
-                let _ = store.set_setting(&remembered_key(&conn.id(), key), value);
+                let _ = store.set_setting(&remembered_key(&history_key, key), value);
             }
         }
         let sql = bind(&prompt.sql, &prompt.params, |key| {

@@ -510,6 +510,13 @@ pub trait Connection: Send + Sync {
     /// Engine and version, e.g. `sqlite 3.50.4`.
     fn server_version(&self) -> String;
 
+    /// What tells this server apart from another answering at the same
+    /// address, read when it connected (Postgres's system identifier, MySQL's
+    /// server UUID). `None` when the engine has none, or it couldn't be read.
+    fn server_identity(&self) -> Option<String> {
+        None
+    }
+
     /// Run one or more statements and return the outcome of the last.
     /// At most `row_limit` rows are kept from a result set.
     fn execute(&self, sql: &str, row_limit: usize) -> Result<QueryResult> {

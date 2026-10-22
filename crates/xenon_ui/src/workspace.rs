@@ -162,7 +162,7 @@ pub(crate) struct Profile {
     pub(crate) color: String,
     pub(crate) target: RequestTarget,
     /// Set from Settings for production connections when connecting.
-    lock_timeout: Option<std::time::Duration>,
+    pub(crate) lock_timeout: Option<std::time::Duration>,
     /// Submitted from the connection form, which shows the saved passwords: an
     /// empty one there was cleared on purpose. Everywhere else an empty
     /// password means "use the Keychain's".
@@ -374,6 +374,16 @@ impl Session {
     /// connected to) isn't worth a level of its own in the tree.
     pub fn shows_schemas(&self) -> bool {
         self.schemas.len() > 1
+    }
+
+    /// What history and remembered parameter values are kept under: the saved
+    /// connection, so two saved for one address (Dev and Prod both through a
+    /// local port forward) don't share them; the address for one not saved.
+    pub(crate) fn history_key(&self) -> String {
+        match self.saved_id {
+            Some(id) => format!("{}#{id}", self.conn.id()),
+            None => self.conn.id(),
+        }
     }
 }
 
@@ -1608,6 +1618,10 @@ impl Workspace {
 
     /// Commit or roll back the active connection's open transaction.
     pub(crate) fn end_transaction(&mut self, commit: bool, cx: &mut Context<Self>) {
+        if let Some(busy) = self.busy(self.active_tab().id) {
+            self.flash(busy.to_string(), true, cx);
+            return;
+        }
         let Some(session) = self.active_session() else {
             return;
         };
@@ -1667,8 +1681,13 @@ impl Workspace {
             return;
         }
         if session.in_transaction {
+            let also = if unsaved > 0 {
+                format!(" {} not saved are discarded too.", changes(unsaved))
+            } else {
+                String::new()
+            };
             let body = format!(
-                "A transaction is open on {}. Disconnecting rolls back everything it changed.",
+                "A transaction is open on {}. Disconnecting rolls back everything it changed.{also}",
                 session.name
             );
             let dialog = cx.new(|cx| {
@@ -1747,15 +1766,25 @@ impl Workspace {
     pub(crate) fn update_open(
         &mut self,
         session_id: usize,
-        profile: Profile,
+        mut profile: Profile,
         cx: &mut Context<Self>,
     ) {
-        let reconnect = self
+        if profile.environment == Environment::Production && self.prefs.lock_wait > 0 {
+            profile.lock_timeout = Some(std::time::Duration::from_secs(self.prefs.lock_wait));
+        }
+        let before = self
             .saved
             .iter()
-            .find(|saved| Some(saved.id) == profile.saved_id)
-            .is_none_or(|saved| {
-                saved.target != profile.saved_target() || saved.read_only != profile.read_only
+            .find(|saved| Some(saved.id) == profile.saved_id);
+        let moved = before.is_none_or(|saved| saved.target != profile.saved_target());
+        // Into or out of Production changes the lock wait, which is set when
+        // the connection opens.
+        let production = |environment| environment == Environment::Production;
+        let reconnect = moved
+            || before.is_some_and(|saved| {
+                saved.read_only != profile.read_only
+                    || (self.prefs.lock_wait > 0
+                        && production(saved.environment) != production(profile.environment))
             });
         let busy = self
             .sessions
@@ -1841,10 +1870,11 @@ impl Workspace {
                             session.conn = conn;
                             session.in_transaction = false;
                             session.profile = profile;
+                            // Rows from another server go; the same server's stay.
                             for tab in this
                                 .tabs
                                 .iter_mut()
-                                .filter(|t| t.session == Some(session_id))
+                                .filter(|t| moved && t.session == Some(session_id))
                             {
                                 tab.grid = None;
                                 tab.sets.clear();
@@ -2321,6 +2351,18 @@ impl Workspace {
     /// query is already running on its connection (statements on one session
     /// must not interleave, or one's transaction swallows another's).
     /// A dialog, prompt or the palette is open: keys belong to it.
+    /// An action handler that does nothing while a dialog is open: typed in a
+    /// dialog, a shortcut isn't for the tab behind it.
+    fn unless_modal<A: 'static>(
+        handler: impl Fn(&mut Self, &A, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&mut Self, &A, &mut Window, &mut Context<Self>) + 'static {
+        move |this, action, window, cx| {
+            if !this.modal_open() {
+                handler(this, action, window, cx);
+            }
+        }
+    }
+
     pub(crate) fn modal_open(&self) -> bool {
         self.confirm.is_some()
             || self.connect_dialog.is_some()
@@ -2329,7 +2371,6 @@ impl Workspace {
             || self.parameters.is_some()
             || self.naming.is_some()
             || self.import.is_some()
-            || self.switcher
     }
 
     pub(crate) fn busy(&self, tab_id: usize) -> Option<&'static str> {
@@ -2530,6 +2571,7 @@ impl Workspace {
         };
         let conn = session.conn.clone();
         let store = self.store.clone().filter(|_| self.keeps_history(session));
+        let history_key = session.history_key();
         let cancel = conn.cancel_handle();
         // Production queries are stopped after the limit set in Settings → Safety.
         let limit = (session.environment == Environment::Production && self.prefs.query_limit > 0)
@@ -2643,7 +2685,7 @@ impl Workspace {
                     Err(err) => (None, Some(format!("{err:#}"))),
                 };
                 let recorded = store.record(NewHistoryEntry {
-                    connection: &conn.id(),
+                    connection: &history_key,
                     sql: &sql,
                     duration: started.elapsed(),
                     rows,
@@ -4052,6 +4094,7 @@ impl Workspace {
             return;
         };
         let conn = session.conn.clone();
+        let history_key = session.history_key();
         // As `keeps_history`, by field: `tab` holds `self.tabs` here.
         let keep = session.environment != Environment::Production || self.prefs.production_history;
         let store = self.store.clone().filter(|_| keep);
@@ -4071,7 +4114,7 @@ impl Workspace {
                     Err(err) => (None, Some(format!("{err:#}"))),
                 };
                 let _ = store.record(NewHistoryEntry {
-                    connection: &conn.id(),
+                    connection: &history_key,
                     sql: &script,
                     duration: started.elapsed(),
                     rows,
@@ -4845,8 +4888,8 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::open_file))
-            .on_action(cx.listener(Self::new_connection))
+            .on_action(cx.listener(Self::unless_modal(Self::open_file)))
+            .on_action(cx.listener(Self::unless_modal(Self::new_connection)))
             .on_action(cx.listener(Self::run_statement))
             .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::explain))
@@ -4891,40 +4934,47 @@ impl Render for Workspace {
                 // The query only: never staged changes (that's ⌘S).
                 cx.listener(|this, _: &SaveQuery, window, cx| this.save_query(false, window, cx)),
             )
-            .on_action(cx.listener(|this, _: &ShowSaved, window, cx| {
-                this.show_panel(SidePanel::Saved, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ExportResults, _, cx| {
-                if this.active_tab().grid.is_some() {
-                    this.export_menu = !this.export_menu;
-                    cx.notify();
-                }
-            }))
+            .on_action(cx.listener(Self::unless_modal(
+                |this: &mut Self, _: &ShowSaved, window: &mut Window, cx: &mut Context<Self>| {
+                    this.show_panel(SidePanel::Saved, window, cx)
+                },
+            )))
+            .on_action(cx.listener(Self::unless_modal(
+                |this: &mut Self, _: &ExportResults, _: &mut Window, cx: &mut Context<Self>| {
+                    if this.active_tab().grid.is_some() {
+                        this.export_menu = !this.export_menu;
+                        cx.notify();
+                    }
+                },
+            )))
             .on_action(
                 cx.listener(|this, _: &FocusEditor, window, cx| this.focus_editor(window, cx)),
             )
-            .on_action(cx.listener(Self::open_palette))
-            .on_action(cx.listener(Self::open_settings))
-            .on_action(cx.listener(Self::format_sql))
+            .on_action(cx.listener(Self::unless_modal(Self::open_palette)))
+            .on_action(cx.listener(Self::unless_modal(Self::open_settings)))
+            .on_action(cx.listener(Self::unless_modal(Self::format_sql)))
             .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom(1, window, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, window, cx| this.zoom(-1, window, cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, window, cx| this.zoom(0, window, cx)))
             .on_action(
                 cx.listener(|this, _: &ImportConnections, window, cx| this.open_import(window, cx)),
             )
-            .on_action(cx.listener(Self::toggle_comment))
+            .on_action(cx.listener(Self::unless_modal(Self::toggle_comment)))
             .on_action(
                 cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(true, cx)),
             )
-            .on_action(cx.listener(Self::edit_cell))
+            .on_action(cx.listener(Self::unless_modal(Self::edit_cell)))
             .on_action(cx.listener(Self::delete_rows))
-            .on_action(cx.listener(Self::add_row))
+            .on_action(cx.listener(Self::unless_modal(Self::add_row)))
             .on_action(cx.listener(Self::save_edits))
-            .on_action(cx.listener(Self::discard_edits))
+            .on_action(cx.listener(Self::unless_modal(Self::discard_edits)))
             .on_action(cx.listener(Self::close_connection))
-            .on_action(cx.listener(|this, _: &ShowConnections, window, cx| {
-                this.open_connect_tab(window, cx)
-            }))
+            .on_action(cx.listener(Self::unless_modal(
+                |this: &mut Self,
+                 _: &ShowConnections,
+                 window: &mut Window,
+                 cx: &mut Context<Self>| { this.open_connect_tab(window, cx) },
+            )))
             .on_action(cx.listener(|this, _: &UseSystemTheme, w, cx| {
                 this.set_theme(ThemeChoice::System, w, cx)
             }))
@@ -4941,16 +4991,19 @@ impl Render for Workspace {
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.drag = None),
             )
-            .on_action(cx.listener(Self::cancel_query))
-            .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::unless_modal(Self::cancel_query)))
+            .on_action(cx.listener(Self::unless_modal(Self::new_tab)))
             .on_action(cx.listener(Self::close_tab))
-            .on_action(cx.listener(Self::next_tab))
-            .on_action(cx.listener(Self::prev_tab))
-            .on_action(cx.listener(Self::show_explorer))
-            .on_action(cx.listener(Self::show_history))
+            .on_action(cx.listener(Self::unless_modal(Self::next_tab)))
+            .on_action(cx.listener(Self::unless_modal(Self::prev_tab)))
+            .on_action(cx.listener(Self::unless_modal(Self::show_explorer)))
+            .on_action(cx.listener(Self::unless_modal(Self::show_history)))
             .on_action(cx.listener(Self::toggle_explorer))
             .on_action(cx.listener(Self::toggle_inspector))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if this.modal_open() {
+                    return;
+                }
                 if let Some(path) = paths.0.first() {
                     this.open_path(path.clone(), window, cx);
                 }

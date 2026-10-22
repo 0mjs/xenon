@@ -238,6 +238,7 @@ pub struct MysqlConnection {
     id: String,
     local: bool,
     version: String,
+    server: Option<String>,
     /// The database connected to, if any: where unqualified names resolve.
     schema: Option<String>,
     mariadb: bool,
@@ -406,6 +407,16 @@ impl MysqlConnection {
             .ok()
             .flatten()
             == Some(0);
+        // MariaDB has no server UUID: its host name, then.
+        let server = conn
+            .query_first::<String, _>("select @@server_uuid")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                conn.query_first::<String, _>("select @@hostname")
+                    .ok()
+                    .flatten()
+            });
         let number = raw_version
             .split(['-', ' '])
             .next()
@@ -421,6 +432,7 @@ impl MysqlConnection {
             id: format!("mysql:{user}@{host}:{port}/{database}"),
             local: matches!(host, "localhost" | "127.0.0.1" | "::1"),
             version: format!("{} {number}", if mariadb { "mariadb" } else { "mysql" }),
+            server,
             mariadb,
             schema,
             read_only: options.read_only,
@@ -481,6 +493,10 @@ impl Connection for MysqlConnection {
 
     fn server_version(&self) -> String {
         self.version.clone()
+    }
+
+    fn server_identity(&self) -> Option<String> {
+        self.server.clone()
     }
 
     fn execute_streaming(
@@ -1377,6 +1393,9 @@ mod live {
     fn check(port: u16, mariadb: bool) {
         let conn = fleet(port);
         assert_eq!(conn.is_mariadb(), mariadb);
+        // What tells it apart from another server at its address (W9).
+        assert!(conn.server_identity().is_some());
+        assert_eq!(conn.server_identity(), fleet(port).server_identity());
         assert!(
             conn.server_version()
                 .starts_with(if mariadb { "mariadb " } else { "mysql " })

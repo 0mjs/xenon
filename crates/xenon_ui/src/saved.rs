@@ -138,7 +138,14 @@ impl Workspace {
             );
             return;
         };
-        let connection = self.active_session().and_then(|s| s.saved_id);
+        // The tab it came from, not the one in front.
+        let connection = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.session)
+            .and_then(|id| self.session(id))
+            .and_then(|s| s.saved_id);
         let query = SavedQuery {
             id,
             name: name.clone(),

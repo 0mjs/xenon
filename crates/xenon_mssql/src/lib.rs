@@ -223,6 +223,7 @@ pub struct MssqlConnection {
     id: String,
     local: bool,
     version: String,
+    identity: Option<String>,
     schema: Option<String>,
     /// The database it opened on (`db_name()`), named in generated SQL.
     catalog: Option<String>,
@@ -447,7 +448,7 @@ impl MssqlConnection {
         } else {
             &options.user
         };
-        let (client, spid, version, schema, catalog) = runtime().block_on(async {
+        let (client, spid, version, schema, catalog, identity) = runtime().block_on(async {
             let mut client = open(options).await?;
             let row = client
                 .simple_query(
@@ -468,12 +469,29 @@ impl MssqlConnection {
             let catalog = row.get::<&str, _>(4).map(str::to_string);
             let login_time = row.get::<&str, _>(5).unwrap_or_default().to_string();
             let label = if azure { "azure sql" } else { "sqlserver" };
+            // The server's name and this database's own GUID.
+            let identity = match client
+                .simple_query(
+                    "select @@servername + N'/' + cast(service_broker_guid as nvarchar(36)) \
+                     from sys.databases where database_id = db_id()",
+                )
+                .await
+            {
+                Ok(stream) => stream
+                    .into_row()
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.get::<&str, _>(0).map(str::to_string)),
+                Err(_) => None,
+            };
             anyhow::Ok((
                 client,
                 (spid, login_time),
                 format!("{label} {version}"),
                 schema,
                 catalog,
+                identity,
             ))
         })?;
         let database = &options.database;
@@ -486,6 +504,7 @@ impl MssqlConnection {
             id: format!("mssql:{user}@{host}:{port}/{database}"),
             local: matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"),
             version,
+            identity,
             schema,
             catalog,
             cancel: Arc::new(MsCancel {
@@ -638,6 +657,10 @@ impl Connection for MssqlConnection {
 
     fn server_version(&self) -> String {
         self.version.clone()
+    }
+
+    fn server_identity(&self) -> Option<String> {
+        self.identity.clone()
     }
 
     fn execute_streaming(
@@ -1738,6 +1761,8 @@ mod live {
     fn everything_against_the_fleet() {
         let _serial = serial();
         let conn = fleet();
+        // What tells it apart from another server at its address (W9).
+        assert!(conn.server_identity().is_some());
         assert!(
             conn.server_version().starts_with("sqlserver 16."),
             "{}",

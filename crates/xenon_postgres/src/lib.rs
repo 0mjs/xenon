@@ -99,6 +99,7 @@ pub struct PostgresConnection {
     id: String,
     local: bool,
     version: String,
+    identity: Option<String>,
     client: Client,
     cancel: Arc<PgCancel>,
     read_only: bool,
@@ -275,9 +276,21 @@ impl PostgresConnection {
                     _ => None,
                 })
                 .unwrap_or_default();
+            // Not every server (or role) can read it: then there's nothing to compare.
+            let identity = client
+                .simple_query("select system_identifier::text from pg_control_system()")
+                .await
+                .ok()
+                .into_iter()
+                .flatten()
+                .find_map(|msg| match msg {
+                    SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+                    _ => None,
+                });
 
             Ok(Self {
                 read_only,
+                identity,
                 transaction_open: Default::default(),
                 name,
                 id,
@@ -511,6 +524,10 @@ impl Connection for PostgresConnection {
 
     fn server_version(&self) -> String {
         self.version.clone()
+    }
+
+    fn server_identity(&self) -> Option<String> {
+        self.identity.clone()
     }
 
     fn execute_streaming(
@@ -1337,6 +1354,9 @@ mod tests {
             return;
         };
         assert!(db.alive());
+        // Two sessions on one server tell it apart from another (W9).
+        assert!(db.server_identity().is_some());
+        assert_eq!(db.server_identity(), other.server_identity());
         let pid = rows(db.execute("select pg_backend_pid()", 1).unwrap()).rows[0][0].clone();
         other
             .execute(

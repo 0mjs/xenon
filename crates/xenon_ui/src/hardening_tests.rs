@@ -314,12 +314,30 @@ fn hardening_shortcuts_in_a_dialog_stay_in_it() {
         assert!(w.connect_dialog.is_some());
     });
     // Typed as keys, from the dialog's focused field.
-    for keys in ["cmd-shift-enter", "cmd-enter", "cmd-w"] {
+    // W7: tab switching, new tabs and editor commands stay in the dialog too.
+    for keys in [
+        "cmd-shift-enter",
+        "cmd-enter",
+        "cmd-w",
+        "cmd-t",
+        "ctrl-tab",
+        "cmd-/",
+        "alt-shift-f",
+    ] {
         shot.keys(keys);
     }
     assert!(shot.settle(5, |w| !w.is_running()));
-    shot.act(|w, _, _| {
-        assert_eq!(w.tabs().len(), 1, "⌘W closed the tab behind the dialog");
+    shot.act(|w, _, cx| {
+        assert_eq!(
+            w.tabs().len(),
+            1,
+            "a shortcut closed or opened a tab behind the dialog"
+        );
+        assert_eq!(
+            w.active_tab().editor.read(cx).value().to_string(),
+            "update orders set status = 'from-the-dialog' where id = 4",
+            "a shortcut edited the editor behind the dialog"
+        );
         let status = match w.sessions[0]
             .conn
             .execute("select status from orders where id = 4", 1)
@@ -368,9 +386,10 @@ fn hardening_marking_an_open_connection_production_applies_now() {
             cx,
         );
     });
+    // W6: and it reconnects with Production's lock wait.
     assert!(shot.settle(5, |w| {
         w.active_session()
-            .is_some_and(|s| s.name == "shop PRODUCTION")
+            .is_some_and(|s| s.name == "shop PRODUCTION" && s.profile.lock_timeout.is_some())
     }));
     shot.act(|w, window, cx| {
         assert_eq!(w.sessions.len(), 1, "a second session was opened");
@@ -428,6 +447,20 @@ fn hardening_history_runs_only_on_its_own_connection() {
             cx,
         );
         assert!(!w.is_running(), "ran another connection's statement here");
+        // W8: the same address saved twice (Dev and Prod through one port
+        // forward) is two connections, and history by address alone is neither.
+        w.sessions[0].saved_id = Some(7);
+        let address = w.sessions[0].conn.id();
+        for other in [format!("{address}#8"), address] {
+            w.use_history_entry(
+                "update orders set status = 'from-history' where id = 5".into(),
+                &other,
+                true,
+                window,
+                cx,
+            );
+            assert!(!w.is_running(), "ran {other}'s statement here");
+        }
     });
     assert!(shot.settle(3, |w| !w.is_running()));
     shot.act(|w, _, _| {
