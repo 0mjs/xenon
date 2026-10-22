@@ -1941,6 +1941,15 @@ fn tokens(sql: &str, lexing: Lexing) -> Vec<&str> {
                 start = offset(last);
                 out.pop();
             }
+            // Postgres joins strings split across lines (`'a'\n'b'` is `'ab'`), but
+            // not on one line: the line break is part of the code.
+            if bytes[i] == b'\''
+                && let Some(last) = out.last().copied()
+                && last.ends_with('\'')
+                && sql[offset(last) + last.len()..start].contains('\n')
+            {
+                out.push("\n");
+            }
         }
         out.push(&sql[start..end]);
         i = end;
@@ -2014,6 +2023,9 @@ mod tests {
             false
         ));
         assert!(!same_code("select $$ a  b $$", "select $$ a b $$", false));
+        // A string continued on the next line is one string; on one line, an error.
+        assert!(!same_code("select 'a'\n'b'", "select 'a' 'b'", false));
+        assert!(same_code("select 'a'\n'b'", "select\n  'a'\n  'b'", false));
         // Joining a line onto a comment would comment out the code after it.
         assert!(!same_code(
             "select a -- note\nfrom t",

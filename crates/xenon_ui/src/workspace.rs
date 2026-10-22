@@ -2633,7 +2633,26 @@ impl Workspace {
                 }
                 })
             };
+            // A procedure in the script can commit or roll back the wrapping
+            // transaction itself: what ran after that was kept as it ran.
+            // (A session that ended took its transaction with it: rolled back.)
+            let ended = |wrap: &Wrap| {
+                matches!(wrap, Wrap::Atomic(_))
+                    && !conn.session_ended()
+                    && conn.in_transaction() == Some(false)
+            };
+            let ended_early = || {
+                anyhow::anyhow!(
+                    "Something in the script ended the transaction it ran in (a procedure's \
+                     commit or rollback), so the statements after that were kept as they ran: \
+                     check what changed before running it again"
+                )
+            };
             let result = match (wrap, begun) {
+                (Some(wrap), true) if ended(&wrap) => Err(match result {
+                    Err(err) => err.context(ended_early()),
+                    Ok(_) => ended_early(),
+                }),
                 (Some(wrap), true) => match result {
                     // Stopped part-way (⌘., the time limit, closing the tab): a
                     // script is all or nothing, so what ran is rolled back. A
