@@ -28,6 +28,7 @@ fi
 echo "commit $(git rev-parse --short HEAD), $(rustc --version)"
 out=target/xcode
 archive=$out/Xenon.xcarchive
+mkdir -p "$out"
 rm -rf "$archive" "$out/notarized"
 
 echo "archiving Xenon $version…"
