@@ -331,8 +331,13 @@ impl ConnectDialog {
         // so does a new SQL Server connection here (Require to trust any).
         match (engine, self.ssl) {
             (ServerEngine::SqlServer, SslMode::Prefer) => self.ssl = SslMode::VerifyFull,
+            // Only SQL Server's default goes back to the others' default: not
+            // one chosen, nor Production's.
             (other, SslMode::VerifyFull)
-                if other != ServerEngine::SqlServer && self.engine == ServerEngine::SqlServer =>
+                if other != ServerEngine::SqlServer
+                    && self.engine == ServerEngine::SqlServer
+                    && !self.ssl_chosen
+                    && self.environment != Environment::Production =>
             {
                 self.ssl = SslMode::Prefer
             }

@@ -59,10 +59,39 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
         };
+        let truthy = || {
+            matches!(
+                decode(value).to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes"
+            )
+        };
+        let mut asked = |mode: SslMode| ssl = Some(ssl.map_or(mode, |earlier| earlier.max(mode)));
         match key.to_ascii_lowercase().replace('_', "-").as_str() {
             "ssl-ca" | "sslca" => tls.ca = decode(value),
             "ssl-cert" | "sslcert" => tls.cert = decode(value),
             "ssl-key" | "sslkey" => tls.key = decode(value),
+            "ssl-mode" | "sslmode" => {}
+            // JDBC's and others' spellings.
+            "usessl" | "ssl" | "requiressl" => asked(if truthy() {
+                SslMode::Require
+            } else {
+                SslMode::Disable
+            }),
+            "verifyservercertificate" | "ssl-verify-server-cert" => {
+                if truthy() {
+                    asked(SslMode::VerifyFull)
+                }
+            }
+            // Anything else about TLS can't be followed: refused, not dropped.
+            other
+                if ["ssl", "tls", "cert"]
+                    .iter()
+                    .any(|word| other.contains(word)) =>
+            {
+                bail!(
+                    "Xenon doesn't support the TLS option \"{key}\" in a MySQL URL: use ssl-mode, ssl-ca, ssl-cert and ssl-key."
+                )
+            }
             _ => {}
         }
         if matches!(
@@ -95,7 +124,11 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
         database: decode(database),
         user,
         password,
-        ssl: ssl.unwrap_or_default(),
+        // A CA means checking against it, as MySQL's client does.
+        ssl: match ssl {
+            None | Some(SslMode::Require) if !tls.ca.is_empty() => SslMode::VerifyCa,
+            ssl => ssl.unwrap_or_default(),
+        },
         read_only: false,
         ssh: None,
         address: None,
@@ -1075,6 +1108,38 @@ fn near_position(message: &str, sql: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urls_get_the_tls_they_ask_for() {
+        let ssl = |url: &str| parse_url(url).map(|o| o.ssl);
+        assert_eq!(
+            ssl("mysql://h/db?ssl-ca=/ca.pem").unwrap(),
+            SslMode::VerifyCa
+        );
+        assert_eq!(
+            ssl("mysql://h/db?ssl-mode=required&ssl-ca=/ca.pem").unwrap(),
+            SslMode::VerifyCa
+        );
+        assert_eq!(
+            ssl("mysql://h/db?ssl-mode=verify_identity&ssl-ca=/ca.pem").unwrap(),
+            SslMode::VerifyFull
+        );
+        assert_eq!(ssl("mysql://h/db?useSSL=true").unwrap(), SslMode::Require);
+        assert_eq!(
+            ssl("mysql://h/db?useSSL=true&verifyServerCertificate=true").unwrap(),
+            SslMode::VerifyFull
+        );
+        assert_eq!(
+            ssl("mysql://h/db?ssl_verify_server_cert=1").unwrap(),
+            SslMode::VerifyFull
+        );
+        assert_eq!(
+            ssl("mysql://h/db?charset=utf8mb4").unwrap(),
+            SslMode::Prefer
+        );
+        assert!(ssl("mysql://h/db?ssl-capath=/certs").is_err());
+        assert!(ssl("mysql://h/db?tls-version=TLSv1.3").is_err());
+    }
 
     #[test]
     fn ssl_modes_are_read_strictly() {

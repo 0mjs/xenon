@@ -731,13 +731,15 @@ impl Store {
     }
 
     /// Forget the history, and the parameter values remembered with it. The
-    /// file overwrites what it deletes (`secure_delete`), and the write-ahead
-    /// log is emptied, so the SQL isn't left on disk.
+    /// file overwrites what it deletes (`secure_delete`), is rebuilt without
+    /// its free pages (where history deleted before `secure_delete`, by an
+    /// older Xenon, still sits), and the write-ahead log is emptied, so the
+    /// SQL isn't left on disk.
     pub fn clear_history(&self) -> Result<()> {
         let conn = self.lock();
         conn.execute("delete from history", [])?;
         conn.execute("delete from settings where key like 'param%'", [])?;
-        conn.execute_batch("pragma wal_checkpoint(truncate)")?;
+        conn.execute_batch("vacuum; pragma wal_checkpoint(truncate)")?;
         Ok(())
     }
 
@@ -830,6 +832,43 @@ mod tests {
             let bytes = std::fs::read(file.unwrap().path()).unwrap();
             let text = String::from_utf8_lossy(&bytes);
             assert!(!text.contains("SECRET-IN-HISTORY") && !text.contains("SECRET-PARAM"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// History an older Xenon deleted, before `secure_delete`, sits in free
+    /// pages: Clear history scrubs it too.
+    #[test]
+    fn clear_history_scrubs_what_was_deleted_before() {
+        let dir = std::env::temp_dir().join(format!("xenon-store-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("xenon.db");
+        let store = Store::open(&path).unwrap();
+        for n in 0..3000 {
+            store
+                .record(NewHistoryEntry {
+                    connection: "c",
+                    sql: &format!("select 'OLD-SECRET-{n}'"),
+                    duration: std::time::Duration::ZERO,
+                    rows: None,
+                    error: None,
+                })
+                .unwrap();
+        }
+        drop(store);
+        // As an older Xenon pruned it.
+        let old = rusqlite::Connection::open(&path).unwrap();
+        old.execute_batch(
+            "pragma secure_delete = off; delete from history; pragma wal_checkpoint(truncate)",
+        )
+        .unwrap();
+        drop(old);
+        let store = Store::open(&path).unwrap();
+        store.clear_history().unwrap();
+        drop(store);
+        for file in std::fs::read_dir(&dir).unwrap() {
+            let bytes = std::fs::read(file.unwrap().path()).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("OLD-SECRET"));
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }

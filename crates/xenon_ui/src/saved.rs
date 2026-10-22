@@ -642,7 +642,9 @@ impl Workspace {
                         input.set_value(tab.filter.clone(), window, cx)
                     });
                     self.load_table_info(cx);
-                    self.run_browse(window, cx);
+                    if let Some(browse) = &mut self.tabs[index].browse {
+                        browse.pending = true;
+                    }
                 }
                 None => open.title = tab.title.clone().into(),
             }
@@ -661,6 +663,7 @@ impl Workspace {
         }
         self.reload_history(cx);
         self.focus_editor(window, cx);
+        self.load_if_pending(window, cx);
         cx.notify();
         true
     }

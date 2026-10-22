@@ -68,13 +68,28 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
             .get_password()
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .unwrap_or_default(),
-        ssl: ssl.unwrap_or_default(),
+        ssl: url_ssl(ssl, &config, &tls),
         read_only: false,
         ssh: None,
         address: None,
         lock_timeout: None,
         tls,
     })
+}
+
+/// The TLS mode a URL asks for: as written, or as tokio-postgres read it
+/// when spelt in a way the plain match misses (`sslmode = require`,
+/// `sslmode='require'`). `require` with a CA verifies against it, as libpq does.
+fn url_ssl(found: Option<SslMode>, config: &Config, tls: &TlsFiles) -> SslMode {
+    let mode = found.unwrap_or(match config.get_ssl_mode() {
+        tokio_postgres::config::SslMode::Disable => SslMode::Disable,
+        tokio_postgres::config::SslMode::Require => SslMode::Require,
+        _ => SslMode::Prefer,
+    });
+    match mode {
+        SslMode::Require if !tls.ca.is_empty() => SslMode::VerifyCa,
+        mode => mode,
+    }
 }
 
 pub struct PostgresConnection {
@@ -1127,6 +1142,19 @@ mod tests {
         assert_eq!(mode, Some(SslMode::Require));
 
         assert_eq!(extract_sslmode("postgres://h/db").1, None);
+    }
+
+    #[test]
+    fn urls_get_the_tls_they_ask_for() {
+        let ssl = |url: &str| parse_url(url).unwrap().ssl;
+        assert_eq!(
+            ssl("postgres://h/db?sslmode=require&sslrootcert=/certs/ca.pem"),
+            SslMode::VerifyCa
+        );
+        assert_eq!(ssl("host=h dbname=x sslmode = require"), SslMode::Require);
+        assert_eq!(ssl("host=h dbname=x sslmode='require'"), SslMode::Require);
+        assert_eq!(ssl("postgres://h/db?sslmode=disable"), SslMode::Disable);
+        assert_eq!(ssl("postgres://h/db"), SslMode::Prefer);
     }
 
     #[test]

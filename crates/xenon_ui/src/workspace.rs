@@ -291,16 +291,15 @@ impl Profile {
         })?;
         // From the form, which shows the saved passwords, what it sends is what
         // to keep: one cleared there (or a tunnel removed) leaves the Keychain.
-        // Opened any other way, an empty password means "the Keychain's": keep it.
-        if let RequestTarget::Server(_, options) = &self.target {
+        // Opened any other way (a pasted URL's password, say), the Keychain's
+        // are kept: a password from elsewhere is used for this connect only.
+        if let (RequestTarget::Server(_, options), true) = (&self.target, self.edited) {
             let ssh = options.ssh.as_ref().map_or("", |ssh| ssh.password.as_str());
             for (key, secret) in [
                 (SavedConnection::secret_key(id), options.password.as_str()),
                 (SavedConnection::ssh_secret_key(id), ssh),
             ] {
-                if self.edited || !secret.is_empty() {
-                    secrets::set(&key, secret)?;
-                }
+                secrets::set(&key, secret)?;
             }
         }
         Ok(Some(id))
@@ -422,6 +421,9 @@ pub(crate) struct Browse {
     /// while they come from it: other SQL run in the tab (typed, or from
     /// History) shows rows that aren't this table's.
     pub(crate) loaded_with: Option<String>,
+    /// Restored at launch but not shown yet: its rows load when it's first
+    /// shown (one connection runs one query at a time).
+    pub(crate) pending: bool,
     /// Which page of rows is shown, from 0, and the filter and sort it's a page
     /// of (a new one starts again at the first).
     pub(crate) page: usize,
@@ -917,6 +919,7 @@ impl Workspace {
                         _filter_enter: filter_enter,
                         applied: String::new(),
                         loaded_with: None,
+                        pending: false,
                         page: 0,
                         paged_for: None,
                         total: None,
@@ -993,7 +996,21 @@ impl Workspace {
                 self.reload_history(cx);
             }
             self.focus_editor(window, cx);
+            self.load_if_pending(window, cx);
             cx.notify();
+        }
+    }
+
+    /// Load the rows of a restored table tab now in front, if they're still
+    /// to load and its connection is free.
+    pub(crate) fn load_if_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pending = self.active_tab().browse.as_ref().is_some_and(|b| b.pending);
+        let free = !self.connection_busy(self.active_tab().id);
+        if pending && free {
+            if let Some(browse) = &mut self.tabs[self.active].browse {
+                browse.pending = false;
+            }
+            self.run_browse(window, cx);
         }
     }
 
@@ -1048,6 +1065,7 @@ impl Workspace {
         }
         self.reload_history(cx);
         self.focus_editor(window, cx);
+        self.load_if_pending(window, cx);
         cx.notify();
     }
 
@@ -1107,6 +1125,7 @@ impl Workspace {
             self.reload_history(cx);
         }
         self.focus_editor(window, cx);
+        self.load_if_pending(window, cx);
         cx.notify();
     }
 
@@ -1263,7 +1282,11 @@ impl Workspace {
             .and_then(|saved| self.sessions.iter().find(|s| s.saved_id == Some(saved)))
             .map(|s| s.id)
         {
-            self.connect_dialog = None;
+            // Only the form's own connection closes it: one opening in the
+            // background leaves what's being typed there alone.
+            if profile.edited {
+                self.connect_dialog = None;
+            }
             // Already open: nothing more of it to restore.
             if let Some(saved) = profile.saved_id {
                 self.restoring.remove(&saved);
@@ -1276,6 +1299,7 @@ impl Workspace {
         }
         let store = self.store.clone();
         let restoring = profile.saved_id;
+        let from_form = profile.edited;
         self.connecting = Some(profile.name.clone().into());
         cx.notify();
         let task = cx.background_spawn(async move {
@@ -1290,7 +1314,9 @@ impl Workspace {
                 this.connecting = None;
                 match opened {
                     Ok((conn, schemas, profile, saved_id)) => {
-                        this.connect_dialog = None;
+                        if profile.edited {
+                            this.connect_dialog = None;
+                        }
                         this.reload_saved();
                         // The same database reached another way (a pasted URL for a
                         // saved connection, say): use the one already open, but only
@@ -1409,10 +1435,10 @@ impl Workspace {
                         }
                         let message: SharedString = format!("{err:#}").into();
                         match &this.connect_dialog {
-                            Some((dialog, _)) => {
+                            Some((dialog, _)) if from_form => {
                                 dialog.update(cx, |dialog, cx| dialog.set_error(message, cx))
                             }
-                            None => this.notice = Some(message),
+                            _ => this.notice = Some(message),
                         }
                     }
                 }
@@ -2807,14 +2833,22 @@ impl Workspace {
                     .filter(|o| matches!(o, QueryOutcome::Rows(_)))
                     .count()
                     + usize::from(matches!(result.outcome, QueryOutcome::Rows(_)));
-                let mut earlier: Vec<Grid> = std::mem::take(&mut result.earlier)
-                    .into_iter()
-                    .filter_map(|outcome| match outcome {
-                        QueryOutcome::Rows(rows) => Some(Grid::new(rows)),
-                        QueryOutcome::Affected(_) => None,
-                    })
-                    .take(MAX_RESULT_SETS - 1)
-                    .collect();
+                let mut row_sets: Vec<xenon_driver::ResultSet> =
+                    std::mem::take(&mut result.earlier)
+                        .into_iter()
+                        .filter_map(|outcome| match outcome {
+                            QueryOutcome::Rows(rows) => Some(rows),
+                            QueryOutcome::Affected(_) => None,
+                        })
+                        .collect();
+                // Ending with a write, the last rows are the script's last set:
+                // kept apart from the first ones shown, however many there are.
+                let last_rows = match &result.outcome {
+                    QueryOutcome::Rows(_) => None,
+                    QueryOutcome::Affected(_) => row_sets.pop(),
+                };
+                row_sets.truncate(MAX_RESULT_SETS - 1);
+                let earlier: Vec<Grid> = row_sets.into_iter().map(Grid::new).collect();
                 tab.sets.clear();
                 if let QueryOutcome::Rows(rows) = &mut result.outcome {
                     let started = std::time::Instant::now();
@@ -2838,7 +2872,7 @@ impl Workspace {
                     }
                 } else {
                     // Ended with a statement that changes rows: show the last rows.
-                    tab.grid = earlier.pop();
+                    tab.grid = last_rows.map(Grid::new);
                     if !earlier.is_empty() {
                         tab.shown_set = earlier.len();
                         tab.sets = earlier.into_iter().map(Some).chain([None]).collect();
@@ -4697,6 +4731,12 @@ impl Render for Workspace {
         }
         if self.pending_error_jump.is_some() {
             self.jump_to_error(window, cx);
+        }
+        // A restored table tab shown while its connection was busy loads
+        // once the connection frees up.
+        let pending = self.active_tab().browse.as_ref().is_some_and(|b| b.pending);
+        if pending && !self.connection_busy(self.active_tab().id) {
+            cx.defer_in(window, |this, window, cx| this.load_if_pending(window, cx));
         }
         if let Some(sql) = self.bench_pending_sql.take() {
             let editor = self.active_tab().editor.clone();
