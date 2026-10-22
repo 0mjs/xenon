@@ -9,6 +9,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# DuckDB's library from its archive, checked before it's unzipped (the duckdb crate's own
+# download would unzip it first, with a zip crate that has advisories against it).
+eval "$(./scripts/ci-duckdb.sh)"
 cargo build --release --locked -p xenon
 version=$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="xenon"))')
@@ -20,11 +23,11 @@ cp target/release/xenon "$app/Contents/MacOS/xenon"
 
 # DuckDB's library, Apple silicon only (its download holds Intel code too, twice the size).
 mkdir -p "$app/Contents/Frameworks"
-./scripts/verify-duckdb.sh target/release/deps/libduckdb.dylib
+./scripts/verify-duckdb.sh "$DUCKDB_LIB_DIR/libduckdb.dylib"
 # The GPLv3, and the licences and notices of everything built in.
 cp LICENSE "$app/Contents/Resources/LICENSE"
 python3 scripts/third-party-notices.py "$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
-lipo target/release/deps/libduckdb.dylib -thin arm64 -output "$app/Contents/Frameworks/libduckdb.dylib"
+lipo "$DUCKDB_LIB_DIR/libduckdb.dylib" -thin arm64 -output "$app/Contents/Frameworks/libduckdb.dylib"
 
 # Icon: compile the layered Icon Composer icon. macOS 26 renders its light, dark, clear and
 # tinted looks from Assets.car; AppIcon.icns is the fallback for older systems.

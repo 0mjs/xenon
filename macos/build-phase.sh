@@ -6,6 +6,9 @@ export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 root="$SRCROOT/.."
 cd "$root"
 
+# DuckDB's library from its archive, checked before it's unzipped (the duckdb crate's own
+# download would unzip it first, with a zip crate that has advisories against it).
+eval "$(./scripts/ci-duckdb.sh)"
 cargo build --release --locked -p xenon
 
 mkdir -p "$(dirname "$TARGET_BUILD_DIR/$EXECUTABLE_PATH")" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
@@ -14,13 +17,13 @@ cp target/release/xenon "$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
 # DuckDB's library, Apple silicon only, signed like the app (Xcode re-signs it on export).
 frameworks="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
 mkdir -p "$frameworks"
-./scripts/verify-duckdb.sh target/release/deps/libduckdb.dylib
+./scripts/verify-duckdb.sh "$DUCKDB_LIB_DIR/libduckdb.dylib"
 # The GPLv3, and the licences and notices of everything built in.
 resources="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 mkdir -p "$resources"
 cp LICENSE "$resources/LICENSE"
 python3 scripts/third-party-notices.py "$resources/THIRD-PARTY-NOTICES.txt"
-lipo target/release/deps/libduckdb.dylib -thin arm64 -output "$frameworks/libduckdb.dylib"
+lipo "$DUCKDB_LIB_DIR/libduckdb.dylib" -thin arm64 -output "$frameworks/libduckdb.dylib"
 if [[ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
   codesign --force --options runtime --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$frameworks/libduckdb.dylib"
 fi

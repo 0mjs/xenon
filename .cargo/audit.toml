@@ -4,9 +4,10 @@
 ignore = [
     # zip < 9: extracting an archive can set SUID bits, follow or create links out of the
     # target folder. Xenon never extracts: the app only writes zips (rust_xlsxwriter, for
-    # Excel export), and libduckdb-sys extracts DuckDB's archive at build time, which
-    # scripts/verify-duckdb.sh then checks against its published checksum. Both crates
-    # pin zip 8 / 6 for now.
+    # Excel export). CI and release builds fetch DuckDB's archive with scripts/ci-duckdb.sh,
+    # which checks it against its pinned checksum before unzipping it (with unzip, not the
+    # zip crate); only development builds let libduckdb-sys download and extract it. Both
+    # crates pin zip 8 / 6 for now.
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",

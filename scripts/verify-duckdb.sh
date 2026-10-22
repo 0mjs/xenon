@@ -8,7 +8,7 @@
 #   scripts/verify-duckdb.sh --zip <archive.zip>  (the downloaded archive)
 set -euo pipefail
 
-# DuckDB 1.5.6.
+# DuckDB 1.5.6. On a bump, refresh assets/licenses/duckdb-<version> from its source too.
 DYLIB_SHA256=75a519cb914ae36ca22cff0995a8a2e8c9a46990b8c0a479514f741a0d93f344
 OSX_ZIP_SHA256=e0bc007d9b0094c0970ac1847a8601d10aad07cbd2910ce586ec810f77b638d6
 LINUX_ZIP_SHA256=b845005f5132a7d8180057c35e14a7626632258782f871a90861b19c1c03841b

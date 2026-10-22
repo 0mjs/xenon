@@ -9,3 +9,4 @@ xcuserdata/
 /.private
 /HARDENING.md
 /dev/fleet/tls
+__pycache__/

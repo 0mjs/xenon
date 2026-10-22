@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes to the repository, whatever the repo default says.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -43,7 +47,7 @@ jobs:
         env:
           XENON_TEST_PG_URL: postgres://xenon:xenon@127.0.0.1:55432/shop
         run: >
-          cargo test
+          cargo test --locked
           -p xenon_driver -p xenon_sqlite -p xenon_duckdb -p xenon_postgres -p xenon_mysql -p xenon_mssql -p xenon_edit
           -p xenon_ssh
           --no-fail-fast -- --include-ignored
@@ -70,11 +74,12 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-audit
-      - run: cargo audit
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Yanked and unsound crates fail it too; unmaintained ones only warn.
+      - run: cargo audit --deny yanked --deny unsound
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
       # Headless screens that also check the UI's guards (production prompts,
       # Fetch all, scripts rolled back, quit with a transaction open).
-      - run: cargo test -p xenon_ui -- --ignored snapshots hardening
+      - run: cargo test --locked -p xenon_ui -- --ignored snapshots hardening
       # Saved passwords live in the Keychain.
-      - run: cargo test -p xenon_store keychain -- --ignored
+      - run: cargo test --locked -p xenon_store keychain -- --ignored

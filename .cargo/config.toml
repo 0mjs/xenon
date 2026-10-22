@@ -1,4 +1,6 @@
 [env]
 # Link DuckDB's prebuilt library (downloaded once into target/) instead of
-# compiling its C++ from source, which takes many minutes at full CPU.
+# compiling its C++ from source, which takes many minutes at full CPU. For
+# development only: CI and release builds fetch and check it first
+# (scripts/ci-duckdb.sh), and DUCKDB_LIB_DIR then wins over this.
 DUCKDB_DOWNLOAD_LIB = "1"

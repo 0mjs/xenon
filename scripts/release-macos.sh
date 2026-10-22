@@ -10,8 +10,19 @@ cd "$(dirname "$0")/.."
 version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 # A release is built from exactly what's committed (the commit it's tagged at),
 # with the locked dependencies and the pinned toolchain (rust-toolchain.toml).
-if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-  echo "commit or stash your changes first: a release is built from a commit" >&2
+# Untracked files count: cargo would build an untracked build.rs into it.
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "commit, stash or remove your changes first: a release is built from a commit" >&2
+  git status --short >&2
+  exit 1
+fi
+tag=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+if [[ "$tag" != "v$version" ]]; then
+  echo "tag this commit v$version first (it's ${tag:-not tagged}): a release is built from its tag" >&2
+  exit 1
+fi
+if [[ "$(git ls-remote origin "refs/tags/v$version" | cut -f1)" != "$(git rev-parse "v$version")" ]]; then
+  echo "push the tag first: origin's v$version isn't this one" >&2
   exit 1
 fi
 echo "commit $(git rev-parse --short HEAD), $(rustc --version)"
@@ -55,3 +66,6 @@ ln -s /Applications "$staging/Applications"
 rm -f "$dmg"
 hdiutil create -quiet -volname "Xenon ${version}" -srcfolder "$staging" -ov -format UDZO "$dmg"
 echo "built $dmg"
+# For the release notes: what to check the download against.
+echo "sha256 $(shasum -a 256 "$dmg" | cut -d' ' -f1)  Xenon-${version}.dmg"
+echo "signed by team H8USX7F5CF (codesign -dv Xenon.app)"
