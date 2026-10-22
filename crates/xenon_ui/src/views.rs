@@ -40,16 +40,9 @@ const JSON_ROWS: usize = 5_000;
 
 /// The JSON view's editor, and which rows (and order) it shows.
 pub(crate) struct JsonView {
-    key: (usize, usize, bool),
+    key: (crate::results::ResultKey, bool),
     pub editor: Entity<EditorState>,
     pub truncated: bool,
-}
-
-fn key(grid: &Grid) -> (usize, usize) {
-    (
-        Arc::as_ptr(&grid.data) as usize,
-        Arc::as_ptr(&grid.order()) as usize,
-    )
 }
 
 /// JSON laid out with two-space indents, one value per line, without parsing
@@ -145,8 +138,7 @@ impl Workspace {
         let Some(grid) = &tab.grid else {
             return;
         };
-        let (data, order) = key(grid);
-        let key = (data, order, tab.json_compact);
+        let key = (grid.key(), tab.json_compact);
         if tab.json.as_ref().is_some_and(|j| j.key == key) {
             return;
         }

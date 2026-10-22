@@ -138,12 +138,13 @@ pub fn parse_url(url: &str) -> Result<ConnectOptions> {
 }
 
 /// A client certificate bundled as a PKCS#12 file (owner-only, in the temp
-/// folder), which native-TLS needs; deleted when the connection is.
+/// folder), which native-TLS needs; deleted when the connection is. Its
+/// password is random and only in memory, so one a crash leaves behind can't
+/// be opened.
 struct Identity {
     path: std::path::PathBuf,
+    password: String,
 }
-
-const IDENTITY_PASSWORD: &str = "xenon";
 
 impl Identity {
     fn bundle(cert: &str, key: &str) -> Result<Self> {
@@ -161,6 +162,10 @@ impl Identity {
             "client key",
         )?;
         let bundle_error = |_| anyhow!("Couldn't bundle the client certificate and key.");
+        let mut random = [0u8; 24];
+        use std::io::Read as _;
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+        let password: String = random.iter().map(|b| format!("{b:02x}")).collect();
         let mut store = p12_keystore::KeyStore::new();
         store.add_entry(
             "xenon",
@@ -173,7 +178,7 @@ impl Identity {
         // Triple DES and a SHA-1 MAC: what both OpenSSL 3 and macOS read (not
         // the RC2 some tools still write, which OpenSSL 3 refuses).
         let der = store
-            .writer(IDENTITY_PASSWORD)
+            .writer(&password)
             .encryption_algorithm(p12_keystore::EncryptionAlgorithm::PbeWithShaAnd3KeyTripleDesCbc)
             .mac_algorithm(p12_keystore::MacAlgorithm::HmacSha1)
             .write()
@@ -193,7 +198,7 @@ impl Identity {
             .mode(0o600)
             .open(&path)?
             .write_all(&der)?;
-        Ok(Self { path })
+        Ok(Self { path, password })
     }
 }
 
@@ -357,7 +362,7 @@ impl MysqlConnection {
                         .map(|p| std::path::PathBuf::from(expand_home(&p))),
                 )
                 .with_client_identity(identity.as_ref().map(|i| {
-                    mysql::ClientIdentity::new(i.path.clone()).with_password(IDENTITY_PASSWORD)
+                    mysql::ClientIdentity::new(i.path.clone()).with_password(i.password.clone())
                 }));
             match mode {
                 SslMode::Disable => None,

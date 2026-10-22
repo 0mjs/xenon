@@ -74,7 +74,7 @@ const MIN_EDITOR_HEIGHT: f32 = 72.;
 /// Space always left for the results below a dragged editor.
 const MIN_RESULTS_HEIGHT: f32 = 180.;
 /// What totals were worked out for: the rows, their order, and the selection.
-type StatsKey = (usize, usize, Selection);
+type StatsKey = (crate::results::ResultKey, Selection);
 
 /// What a failed query got wrong: where, and what was likely meant.
 pub(crate) struct ErrorHint {
@@ -3105,11 +3105,7 @@ impl Workspace {
     pub(crate) fn selection_totals(&self) -> Option<crate::stats::Stats> {
         let tab = self.active_tab();
         let (grid, selection) = (tab.grid.as_ref()?, tab.selection?);
-        let key = (
-            Arc::as_ptr(&grid.data) as usize,
-            Arc::as_ptr(&grid.order()) as usize,
-            selection,
-        );
+        let key = (grid.key(), selection);
         if let Some((cached, stats)) = &*self.selection_stats.borrow()
             && *cached == key
         {

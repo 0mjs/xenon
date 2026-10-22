@@ -636,8 +636,8 @@ impl Connection for PostgresConnection {
 
         let mut schemas: Vec<Schema> = Vec::new();
         for row in rows {
-            let schema: String = row.get(0);
-            let table: String = row.get(1);
+            let schema: String = field(&row, 0);
+            let table: String = field(&row, 1);
             if schemas.last().is_none_or(|s| s.name != schema) {
                 schemas.push(Schema {
                     name: schema,
@@ -646,7 +646,7 @@ impl Connection for PostgresConnection {
             }
             let objects = &mut schemas.last_mut().expect("pushed above").objects;
             if objects.last().is_none_or(|o| o.name != table) {
-                let kind: String = row.get(2);
+                let kind: String = field(&row, 2);
                 objects.push(SchemaObject {
                     name: table,
                     kind: if kind == "v" || kind == "m" {
@@ -664,9 +664,9 @@ impl Connection for PostgresConnection {
                     .columns
                     .push(ObjectColumn {
                         name: column,
-                        type_name: row.get(4),
-                        not_null: row.get(5),
-                        primary_key: row.get(6),
+                        type_name: field(&row, 4),
+                        not_null: field(&row, 5),
+                        primary_key: field(&row, 6),
                     });
             }
         }
@@ -743,12 +743,12 @@ impl Connection for PostgresConnection {
                 .map_err(describe_error)?
             {
                 info.columns.push(ColumnInfo {
-                    name: row.get(0),
-                    type_name: row.get(1),
-                    nullable: row.get(2),
-                    default: row.get(3),
-                    primary_key: row.get(4),
-                    comment: row.get(5),
+                    name: field(&row, 0),
+                    type_name: field(&row, 1),
+                    nullable: field(&row, 2),
+                    default: field(&row, 3),
+                    primary_key: field(&row, 4),
+                    comment: field(&row, 5),
                     options: row.get::<_, Option<Vec<String>>>(6).unwrap_or_default(),
                 });
             }
@@ -759,10 +759,10 @@ impl Connection for PostgresConnection {
                 .map_err(describe_error)?
             {
                 info.indexes.push(IndexInfo {
-                    name: row.get(0),
-                    unique: row.get(1),
-                    primary: row.get(2),
-                    columns: row.get(3),
+                    name: field(&row, 0),
+                    unique: field(&row, 1),
+                    primary: field(&row, 2),
+                    columns: field(&row, 3),
                 });
             }
             for row in self
@@ -772,15 +772,15 @@ impl Connection for PostgresConnection {
                 .map_err(describe_error)?
             {
                 let key = ForeignKey {
-                    name: row.get(0),
-                    schema: row.get(1),
-                    table: row.get(2),
-                    columns: row.get(3),
-                    ref_schema: row.get(4),
-                    ref_table: row.get(5),
-                    ref_columns: row.get(6),
-                    on_delete: action(row.get(7)),
-                    on_update: action(row.get(8)),
+                    name: field(&row, 0),
+                    schema: field(&row, 1),
+                    table: field(&row, 2),
+                    columns: field(&row, 3),
+                    ref_schema: field(&row, 4),
+                    ref_table: field(&row, 5),
+                    ref_columns: field(&row, 6),
+                    on_delete: action(&field::<String>(&row, 7)),
+                    on_update: action(&field::<String>(&row, 8)),
                 };
                 if key.ref_schema == schema && key.ref_table == table {
                     info.referenced_by.push(key.clone());
@@ -794,7 +794,7 @@ impl Connection for PostgresConnection {
                 .query_opt(VIEW, &params)
                 .await
                 .map_err(describe_error)?
-                .and_then(|row| row.get(0));
+                .and_then(|row| row.try_get(0).ok().flatten());
             // -1 until the table has been analyzed.
             info.estimated_rows = self
                 .client
@@ -806,7 +806,7 @@ impl Connection for PostgresConnection {
                 )
                 .await
                 .map_err(describe_error)?
-                .and_then(|row| u64::try_from(row.get::<_, i64>(0)).ok());
+                .and_then(|row| u64::try_from(row.try_get::<_, i64>(0).ok()?).ok());
             Ok(info)
         })
     }
@@ -1111,6 +1111,19 @@ fn default_literal(value: &Value) -> String {
         Value::Text(text) => format!("'{}'", text.replace('\'', "''")),
         Value::Blob(bytes) => format!("decode('{}', 'hex')", xenon_driver::hex(bytes)),
     }
+}
+
+/// Column `ix` of a catalog row, or its type's empty value when it's NULL or
+/// not what's expected: a Postgres-compatible server (or a table dropped
+/// meanwhile) shouldn't bring Xenon down.
+fn field<T>(row: &tokio_postgres::Row, ix: usize) -> T
+where
+    T: Default + for<'a> tokio_postgres::types::FromSql<'a>,
+{
+    row.try_get::<_, Option<T>>(ix)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

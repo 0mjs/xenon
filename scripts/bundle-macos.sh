@@ -12,6 +12,9 @@ cd "$(dirname "$0")/.."
 # DuckDB's library from its archive, checked before it's unzipped (the duckdb crate's own
 # download would unzip it first, with a zip crate that has advisories against it).
 eval "$(./scripts/ci-duckdb.sh)"
+# Built for the app bundle: no development rpath, and no paths from this Mac in the binary.
+export XENON_BUNDLE=1
+export RUSTFLAGS="--remap-path-prefix=$HOME/.cargo/registry/src=/cargo --remap-path-prefix=$HOME/.cargo/git/checkouts=/cargo-git --remap-path-prefix=$HOME/.rustup=/rustup --remap-path-prefix=$PWD=/xenon"
 cargo build --release --locked -p xenon
 version=$(cargo metadata --no-deps --format-version 1 \
   | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="xenon"))')

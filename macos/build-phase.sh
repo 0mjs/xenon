@@ -9,6 +9,9 @@ cd "$root"
 # DuckDB's library from its archive, checked before it's unzipped (the duckdb crate's own
 # download would unzip it first, with a zip crate that has advisories against it).
 eval "$(./scripts/ci-duckdb.sh)"
+# Built for the app bundle: no development rpath, and no paths from this Mac in the binary.
+export XENON_BUNDLE=1
+export RUSTFLAGS="--remap-path-prefix=$HOME/.cargo/registry/src=/cargo --remap-path-prefix=$HOME/.cargo/git/checkouts=/cargo-git --remap-path-prefix=$HOME/.rustup=/rustup --remap-path-prefix=$PWD=/xenon"
 cargo build --release --locked -p xenon
 
 mkdir -p "$(dirname "$TARGET_BUILD_DIR/$EXECUTABLE_PATH")" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"

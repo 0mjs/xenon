@@ -104,6 +104,14 @@ impl Grid {
         self.order.clone()
     }
 
+    /// What a cache worked out from these rows, in this order, is kept under.
+    pub(crate) fn key(&self) -> ResultKey {
+        ResultKey {
+            data: self.data.clone(),
+            order: self.order.clone(),
+        }
+    }
+
     /// The data row shown at display position `ix`.
     pub fn row(&self, ix: usize) -> &[Value] {
         &self.data.rows[self.order[ix]]
@@ -996,6 +1004,21 @@ fn fit(text: &str, width: f32) -> String {
         out.push(if c == '\n' { '⏎' } else { c });
     }
     out
+}
+
+/// The rows and order a cache was worked out from. It holds them, so they
+/// can't be freed and their addresses reused by the next result, and compares
+/// by identity.
+#[derive(Clone)]
+pub(crate) struct ResultKey {
+    data: Arc<ResultSet>,
+    order: Arc<Vec<usize>>,
+}
+
+impl PartialEq for ResultKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.data, &other.data) && Arc::ptr_eq(&self.order, &other.order)
+    }
 }
 
 #[cfg(test)]

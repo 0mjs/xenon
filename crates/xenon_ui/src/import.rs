@@ -15,7 +15,7 @@ use crate::widgets::{self, ButtonKind};
 use crate::workspace::Workspace;
 
 /// What a pasted list would import.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Plan {
     /// New connections, with the password their URL carried.
     pub new: Vec<(SavedConnection, String)>,
@@ -23,6 +23,18 @@ pub(crate) struct Plan {
     pub duplicates: usize,
     /// Line numbers (from 1) that weren't recognised.
     pub unrecognised: Vec<usize>,
+}
+
+// By hand: the passwords stay out of it.
+impl std::fmt::Debug for Plan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let new: Vec<&SavedConnection> = self.new.iter().map(|(saved, _)| saved).collect();
+        f.debug_struct("Plan")
+            .field("new", &new)
+            .field("duplicates", &self.duplicates)
+            .field("unrecognised", &self.unrecognised)
+            .finish()
+    }
 }
 
 /// Read a pasted list against the connections already saved.

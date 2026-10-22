@@ -342,7 +342,7 @@ impl SslMode {
 
 /// Settings for a server connection, as entered in a form or parsed from a URL.
 /// Empty fields mean the engine's default (e.g. `localhost`, its usual port).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct ConnectOptions {
     pub host: String,
     pub port: Option<u16>,
@@ -411,7 +411,7 @@ impl TlsFiles {
 /// An SSH server to tunnel through. Anything left empty comes from
 /// `~/.ssh/config` (so `host` can be an alias there) or ssh's own defaults;
 /// keys come from the agent or the config unless `key_file` is set.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct SshOptions {
     pub host: String,
     pub port: Option<u16>,
@@ -419,6 +419,41 @@ pub struct SshOptions {
     pub key_file: String,
     /// The SSH password, or the key's passphrase. Kept in the Keychain.
     pub password: String,
+}
+
+/// Whether a secret is set, for `Debug`: never the secret itself.
+fn redacted(secret: &str) -> &'static str {
+    if secret.is_empty() { "" } else { "<redacted>" }
+}
+
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &redacted(&self.password))
+            .field("ssl", &self.ssl)
+            .field("read_only", &self.read_only)
+            .field("ssh", &self.ssh)
+            .field("address", &self.address)
+            .field("lock_timeout", &self.lock_timeout)
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SshOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("key_file", &self.key_file)
+            .field("password", &redacted(&self.password))
+            .finish()
+    }
 }
 
 /// A private key as PKCS#8 PEM, which native-TLS wants: PKCS#8 as is, an RSA
@@ -671,6 +706,21 @@ pub fn qualified_name(conn: &dyn Connection, schema: Option<&str>, table: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_never_shows_a_password() {
+        let options = ConnectOptions {
+            password: "db-secret".into(),
+            ssh: Some(SshOptions {
+                password: "ssh-secret".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let shown = format!("{options:?}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("<redacted>"));
+    }
 
     #[test]
     fn rsa_keys_convert_to_pkcs8_as_openssl_does() {
