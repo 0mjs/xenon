@@ -71,7 +71,7 @@ jobs:
 
       - run: cargo fmt --all --check
       # Known vulnerabilities in what's locked (RustSec): a new one fails the build.
-      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-audit
       # Yanked and unsound crates fail it too; unmaintained ones only warn.
